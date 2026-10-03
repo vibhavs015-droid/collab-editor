@@ -197,7 +197,12 @@ describe('RgaDocument - operation application', () => {
   it('defers an insert whose anchor has not arrived', () => {
     const doc = new RgaDocument('bob');
 
-    const child: InsertOp = { type: 'insert', id: id('alice', 2), origin: id('alice', 1), value: 'B' };
+    const child: InsertOp = {
+      type: 'insert',
+      id: id('alice', 2),
+      origin: id('alice', 1),
+      value: 'B',
+    };
     const parent: InsertOp = { type: 'insert', id: id('alice', 1), origin: null, value: 'A' };
 
     // Child first: unplaceable on its own, so applyInAnyOrder defers it.
@@ -437,7 +442,7 @@ describe('RgaDocument - undo and redo', () => {
     expect(doc.redo()).toEqual([]);
   });
 
-  it('never undoes another site\'s edits', () => {
+  it("never undoes another site's edits", () => {
     // The critical property: Alice undoing must never touch what Bob typed.
     const alice = new RgaDocument('alice');
     const bob = new RgaDocument('bob');
@@ -499,7 +504,7 @@ describe('RgaDocument - undo and redo', () => {
 });
 
 describe('RgaDocument - three-way undo safety', () => {
-  it('does not lose a collaborator\'s text when undoing a delete', () => {
+  it("does not lose a collaborator's text when undoing a delete", () => {
     // Alice deletes 'cat'. Bob concurrently edits nearby text. Alice's undo
     // re-inserts with a fresh ID and must not disturb Bob's work.
     const alice = new RgaDocument('alice');

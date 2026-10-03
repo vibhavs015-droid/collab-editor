@@ -29,11 +29,19 @@ export type SiteId = string;
 /** A per-replica monotonic counter. */
 export type Clock = number;
 
-/** Uniquely identifies a single inserted character in the document. */
-export interface ElementId {
+/**
+ * Uniquely identifies a single inserted character in the document.
+ *
+ * A type alias rather than an interface, because TypeScript infers an implicit
+ * index signature for object type aliases but not for interfaces. ElementId is
+ * nested inside an Operation, and an operation has to be assignable to the wire
+ * type JsonValue so it can be sent without a cast. An interface at this level
+ * would break that all the way up the chain.
+ */
+export type ElementId = {
   readonly site: SiteId;
   readonly clock: Clock;
-}
+};
 
 /**
  * Total order over element IDs.

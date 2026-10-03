@@ -105,9 +105,7 @@ function runScenario(seed: number, replicaCount: number): string | null {
   // Final exchange: every replica receives every operation in its own random
   // order. This is the condition convergence is defined over.
   for (const replica of replicas) {
-    const unplaced = replica.applyInAnyOrder(
-      shuffle(produced, random).map((entry) => entry.op),
-    );
+    const unplaced = replica.applyInAnyOrder(shuffle(produced, random).map((entry) => entry.op));
 
     if (unplaced > 0) {
       return `seed=${seed}: ${unplaced} operation(s) unplaceable during final exchange`;
@@ -332,7 +330,9 @@ describe('convergence under specific hostile orderings', () => {
           return `diverged: "${forward.toText()}" vs "${backward.toText()}"`;
         }
 
-        return forward.tombstoneCount === 17 ? null : `expected 17 tombstones, got ${forward.tombstoneCount}`;
+        return forward.tombstoneCount === 17
+          ? null
+          : `expected 17 tombstones, got ${forward.tombstoneCount}`;
       },
     },
   ];

@@ -28,14 +28,16 @@ complexity.
 
 ## Current decisions
 
-| #                                                    | Decision                                                            | Status   |
-| ---------------------------------------------------- | ------------------------------------------------------------------- | -------- |
-| [0001](./adr/0001-local-first-architecture.md)       | Local-first: device is authoritative, server is a sync optimisation | Accepted |
-| [0002](./adr/0002-single-package-layout.md)          | Single package, not an npm workspaces monorepo                      | Accepted |
-| [0003](./adr/0003-element-identity-site-clock.md)    | Element identity is `(site, clock)`, ordered with a total order     | Accepted |
-| [0004](./adr/0004-envelope-vs-payload-validation.md) | Transport validates message shape; the CRDT validates operations    | Accepted |
-| [0005](./adr/0005-codemirror-not-handrolled.md)      | CodeMirror 6 for editing; the CRDT stays hand-written               | Accepted |
-| [0006](./adr/0006-pglite-for-local-and-ci.md)        | PGlite (real Postgres, WASM) for local and CI; Supabase in prod     | Accepted |
+| #                                                             | Decision                                                            | Status   |
+| ------------------------------------------------------------- | ------------------------------------------------------------------- | -------- |
+| [0001](./adr/0001-local-first-architecture.md)                | Local-first: device is authoritative, server is a sync optimisation | Accepted |
+| [0002](./adr/0002-single-package-layout.md)                   | Single package, not an npm workspaces monorepo                      | Accepted |
+| [0003](./adr/0003-element-identity-site-clock.md)             | Element identity is `(site, clock)`, ordered with a total order     | Accepted |
+| [0004](./adr/0004-envelope-vs-payload-validation.md)          | Transport validates message shape; the CRDT validates operations    | Accepted |
+| [0005](./adr/0005-codemirror-not-handrolled.md)               | CodeMirror 6 for editing; the CRDT stays hand-written               | Accepted |
+| [0006](./adr/0006-pglite-for-local-and-ci.md)                 | PGlite (real Postgres, WASM) for local and CI; Supabase in prod     | Accepted |
+| [0007](./adr/0007-server-is-a-relay-not-a-merge-authority.md) | Server relays; it never merges                                      | Accepted |
+| [0008](./adr/0008-jittered-backoff-for-reconnection.md)       | Jittered exponential backoff for reconnection                       | Accepted |
 
 ## Writing a new ADR
 

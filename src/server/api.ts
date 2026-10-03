@@ -11,6 +11,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
 
 import type { Database } from './db.js';
 import type { DocumentRecord } from './db.js';
@@ -37,12 +38,30 @@ const MAX_BODY_BYTES = 1_000_000;
 /** Documents a single client may create before being rejected. */
 const MAX_CREATE_PER_HOUR = 60;
 
+/**
+ * Handles an HTTP `upgrade` request by handing the socket to the WebSocket
+ * server, scoped to the document named in the query string.
+ */
+export interface UpgradeHandler {
+  readonly path: string;
+  /**
+   * @param request the HTTP upgrade request, carrying the document id.
+   * @param socket the raw socket, already validated.
+   * @param upgradeHead bytes already read from the socket before the listener
+   *   ran. Must be forwarded to `handleUpgrade`, or the first WebSocket frame is
+   *   silently truncated.
+   */
+  readonly handle: (request: IncomingMessage, socket: Duplex, upgradeHead: Buffer) => void;
+}
+
 export class ApiServer {
   readonly #db: Database;
   readonly #host: string;
   readonly #port: number;
   readonly #onListen: ((address: { host: string; port: number }) => void) | undefined;
   readonly #server: Server;
+  /** Registered upgrade routes, checked before any request is handled. */
+  readonly #upgrades: UpgradeHandler[] = [];
   #createTimestamps: number[] = [];
 
   constructor(options: ApiServerOptions) {
@@ -53,6 +72,50 @@ export class ApiServer {
     this.#server = createServer((req, res) => {
       void this.#handle(req, res);
     });
+
+    // Upgrade requests bypass the request handler entirely, so they need their
+    // own listener. Handling them here rather than on a second port keeps the
+    // client on one origin, which means no CORS and no second deployment unit.
+    this.#server.on('upgrade', (req, socket, head) => {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+
+      for (const upgrade of this.#upgrades) {
+        if (url.pathname !== upgrade.path) {
+          continue;
+        }
+
+        const documentId = url.searchParams.get('doc') ?? 'default';
+
+        // Validate before handing over the socket. An upgrade naming an
+        // unusable document is a client bug; destroying the socket is the
+        // correct response, because leaving it open leaks a connection per bad
+        // request and the client waits forever for a reply it will never get.
+        if (!DOCUMENT_ID_PATTERN.test(documentId)) {
+          socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+
+        // The request travels with the socket: `ws.handleUpgrade` needs it to
+        // complete the handshake, and it is where the document id already lives.
+        upgrade.handle(req, socket, head);
+        return;
+      }
+
+      socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+    });
+  }
+
+  /**
+   * Register an upgrade route.
+   *
+   * @param path e.g. `/ws`.
+   * @param handle receives the raw socket, which the caller hands to its own
+   *   WebSocket server via `handleUpgrade`.
+   */
+  onUpgrade(path: string, handle: UpgradeHandler['handle']): void {
+    this.#upgrades.push({ path, handle });
   }
 
   async listen(): Promise<{ host: string; port: number }> {

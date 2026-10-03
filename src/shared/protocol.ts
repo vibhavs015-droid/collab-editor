@@ -16,13 +16,31 @@
  * protects the server.
  */
 
-/** Every JSON value, used to keep payloads structurally serialisable. */
+/**
+ * Every JSON value.
+ *
+ * The index signature is READ-ONLY and permits `undefined`. That is deliberate:
+ * a mutable `{ [key: string]: JsonValue }` cannot accept an interface like
+ * `InsertOp`, because TypeScript does not infer index signatures for interfaces
+ * and the interface has no mutation methods. A read-only signature accepts any
+ * object whose properties are readable as JSON, which is exactly what an
+ * operation sent over the wire is.
+ */
 export type JsonValue =
-  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { readonly [key: string]: JsonValue | undefined };
 
 /**
- * A CRDT operation. Opaque here by design — Phase 2 defines the concrete
- * insert/delete union and narrows this type.
+ * An operation as it appears on the wire: opaque JSON.
+ *
+ * Deliberately NOT imported from src/core. The transport stays independent of the
+ * CRDT so the two can be reasoned about separately (ADR-0004). Narrowing to a
+ * real operation happens in operation-validation.ts, which is where a cast would
+ * otherwise have been needed.
  */
 export type Operation = JsonValue;
 

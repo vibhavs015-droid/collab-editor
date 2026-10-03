@@ -51,23 +51,37 @@
  * text, which is the worst possible failure for a document editor.
  */
 
-import { LogicalClock, elementIdKey, formatElementId, type ElementId, type SiteId } from '../clock.js';
+import {
+  LogicalClock,
+  elementIdKey,
+  formatElementId,
+  type ElementId,
+  type SiteId,
+} from '../clock.js';
 
 /** Where an insert is anchored. `null` means the document start. */
 export type Origin = ElementId | null;
 
-export interface InsertOp {
+/*
+ * Declared as type aliases rather than interfaces, deliberately.
+ *
+ * TypeScript infers an implicit index signature for an object *type alias* but
+ * not for an interface. Operations must be assignable to the wire type
+ * `JsonValue`, which is how a real operation gets sent without a cast. An
+ * interface here would force `as unknown as JsonValue` at every send site.
+ */
+export type InsertOp = {
   readonly type: 'insert';
   readonly id: ElementId;
   readonly origin: Origin;
   readonly value: string;
-}
+};
 
-export interface DeleteOp {
+export type DeleteOp = {
   readonly type: 'delete';
   /** The element to tombstone. */
   readonly target: ElementId;
-}
+};
 
 export type Operation = InsertOp | DeleteOp;
 
@@ -249,7 +263,9 @@ export class RgaDocument {
     }
 
     const ops: DeleteOp[] = [];
-    let offset = start;
+    // The offset deliberately does not advance: the element just deleted becomes
+    // a tombstone, so the next visible character moves into this same offset.
+    const offset = start;
 
     for (let i = 0; i < length; i += 1) {
       const target = this.#visibleIdAt(offset);
@@ -446,7 +462,7 @@ export class RgaDocument {
 
     this.#suppressUndoRecording = true;
 
-    let reversed = { applied: [] as Operation[], redoOps: [] as Operation[] };
+    let reversed: { applied: Operation[]; redoOps: Operation[] };
 
     try {
       reversed = this.#reverse(entry.ops);

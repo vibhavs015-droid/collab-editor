@@ -85,11 +85,15 @@ export default tseslint.config(
           patterns: [
             {
               group: ['node:*'],
-              message: 'src/core must stay pure — no Node built-ins.',
+              message: 'src/core must stay pure - no Node built-ins.',
             },
             {
-              group: ['*'],
-              message: 'src/core must stay pure — no external dependencies at all.',
+              // Only bare specifiers are banned. Relative imports (./, ../) stay
+              // allowed, because src/core is a directory of modules that must
+              // import each other. Banning '*' outright also matched the
+              // relative paths, which made the rule unusable rather than strict.
+              group: ['^[^./]'],
+              message: 'src/core must stay pure - no external dependencies at all.',
             },
           ],
         },

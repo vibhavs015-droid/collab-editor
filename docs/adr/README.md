@@ -24,14 +24,16 @@ infer from code.
 
 ## Index
 
-| #                                                | Title                                  | Status   |
-| ------------------------------------------------ | -------------------------------------- | -------- |
-| [0001](./0001-local-first-architecture.md)       | Local-first architecture               | Accepted |
-| [0002](./0002-single-package-layout.md)          | Single package, not a monorepo         | Accepted |
-| [0003](./0003-element-identity-site-clock.md)    | Element identity is `(site, clock)`    | Accepted |
-| [0004](./0004-envelope-vs-payload-validation.md) | Envelope vs. payload validation split  | Accepted |
-| [0005](./0005-codemirror-not-handrolled.md)      | CodeMirror 6, not a hand-rolled editor | Accepted |
-| [0006](./0006-pglite-for-local-and-ci.md)        | PGlite for local/CI, Supabase in prod  | Accepted |
+| #                                                         | Title                                  | Status   |
+| --------------------------------------------------------- | -------------------------------------- | -------- |
+| [0001](./0001-local-first-architecture.md)                | Local-first architecture               | Accepted |
+| [0002](./0002-single-package-layout.md)                   | Single package, not a monorepo         | Accepted |
+| [0003](./0003-element-identity-site-clock.md)             | Element identity is `(site, clock)`    | Accepted |
+| [0004](./0004-envelope-vs-payload-validation.md)          | Envelope vs. payload validation split  | Accepted |
+| [0005](./0005-codemirror-not-handrolled.md)               | CodeMirror 6, not a hand-rolled editor | Accepted |
+| [0006](./0006-pglite-for-local-and-ci.md)                 | PGlite for local/CI, Supabase in prod  | Accepted |
+| [0007](./0007-server-is-a-relay-not-a-merge-authority.md) | Server relays, never merges            | Accepted |
+| [0008](./0008-jittered-backoff-for-reconnection.md)       | Jittered exponential backoff           | Accepted |
 
 ## Planned
 
@@ -42,8 +44,8 @@ decision is actually made.
 | ----- | --------------------------------------------------------- |
 | 2     | Undo semantics without undoing a collaborator's work      |
 | 2     | Tombstone garbage collection strategy                     |
-| 3     | Server fanout: single process vs. pub/sub broker          |
-| 3     | Sync transport: raw WebSocket vs. Socket.IO               |
+| 4     | Sync transport: raw WebSocket vs. Socket.IO               |
+| 4     | Server fanout: single process vs. pub/sub broker          |
 | 4     | Local storage engine: IndexedDB vs. SQLite/WASM           |
 | 5     | Observability stack                                       |
 | 6     | Differentiator: benchmark suite vs. end-to-end encryption |
