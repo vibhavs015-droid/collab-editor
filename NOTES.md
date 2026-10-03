@@ -138,10 +138,43 @@ toolchain underneath it has known holes.
 ## Log
 
 - **Phase 0** — Toolchain, strict TS, CI, and the `(site, clock)` element ID
-  primitive with a total-order test. 27 tests passing, 97.6% statement
-  coverage, 100% branch coverage, zero dependency vulnerabilities.
+  primitive with a total-order test. 39 tests passing, 97.3% statement
+  coverage, zero dependency vulnerabilities.
 
   Friction encountered and recorded above: a signed-zero test bug, the
   TypeScript 7 peer-dependency wall, `@eslint/js` versioning, and
   type-aware ESLint not seeing config files. All four are normal first-day
   problems; writing them down is faster than rediscovering them later.
+
+  Later in the phase, four problems worth recording because each would have
+  become a real defect:
+
+  - **Type guards do not narrow property access.** The first cut of
+    `parseClientMessage` used helpers like `hasString(parsed, 'token')` and
+    then read `parsed['token']` anyway. TypeScript cannot carry a narrowing
+    across that helper call, so the values stayed `unknown` and needed five
+    casts. Fixed by extracting fields to locals and narrowing each one
+    directly. This removed every `as` from the function and made it shorter —
+    the compiler was telling me the structure was wrong before I did.
+
+  - **A passing test I had not earned.** One boundary test asserted that
+    `ops: [{}]` would be rejected by the transport. It is accepted, correctly:
+    `Operation` is an opaque `JsonValue` and the envelope makes no claim about
+    contents. The test was encoding a wrong belief. Rewrote it to assert the
+    real boundary and explain where op validation belongs instead —
+    [ADR-0004](./docs/adr/0004-envelope-vs-payload-validation.md).
+
+  - **Redundant assertions are a smell, not a style issue.** `cursor as
+number | null` survived narrowing and type-aware ESLint correctly flagged
+    it. An assertion that changes nothing usually means the surrounding logic
+    is doing the work twice.
+
+  - **Version drift is the real enemy.** The first install pulled
+    `vitest@2.x` with two critical advisories. Added a CI audit gate that fails
+    on high or critical, plus Dependabot so the upgrade PR exists
+    automatically. Also pinned the Node version in `.nvmrc` and pointed CI at
+    that file, so local and CI cannot disagree.
+
+  - **Windows line endings.** Added `.gitattributes` forcing LF in the working
+    tree except for `.bat`/`.cmd`/`.ps1`. Without it, `autocrlf=true` produces
+    whole-file diffs that look like real changes and are not.

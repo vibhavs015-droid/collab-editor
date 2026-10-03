@@ -5,7 +5,7 @@
   "description": "Offline-first collaborative editor — sequence CRDT (RGA) with real-time WebSocket sync",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "dev": "tsc --watch",

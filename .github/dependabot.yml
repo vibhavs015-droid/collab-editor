@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  # Keeps dependencies patched automatically. The Phase 0 install shipped 2
+  # critical advisories via vitest; this closes that gap permanently instead
+  # of relying on someone remembering to re-run npm audit.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(deps)'
+    groups:
+      # Security fixes together, so they land as one reviewable PR.
+      security:
+        applies-to: version-updates
+        dependency-type: production
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Keeps the GitHub Actions themselves patched.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: 'chore(ci)'

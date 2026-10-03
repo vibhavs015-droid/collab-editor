@@ -1,0 +1,218 @@
+/**
+ * Sync protocol — transport envelope shared by client and server.
+ *
+ * Scope note: this file defines the *envelope* only — the shape of the
+ * messages that cross the WebSocket boundary. It deliberately does NOT define
+ * the CRDT operation types, because those are Phase 2 and guessing their API
+ * now would mean rewriting this file the moment the CRDT design changes.
+ *
+ * Layering:
+ *   envelope (this file)  → stable regardless of CRDT design
+ *   operation payload     → Phase 2, added behind `Operation` below
+ *
+ * The envelope is validated at runtime because it crosses a network boundary.
+ * TypeScript types are erased at runtime and provide no actual guarantee that
+ * an inbound message is well-formed; `parseClientMessage` is what actually
+ * protects the server.
+ */
+
+/** Every JSON value, used to keep payloads structurally serialisable. */
+export type JsonValue =
+  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+/**
+ * A CRDT operation. Opaque here by design — Phase 2 defines the concrete
+ * insert/delete union and narrows this type.
+ */
+export type Operation = JsonValue;
+
+/** Wire protocol version. Bumped when the envelope shape changes. */
+export const PROTOCOL_VERSION = 1;
+
+// ── Client → Server ──────────────────────────────────────────────────────
+
+export interface HelloMessage {
+  readonly type: 'hello';
+  readonly protocolVersion: number;
+  /** Opaque session credential. Phase 5 replaces this with a real JWT. */
+  readonly token: string;
+  readonly documentId: string;
+  /**
+   * The highest operation clock this client has already applied.
+   * Lets the server decide between sending a delta and a full snapshot.
+   */
+  readonly lastAppliedClock: number;
+}
+
+export interface SubmitOpsMessage {
+  readonly type: 'ops';
+  readonly documentId: string;
+  readonly ops: readonly Operation[];
+}
+
+export interface PresenceMessage {
+  readonly type: 'presence';
+  readonly documentId: string;
+  /** Character offset of the local cursor, if the client has focus. */
+  readonly cursor: number | null;
+  readonly selectedLength: number;
+}
+
+export interface ResyncRequestMessage {
+  readonly type: 'resync';
+  readonly documentId: string;
+}
+
+export type ClientMessage =
+  HelloMessage | SubmitOpsMessage | PresenceMessage | ResyncRequestMessage;
+
+// ── Server → Client ──────────────────────────────────────────────────────
+
+export interface WelcomeMessage {
+  readonly type: 'welcome';
+  readonly protocolVersion: number;
+  /** This client's replica identity for the session. */
+  readonly site: string;
+  readonly documentId: string;
+  /** Authoritative snapshot, used to catch a fresh client up. */
+  readonly snapshot: readonly Operation[];
+  readonly clock: number;
+}
+
+export interface OpsMessage {
+  readonly type: 'ops';
+  readonly documentId: string;
+  readonly ops: readonly Operation[];
+}
+
+export interface PresenceMessageServer {
+  readonly type: 'presence';
+  readonly documentId: string;
+  /** Map of site → cursor offset for every connected client. */
+  readonly cursors: Readonly<Record<string, number>>;
+}
+
+export interface SyncStateMessage {
+  readonly type: 'syncState';
+  readonly documentId: string;
+  /** Authoritative connection state, so the UI can show a truthful banner. */
+  readonly state: 'synced' | 'pending' | 'offline' | 'error';
+  readonly pendingOps: number;
+  readonly clock: number;
+}
+
+export interface ErrorMessage {
+  readonly type: 'error';
+  readonly code:
+    'BAD_MESSAGE' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'DOCUMENT_NOT_FOUND' | 'INTERNAL';
+  readonly message: string;
+}
+
+export type ServerMessage =
+  WelcomeMessage | OpsMessage | PresenceMessageServer | SyncStateMessage | ErrorMessage;
+
+// ── Runtime validation ───────────────────────────────────────────────────
+
+const CLIENT_MESSAGE_TYPES = new Set(['hello', 'ops', 'presence', 'resync']);
+
+/** Narrows an unknown value to an index-signature object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate an inbound client message.
+ *
+ * This is the server's only real defence. Types are erased at runtime, so an
+ * unvalidated `JSON.parse` result is effectively `any` — and a WebSocket accepts
+ * a payload from anything that can reach the port. Assume hostile input, drop
+ * anything unrecognised, and never let a malformed message reach the CRDT.
+ *
+ * Fields are extracted to locals and narrowed individually rather than guarded
+ * in place. TypeScript cannot narrow `obj['key']` across a helper call, so
+ * index-access-plus-guard forces casts; extract-then-narrow keeps the types
+ * honest and needs no `as` at all.
+ *
+ * @param raw text frame received from the socket.
+ * @returns the parsed message, or `null` if the frame is not a valid message.
+ */
+export function parseClientMessage(raw: string): ClientMessage | null {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const type = parsed['type'];
+  if (typeof type !== 'string' || !CLIENT_MESSAGE_TYPES.has(type)) {
+    return null;
+  }
+
+  const documentId = parsed['documentId'];
+
+  switch (type) {
+    case 'hello': {
+      const protocolVersion = parsed['protocolVersion'];
+      const token = parsed['token'];
+      const lastAppliedClock = parsed['lastAppliedClock'];
+
+      if (
+        typeof documentId !== 'string' ||
+        typeof token !== 'string' ||
+        typeof protocolVersion !== 'number' ||
+        !Number.isFinite(protocolVersion) ||
+        typeof lastAppliedClock !== 'number' ||
+        !Number.isFinite(lastAppliedClock)
+      ) {
+        return null;
+      }
+
+      return { type, protocolVersion, token, documentId, lastAppliedClock };
+    }
+
+    case 'ops': {
+      const ops = parsed['ops'];
+
+      if (typeof documentId !== 'string' || !Array.isArray(ops)) {
+        return null;
+      }
+
+      return { type, documentId, ops: ops as Operation[] };
+    }
+
+    case 'presence': {
+      const cursor = parsed['cursor'];
+      const selectedLength = parsed['selectedLength'];
+
+      if (
+        typeof documentId !== 'string' ||
+        typeof selectedLength !== 'number' ||
+        !Number.isFinite(selectedLength) ||
+        // null is meaningful: it means the client lost focus. Absent is not.
+        (cursor !== null && (typeof cursor !== 'number' || !Number.isFinite(cursor))) ||
+        !('cursor' in parsed)
+      ) {
+        return null;
+      }
+
+      return { type, documentId, cursor, selectedLength };
+    }
+
+    case 'resync': {
+      if (typeof documentId !== 'string') {
+        return null;
+      }
+
+      return { type, documentId };
+    }
+
+    default:
+      return null;
+  }
+}

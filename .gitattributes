@@ -1,0 +1,26 @@
+# Normalise line endings across every machine.
+#
+# Without this, Windows defaults to autocrlf=true, which converts LF to CRLF
+# on checkout. The result is noisy whole-file diffs when contributors switch
+# between operating systems, and "the file changed but nothing changed" commits.
+#
+# Rule: everything is LF in the working tree, except Windows scripts, which
+# genuinely require CRLF to execute.
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Treat these as binary — never let git try to normalise them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+
+# Lockfiles are machine-generated; never resolve merge conflicts in them by hand.
+package-lock.json linguist-generated=true -diff

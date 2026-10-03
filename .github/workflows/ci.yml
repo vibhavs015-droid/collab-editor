@@ -6,30 +6,35 @@ on:
   pull_request:
     branches: [main]
 
-# Cancel superseded runs on the same branch — saves CI minutes and gets
+# Cancel superseded runs on the same branch — saves CI minutes and gives
 # feedback faster while iterating locally.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   verify:
-    name: Typecheck, lint, format, test
+    name: Typecheck, lint, format, test, build
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
+      # Single source of truth for the Node version. Local, CI, and every
+      # contributor agree because they all read .nvmrc. Nothing to drift.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: '.nvmrc'
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      # Kept as separate steps on purpose. CI output that shows exactly which
-      # gate failed is far more useful than a single red "npm run verify".
+      # Separate steps on purpose: CI output showing exactly which gate failed
+      # is far more useful than one red "npm run verify".
       - name: Typecheck
         run: npm run typecheck
 
@@ -42,8 +47,41 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Test with coverage
+        run: npm run test:coverage
+
       - name: Build
         run: npm run build
 
       - name: Toolchain self-check
         run: node dist/index.js
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # Phase 0 shipped 2 critical and 1 high advisory via vitest. This gate
+      # makes that class of problem impossible to reintroduce silently, and
+      # dependabot.yml opens the upgrade PR automatically.
+      #
+      # --audit-level=high keeps the build focused on real risk rather than
+      # blocking on low-severity noise that would erode the habit of reading
+      # the log.
+      - name: Fail on high or critical vulnerabilities
+        run: npm audit --audit-level=high
+
+      # Informational. Reported, never blocking, so a newly published advisory
+      # is visible in the log instead of silently ignored.
+      - name: Full audit report (informational)
+        run: npm audit || true
