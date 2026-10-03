@@ -242,8 +242,34 @@ nothing lost" against a real relay and a real database.
 - `materializeContent` is O(document) and exists mainly for repair. The relay's
   replica and the log could disagree if a replica were evicted mid-write; it is
   not, so this is theoretical today.
-- One full-suite run had a flaky `fetch failed` in `api.test.ts` under load. It
-  passed in isolation and in every run since. Not root-caused.
+
+### A CI failure that sat unnoticed for two phases
+
+After the Phase 4 push I checked CI for the first time since Phase 2 and found it
+had been **red the whole time**: `listDocuments > returns newest first` — expected
+`b`, received `a`.
+
+Two things were wrong and both mattered.
+
+**The code.** `ORDER BY updated_at DESC` is not a total order. Two documents
+written in the same clock tick tie, and Postgres returns tied rows in whatever
+order the heap gives it. Fixed with `id DESC` as an explicit tiebreaker, because a
+list endpoint whose order changes between identical calls cannot be paginated
+against.
+
+**The test, which was the worse problem.** It created `a`, saved `a`, then created
+`b` — so the assertion only held if the save and the second insert landed in
+different clock ticks. On a slow laptop they did. On a fast CI runner they did
+not.
+
+The lesson is not "add a tiebreaker". It is that **a test which passes locally and
+fails in CI for timing reasons has proved nothing**, and that I was verifying
+locally and assuming CI agreed. Checking CI after a push is part of the loop, not
+an optional extra. Two new tests now cover it: one asserts a tied-timestamp list
+is stable across repeated identical calls, one asserts the tiebreaker itself.
+
+Also worth noting: the Phase 2 CI run failed for an unrelated reason (a
+`concurrently` install step), and I never looked at either run until Phase 4.
 
 ---
 

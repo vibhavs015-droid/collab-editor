@@ -209,8 +209,8 @@ Stated explicitly rather than left for a reviewer to discover.
   protocol framing, request bodies and CRDT operations, not authorisation.
 - Client bundle is 297 kB (96 kB gzipped), mostly CodeMirror.
 - The test suite takes ~2.5 minutes, dominated by Postgres start-up per suite.
-- One full-suite run had a flaky `fetch failed` in `api.test.ts` under load. It
-  passed in isolation and in every run since, and is not root-caused.
+- The WebSocket token is the Phase 3 placeholder `'phase-3-no-auth'`. There is no
+  authentication, so a document id is the only access control. Phase 5.
 
 ---
 
