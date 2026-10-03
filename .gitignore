@@ -1,11 +1,16 @@
+# `.data/` — PGlite database directory
+
+data/
+
+# Local environment
+.env
+.env.local
+
 node_modules/
 dist/
 coverage/
 *.tsbuildinfo
 
-.env
-.env.local
-.DS_Store
-
-# k6 load-test output
+*.log
 *.k6.out
+.smoke.*

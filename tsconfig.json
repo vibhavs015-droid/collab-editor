@@ -1,7 +1,14 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    // Browser + Node types together.
+    //
+    // The server and client are one package (ADR-0002), so both DOM and Node
+    // globals are in scope. This is a real loss of safety: nothing stops server
+    // code from touching `window`. ESLint overrides narrow that by directory —
+    // see eslint.config.js, which forbids DOM globals in src/server and Node
+    // globals in src/client.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "rootDir": "src",

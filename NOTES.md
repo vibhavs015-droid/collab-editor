@@ -135,7 +135,82 @@ toolchain underneath it has known holes.
 
 ---
 
+## Phase 1 — Single-user editor
+
+### Decisions
+
+- **CodeMirror 6** rather than a hand-rolled editor. A textarea has no document
+  model, so every remote CRDT operation would degrade to whole-document
+  replacement — losing the cursor on each edit. [ADR-0005](./docs/adr/0005-codemirror-not-handrolled.md)
+- **PGlite** for local and CI. winget's PostgreSQL download is blocked on this
+  machine (HTTP 403) and Docker needs WSL2, which needs a reboot. PGlite is real
+  Postgres compiled to WASM, so the SQL is identical to production.
+  [ADR-0006](./docs/adr/0006-pglite-for-local-and-ci.md)
+
+### The bug that mattered most
+
+Multi-byte text appeared corrupted when checking a save with PowerShell
+`Invoke-RestMethod`. The instinct is to blame the database.
+
+It was not the database. Node's `fetch` decodes responses as UTF-8 per spec;
+PowerShell _guesses_, and with `Content-Type: application/json` carrying no
+`charset`, it guessed Latin-1. Every multi-byte character came back as
+mojibake. Sending the same bytes and decoding explicitly as UTF-8 round-tripped
+perfectly.
+
+The real defect it exposed was on the server: `Content-Type: application/json`
+with no `charset=utf-8`. Any client is then free to guess, and several guess
+wrong — so non-ASCII document text could be silently corrupted for real users.
+
+Two lessons, and the second is the one worth keeping:
+
+1. Add `charset=utf-8` to every JSON response. One line, prevents an entire
+   category of data corruption.
+2. **Verify at the byte level in tests.** The unit test using `fetch` was correct
+   all along and would never have caught this. `src/server/e2e.test.ts` now
+   asserts on raw bytes with `TextDecoder('utf-8', { fatal: true })`, so it
+   cannot be fooled by an encoding mistake in the harness itself.
+
+When a manual check disagrees with a passing test, the manual check is the more
+likely thing to be wrong. Verify the harness before changing the code.
+
+### Smaller things hit along the way
+
+- **PGlite has no `':memory:'` path.** Passing it created a directory literally
+  named `:memory:` on disk and failed with a confusing `EINVAL`. Omitting the
+  argument selects the in-memory filesystem. Now documented at the call site.
+- **Column DEFAULT does not apply to an explicit NULL.** `createDocument` bound
+  `input.title ?? 'Untitled'` correctly, but binding `undefined` sent a real
+  NULL and violated NOT NULL. Defaults must be applied in code when the value is
+  passed as a parameter.
+- **PGlite does not create the parent directory chain.** A fresh clone failed
+  with `ENOENT` pointing at the wrong thing. Added `Database.openAt`, which
+  creates the parent first.
+- **A debounce is not a save guarantee.** Added `flush()` plus a `beforeunload`
+  guard, because closing the tab mid-debounce silently loses the final edit. Also
+  guarded against out-of-order responses with a revision counter, so a slow
+  request cannot mark newer content as saved.
+- **Two lint rules I wrote were wrong.** The `src/core` purity rule banned test
+  files too, and `require-await` flagged a deliberate pending-promise mock. The
+  first was a real over-restriction; the second was the rule correctly spotting
+  that I had left an `async` on a function that awaits nothing.
+- **`concurrently@9` shipped a critical advisory** (via `shell-quote`). Upgraded
+  to `10.0.5`. The CI audit gate caught this automatically, which is the first
+  real proof that gate earns its keep.
+
+### Test suite
+
+106 tests, ~2 minutes. The runtime is dominated by Postgres initialisation
+(~2.5s per suite), not assertion count, so `fileParallelism` is `false`. Phase
+2's fuzz test will likely force revisiting that.
+
+---
+
 ## Log
+
+- **Phase 1** — Editor, persistence, autosave, and designed loading/error states.
+  106 tests. Two ADRs. Caught a real content-type bug that would have corrupted
+  non-ASCII text for some clients.
 
 - **Phase 0** — Toolchain, strict TS, CI, and the `(site, clock)` element ID
   primitive with a total-order test. 39 tests passing, 97.3% statement

@@ -34,6 +34,8 @@ complexity.
 | [0002](./adr/0002-single-package-layout.md)          | Single package, not an npm workspaces monorepo                      | Accepted |
 | [0003](./adr/0003-element-identity-site-clock.md)    | Element identity is `(site, clock)`, ordered with a total order     | Accepted |
 | [0004](./adr/0004-envelope-vs-payload-validation.md) | Transport validates message shape; the CRDT validates operations    | Accepted |
+| [0005](./adr/0005-codemirror-not-handrolled.md)      | CodeMirror 6 for editing; the CRDT stays hand-written               | Accepted |
+| [0006](./adr/0006-pglite-for-local-and-ci.md)        | PGlite (real Postgres, WASM) for local and CI; Supabase in prod     | Accepted |
 
 ## Writing a new ADR
 

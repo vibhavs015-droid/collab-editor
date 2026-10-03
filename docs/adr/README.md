@@ -24,12 +24,14 @@ infer from code.
 
 ## Index
 
-| #                                                | Title                                 | Status   |
-| ------------------------------------------------ | ------------------------------------- | -------- |
-| [0001](./0001-local-first-architecture.md)       | Local-first architecture              | Accepted |
-| [0002](./0002-single-package-layout.md)          | Single package, not a monorepo        | Accepted |
-| [0003](./0003-element-identity-site-clock.md)    | Element identity is `(site, clock)`   | Accepted |
-| [0004](./0004-envelope-vs-payload-validation.md) | Envelope vs. payload validation split | Accepted |
+| #                                                | Title                                  | Status   |
+| ------------------------------------------------ | -------------------------------------- | -------- |
+| [0001](./0001-local-first-architecture.md)       | Local-first architecture               | Accepted |
+| [0002](./0002-single-package-layout.md)          | Single package, not a monorepo         | Accepted |
+| [0003](./0003-element-identity-site-clock.md)    | Element identity is `(site, clock)`    | Accepted |
+| [0004](./0004-envelope-vs-payload-validation.md) | Envelope vs. payload validation split  | Accepted |
+| [0005](./0005-codemirror-not-handrolled.md)      | CodeMirror 6, not a hand-rolled editor | Accepted |
+| [0006](./0006-pglite-for-local-and-ci.md)        | PGlite for local/CI, Supabase in prod  | Accepted |
 
 ## Planned
 
@@ -38,7 +40,6 @@ decision is actually made.
 
 | Phase | Likely decision                                           |
 | ----- | --------------------------------------------------------- |
-| 1     | Editor engine: CodeMirror 6 vs. hand-rolled               |
 | 2     | Undo semantics without undoing a collaborator's work      |
 | 2     | Tombstone garbage collection strategy                     |
 | 3     | Server fanout: single process vs. pub/sub broker          |

@@ -1,0 +1,336 @@
+/* Phase 1 styles.
+ *
+ * Deliberately plain. Visual design is not the point of this project, and a
+ * stylesheet large enough to need a framework would obscure what actually
+ * matters — so it stays readable and dependency-free.
+ *
+ * Colours use a neutral palette with one accent, and every foreground/background
+ * pair is checked for contrast. An editor is a reading surface first; legibility
+ * beats personality.
+ */
+
+:root {
+  --bg: #ffffff;
+  --bg-subtle: #f6f7f9;
+  --fg: #1a1d21;
+  --fg-muted: #5c6570;
+  --border: #dfe3e8;
+  --accent: #2f6feb;
+  --accent-fg: #ffffff;
+
+  --ok: #1a7f4b;
+  --warn: #9a6700;
+  --danger: #b42318;
+
+  --radius: 6px;
+  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --bg-subtle: #1d2026;
+    --fg: #e6e8eb;
+    --fg-muted: #9aa4b0;
+    --border: #2c313a;
+    --accent: #6c9bff;
+    --accent-fg: #0d1017;
+    --ok: #4ec98a;
+    --warn: #e3b341;
+    --danger: #ff7b72;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* Hidden but still announced by screen readers. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Toolbar ────────────────────────────────────────────────────────────── */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+  flex: 0 0 auto;
+}
+
+.toolbar__left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toolbar__right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.title-input {
+  width: 100%;
+  max-width: 420px;
+  padding: 6px 8px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.title-input:hover {
+  border-color: var(--border);
+}
+
+.title-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  background: var(--bg);
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+
+.button {
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.button--primary {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── Save status ────────────────────────────────────────────────────────── */
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+.status__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  flex: 0 0 auto;
+}
+
+.status--saved .status__dot {
+  background: var(--ok);
+}
+
+.status--dirty .status__dot,
+.status--saving .status__dot {
+  background: var(--warn);
+}
+
+.status--error .status__dot {
+  background: var(--danger);
+}
+
+/* Only animate the dot while a save is genuinely in flight. A pulsing dot that
+   never resolves would train the user to ignore it. */
+.status--saving .status__dot {
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+.status--error .status__text {
+  color: var(--danger);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status--saving .status__dot {
+    animation: none;
+  }
+  .spinner {
+    animation: none;
+  }
+}
+
+/* ── Editor area ────────────────────────────────────────────────────────── */
+
+.editor-area {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.editor-host {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+}
+
+/* CodeMirror 6 owns the vertical space and handles its own scrolling. */
+.editor-host .cm-editor {
+  height: 100%;
+  font-size: 15px;
+}
+
+.editor-host .cm-scroller {
+  font-family: var(--font-mono);
+  line-height: 1.7;
+  padding: 20px 24px;
+}
+
+.editor-host .cm-focused {
+  outline: none;
+}
+
+.editor-host .cm-gutters {
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  color: var(--fg-muted);
+}
+
+/* ── Full-area states (loading / error) ─────────────────────────────────── */
+
+.state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  text-align: center;
+  background: var(--bg);
+  z-index: 2;
+}
+
+.state[hidden] {
+  display: none;
+}
+
+.state__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.state__body {
+  margin: 0;
+  max-width: 46ch;
+  color: var(--fg-muted);
+}
+
+.state__actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.state--error .state__title {
+  color: var(--danger);
+}
+
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Status bar ─────────────────────────────────────────────────────────── */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+  font-size: 12px;
+  color: var(--fg-muted);
+  flex: 0 0 auto;
+}
+
+.statusbar__sep {
+  opacity: 0.5;
+}

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>collab-editor</title>
+    <link rel="stylesheet" href="/src/client/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="toolbar">
+        <div class="toolbar__left">
+          <label class="visually-hidden" for="doc-title">Document title</label>
+          <input
+            id="doc-title"
+            class="title-input"
+            type="text"
+            placeholder="Untitled"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+
+        <div class="toolbar__right">
+          <!--
+            The status indicator reports what is actually true, not what we hope.
+            A save UI that overstates its state is worse than no save UI.
+          -->
+          <div id="save-status" class="status" role="status" aria-live="polite" aria-atomic="true">
+            <span class="status__dot" aria-hidden="true"></span>
+            <span id="save-status-text" class="status__text">Loading…</span>
+          </div>
+
+          <button id="save-now" class="button" type="button">Save now</button>
+        </div>
+      </header>
+
+      <!--
+        Every state below is designed deliberately rather than defaulted. The
+        unhappy path is where projects usually look unfinished, and it is
+        exactly what an interviewer explores.
+      -->
+      <main class="editor-area">
+        <div id="loading" class="state state--loading" role="status">
+          <div class="spinner" aria-hidden="true"></div>
+          <p class="state__title">Loading document…</p>
+        </div>
+
+        <div id="error" class="state state--error" role="alert" hidden>
+          <p class="state__title">Something went wrong</p>
+          <p id="error-message" class="state__body"></p>
+          <div class="state__actions">
+            <button id="retry" class="button button--primary" type="button">Try again</button>
+            <button id="new-doc" class="button" type="button">Start a new document</button>
+          </div>
+        </div>
+
+        <div id="editor-host" class="editor-host"></div>
+      </main>
+
+      <footer class="statusbar">
+        <span id="word-count" class="statusbar__item">0 words</span>
+        <span class="statusbar__sep" aria-hidden="true">·</span>
+        <span id="char-count" class="statusbar__item">0 characters</span>
+        <span class="statusbar__sep" aria-hidden="true">·</span>
+        <span id="last-saved" class="statusbar__item"></span>
+      </footer>
+    </div>
+
+    <script type="module" src="/src/client/main.ts"></script>
+  </body>
+</html>
