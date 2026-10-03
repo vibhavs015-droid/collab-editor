@@ -12,14 +12,26 @@ updates:
     commit-message:
       prefix: 'chore(deps)'
     groups:
-      # Security fixes together, so they land as one reviewable PR.
-      security:
-        applies-to: version-updates
-        dependency-type: production
       minor-and-patch:
         update-types:
           - minor
           - patch
+    ignore:
+      # TypeScript 7 is the native compiler rewrite. typescript-eslint@8.71
+      # declares peer ">=4.8.4 <6.1.0", so upgrading resolves to nothing and
+      # breaks the entire toolchain. Do not accept this bump until that peer
+      # range includes 7.x.
+      #
+      # The peer constraint is asserted here rather than discovered again by a
+      # failed install, which is how it was found the first time.
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+      # Types are only consumed by the compiler; a major bump there is a
+      # maintenance signal, not a feature. Defer to a deliberate upgrade.
+      - dependency-name: '@types/*'
+        update-types:
+          - version-update:semver-major
 
   # Keeps the GitHub Actions themselves patched.
   - package-ecosystem: github-actions

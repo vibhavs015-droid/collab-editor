@@ -21,11 +21,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to v7, not v4. The v4 line targets Node 20, which GitHub has
+      # deprecated for Actions runtimes; v4 still runs but emits a warning on
+      # every job and will be force-upgraded to Node 24 regardless.
+      - uses: actions/checkout@v7
 
       # Single source of truth for the Node version. Local, CI, and every
       # contributor agree because they all read .nvmrc. Nothing to drift.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: '.nvmrc'
           cache: npm
@@ -61,9 +64,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: '.nvmrc'
           cache: npm
