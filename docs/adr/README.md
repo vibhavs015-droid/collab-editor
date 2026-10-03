@@ -24,16 +24,18 @@ infer from code.
 
 ## Index
 
-| #                                                         | Title                                  | Status   |
-| --------------------------------------------------------- | -------------------------------------- | -------- |
-| [0001](./0001-local-first-architecture.md)                | Local-first architecture               | Accepted |
-| [0002](./0002-single-package-layout.md)                   | Single package, not a monorepo         | Accepted |
-| [0003](./0003-element-identity-site-clock.md)             | Element identity is `(site, clock)`    | Accepted |
-| [0004](./0004-envelope-vs-payload-validation.md)          | Envelope vs. payload validation split  | Accepted |
-| [0005](./0005-codemirror-not-handrolled.md)               | CodeMirror 6, not a hand-rolled editor | Accepted |
-| [0006](./0006-pglite-for-local-and-ci.md)                 | PGlite for local/CI, Supabase in prod  | Accepted |
-| [0007](./0007-server-is-a-relay-not-a-merge-authority.md) | Server relays, never merges            | Accepted |
-| [0008](./0008-jittered-backoff-for-reconnection.md)       | Jittered exponential backoff           | Accepted |
+| #                                                         | Title                                   | Status   |
+| --------------------------------------------------------- | --------------------------------------- | -------- |
+| [0001](./0001-local-first-architecture.md)                | Local-first architecture                | Accepted |
+| [0002](./0002-single-package-layout.md)                   | Single package, not a monorepo          | Accepted |
+| [0003](./0003-element-identity-site-clock.md)             | Element identity is `(site, clock)`     | Accepted |
+| [0004](./0004-envelope-vs-payload-validation.md)          | Envelope vs. payload validation split   | Accepted |
+| [0005](./0005-codemirror-not-handrolled.md)               | CodeMirror 6, not a hand-rolled editor  | Accepted |
+| [0006](./0006-pglite-for-local-and-ci.md)                 | PGlite for local/CI, Supabase in prod   | Accepted |
+| [0007](./0007-server-is-a-relay-not-a-merge-authority.md) | Server relays, never merges             | Accepted |
+| [0008](./0008-jittered-backoff-for-reconnection.md)       | Jittered exponential backoff            | Accepted |
+| [0009](./0009-operation-log-is-the-document.md)           | The operation log is the document       | Accepted |
+| [0010](./0010-lamport-clock.md)                           | The local clock absorbs observed clocks | Accepted |
 
 ## Planned
 
@@ -42,10 +44,19 @@ decision is actually made.
 
 | Phase | Likely decision                                           |
 | ----- | --------------------------------------------------------- |
-| 2     | Undo semantics without undoing a collaborator's work      |
-| 2     | Tombstone garbage collection strategy                     |
-| 4     | Sync transport: raw WebSocket vs. Socket.IO               |
-| 4     | Server fanout: single process vs. pub/sub broker          |
-| 4     | Local storage engine: IndexedDB vs. SQLite/WASM           |
+| 4     | Tombstone garbage collection and log compaction           |
 | 5     | Observability stack                                       |
+| 5     | Auth: real tokens vs. the Phase 3 placeholder             |
+| 6     | Server fanout: single process vs. pub/sub broker          |
 | 6     | Differentiator: benchmark suite vs. end-to-end encryption |
+
+Two entries from the original plan were resolved without a full ADR, because the
+choice was forced rather than weighed:
+
+- **Sync transport**: raw WebSocket, decided in Phase 3. Socket.IO adds a protocol
+  the CRDT does not need, and Phase 3's relay already had the frame handling it
+  required.
+- **Local storage engine**: IndexedDB, decided in Phase 4. ADR-0009 covers the
+  reasoning; the brief version is that localStorage is synchronous and capped
+  around 5 MB, which is disqualifying for a log that must hold a whole document's
+  history.

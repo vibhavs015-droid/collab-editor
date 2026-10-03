@@ -9,6 +9,7 @@ import { WebSocketServer } from 'ws';
 
 import { ApiServer } from './api.js';
 import { Database } from './db.js';
+import { DocumentStore } from './documentStore.js';
 import { Relay } from './relay.js';
 
 /** Where PGlite persists. Relative to the repo root, and gitignored. */
@@ -64,7 +65,18 @@ async function main(): Promise<void> {
   const db = await Database.openAt(DATA_DIR);
   process.stdout.write(`[server] database ready at ${DATA_DIR}\n`);
 
-  const relay = new Relay();
+  // One store per process, shared by the relay and the API. The relay writes
+  // through it; the API reads the text it materialises.
+  const store = new DocumentStore({ db });
+
+  const relay = new Relay({
+    log: {
+      // Replay for a reconnecting client. This is the read side of the durable
+      // log, and it is what makes "kill the server, keep typing, reconnect"
+      // recover instead of losing the gap.
+      readSince: (documentId, sinceSeq, limit) => store.readSince(documentId, sinceSeq, limit),
+    },
+  });
 
   // noServer: the socket is handed over by the ApiServer's upgrade handler,
   // so WebSocket and HTTP share one port and the browser sees a single origin.
@@ -74,7 +86,15 @@ async function main(): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const documentId = url.searchParams.get('doc') ?? 'default';
 
-    relay.attach(socket, documentId);
+    relay.attach(socket, documentId, (ops) => {
+      // Fire and forget on purpose. Awaiting here would make one slow database
+      // write delay the broadcast of a keystroke to everyone else in the room,
+      // which is the opposite of what a relay is for. The write is queued and
+      // ordered per document, so correctness does not depend on the await.
+      void store.apply(documentId, ops).catch((error: unknown) => {
+        process.stderr.write(`[server] could not persist ${documentId}: ${String(error)}\n`);
+      });
+    });
   });
 
   const server = new ApiServer({

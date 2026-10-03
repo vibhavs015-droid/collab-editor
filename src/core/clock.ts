@@ -91,6 +91,27 @@ export function elementIdKey(id: ElementId): string {
 /**
  * A replica's monotonic counter, scoped to one site.
  *
+ * ── Why this is a Lamport clock ───────────────────────────────────────────
+ * The counter advances past every clock this replica has *seen*, not only past
+ * its own. That is not cosmetic; without it a local edit lands in the wrong
+ * place.
+ *
+ * RGA integrates an insert by skipping every following element with a greater ID
+ * (ADR-0003), so among siblings the larger ID comes first. If this replica's
+ * counter sat at 3 while a collaborator's characters were at 7 and 8, typing
+ * between two of that collaborator's characters would produce a new ID smaller
+ * than both, and the integration rule would place it *after* them. The user would
+ * see their keystroke jump past the text it was typed directly in front of.
+ *
+ * Advancing past observed clocks makes every local ID larger than everything seen
+ * so far, which is exactly the condition under which the integration rule places
+ * it immediately after its anchor.
+ *
+ * Absorbing another site's counter costs nothing in correctness: IDs are
+ * `(site, clock)` pairs, so a counter can only ever collide with another from the
+ * *same* site. A replica can never collide with a collaborator, however large its
+ * counter grows.
+ *
  * Invariant: `current` never decreases for the lifetime of the instance.
  */
 export class LogicalClock {
@@ -125,22 +146,16 @@ export class LogicalClock {
   }
 
   /**
-   * Absorb an ID observed from the network, keeping our clock monotonic.
+   * Absorb a clock observed from the network, keeping ours monotonic.
    *
-   * Only IDs carrying *our own* site matter. Another replica's counter is
-   * that replica's business — advancing ours based on it would waste clock
-   * values and make debug output meaningless.
-   *
-   * Why we must handle our own site coming back: a client may reconnect and
-   * be re-sent operations it already produced, or restore from a stale
-   * snapshot. Without this, we would re-issue a clock we already spent and two
-   * characters would collide on the same ID — which breaks the uniqueness
-   * guarantee the entire algorithm rests on.
-   *
-   * Monotonicity only ever moves forward, never backward.
+   * Monotonicity only ever moves forward. The shape is guarded as well as the
+   * magnitude: a malformed operation carrying a huge or fractional clock must not
+   * be able to push this replica's counter somewhere useless, since every
+   * subsequent local insert would then be unable to sort past it and caret
+   * positioning would be subtly wrong for the rest of the session.
    */
   observe(remote: ElementId): void {
-    if (remote.site === this.#site && remote.clock > this.#clock) {
+    if (Number.isSafeInteger(remote.clock) && remote.clock > this.#clock) {
       this.#clock = remote.clock;
     }
   }

@@ -8,7 +8,7 @@ const validHello = {
   protocolVersion: PROTOCOL_VERSION,
   token: 'test-token',
   documentId: 'doc-1',
-  lastAppliedClock: 42,
+  lastAppliedSeq: 42,
 };
 
 describe('parseClientMessage', () => {
@@ -27,7 +27,9 @@ describe('parseClientMessage', () => {
         JSON.stringify({ type: 'presence', documentId: 'd', cursor: null, selectedLength: 0 }),
       ),
     ).not.toBeNull();
-    expect(parseClientMessage(JSON.stringify({ type: 'resync', documentId: 'd' }))).not.toBeNull();
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'resync', documentId: 'd', sinceSeq: 7 })),
+    ).toEqual({ type: 'resync', documentId: 'd', sinceSeq: 7 });
   });
 
   it('rejects malformed JSON instead of throwing', () => {
@@ -54,16 +56,14 @@ describe('parseClientMessage', () => {
     const { token: _t, ...missingToken } = validHello;
     expect(parseClientMessage(JSON.stringify(missingToken))).toBeNull();
 
-    const { lastAppliedClock: _c, ...missingClock } = validHello;
+    const { lastAppliedSeq: _c, ...missingClock } = validHello;
     expect(parseClientMessage(JSON.stringify(missingClock))).toBeNull();
   });
 
   it('rejects non-finite numbers', () => {
     // JSON.parse turns these into the literal, but a hand-built object or a
     // future serialiser could produce them. Guard regardless.
-    expect(
-      parseClientMessage(JSON.stringify({ ...validHello, lastAppliedClock: null })),
-    ).toBeNull();
+    expect(parseClientMessage(JSON.stringify({ ...validHello, lastAppliedSeq: null }))).toBeNull();
     expect(
       parseClientMessage(JSON.stringify({ ...validHello, protocolVersion: 'one' })),
     ).toBeNull();
@@ -102,6 +102,11 @@ describe('parseClientMessage', () => {
       '{"type":"resync"}',
       '{"type":"ops","documentId":"d"}',
       '[{"type":"resync","documentId":"d"}]',
+      // A resync without a cursor is rejected rather than treated as zero. A
+      // default would turn a client bug into a full re-download of the log.
+      '{"type":"resync","documentId":"d"}',
+      '{"type":"resync","documentId":"d","sinceSeq":-1}',
+      '{"type":"resync","documentId":"d","sinceSeq":"0"}',
     ];
 
     for (const raw of hostile) {

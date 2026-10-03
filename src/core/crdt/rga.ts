@@ -361,6 +361,13 @@ export class RgaDocument {
       return;
     }
 
+    // Absorb the observed clock before doing anything else. A local insert
+    // issued afterwards gets a larger ID than this one, which is what makes the
+    // integration rule below place it exactly where the user typed rather than
+    // somewhere further along among the siblings. See LogicalClock for why this
+    // has to happen on every applied insert, including a late arrival.
+    this.#clock.observe(op.id);
+
     // A delete may have arrived before this insert. Honour it now.
     const deletedAlready = this.#pendingDeletes.delete(key);
 
@@ -590,6 +597,45 @@ export class RgaDocument {
     }
 
     return { applied, redoOps };
+  }
+
+  /**
+   * Read-only element view for cursor mapping and diagnostics.
+   *
+   * Returns a copy of the identifying and deletion fields rather than the
+   * mutable Element objects. Nothing outside this class can therefore corrupt
+   * deletion state, which is the one piece of state the CRDT cannot recover if
+   * it is modified incorrectly.
+   *
+   * `key` is the canonical string form of the element ID. Exposing it saves
+   * every caller from reimplementing the same encoding, which is how two
+   * different encodings end up silently failing to match.
+   */
+  inspect(): readonly { key: string; id: ElementId; value: string; deleted: boolean }[] {
+    return this.#elements.map((element) => ({
+      key: elementIdKey(element.id),
+      id: element.id,
+      value: element.value,
+      deleted: element.deleted,
+    }));
+  }
+
+  /**
+   * Visible elements only, in document order.
+   *
+   * This is the primitive the editor binds to. Because every element is exactly
+   * one character, an element index is a character offset, which lets the editor
+   * translate CRDT positions into CodeMirror positions with no extra mapping
+   * table.
+   */
+  visibleElements(): readonly { key: string; value: string }[] {
+    const out: { key: string; value: string }[] = [];
+    for (const element of this.#elements) {
+      if (!element.deleted) {
+        out.push({ key: elementIdKey(element.id), value: element.value });
+      }
+    }
+    return out;
   }
 
   /**

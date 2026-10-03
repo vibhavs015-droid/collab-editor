@@ -120,18 +120,130 @@ toolchain underneath it has known holes.
 
 ## Open questions for later phases
 
-- [ ] Phase 1: CodeMirror 6 vs. hand-rolled editor? Leaning CodeMirror — its
-      document model is already collaboration-shaped.
-- [ ] Phase 2: Per-user undo without undoing a collaborator's work is the
-      genuinely hard part of RGA. Budget time.
-- [ ] Phase 2: Should deletion be tombstone-only, or can we garbage-collect
-      tombstones once causally stable?
-- [ ] Phase 3: Server-authoritative fanout vs. peer-to-peer WebRTC? Server is
-      simpler; P2P removes the offline problem but adds NAT traversal.
+- [x] Phase 1: CodeMirror 6 vs. hand-rolled editor? → CodeMirror.
+      [ADR-0005](./docs/adr/0005-codemirror-not-handrolled.md)
+- [x] Phase 2: Per-user undo without undoing a collaborator's work. → Per-site
+      undo stacks, and CodeMirror's own history removed in Phase 4 so only one
+      stack can be authoritative.
+- [ ] Phase 2/5: Tombstone garbage collection. Still open, and now load-bearing:
+      `document_ops` grows monotonically and nothing deletes anything.
+- [x] Phase 3: Server fanout vs. peer-to-peer WebRTC? → Server. Recorded in
+      [ADR-0007](./docs/adr/0007-server-is-a-relay-not-a-merge-authority.md).
 - [ ] Phase 5: Which observability stack — OpenTelemetry + Grafana, or just
       structured logs plus Prometheus?
 - [ ] Phase 6: Benchmark suite vs. end-to-end encryption as the differentiator.
       Pick one.
+
+## Phase 4 — Offline-first
+
+397 tests, 19 files. ~155s, still dominated by PGlite boots.
+
+The headline claim is now tested as a claim rather than as a set of features:
+`src/server/offline.e2e.test.ts` runs "kill the server, keep typing, restore,
+nothing lost" against a real relay and a real database.
+
+### What was built
+
+| Module                           | Why it exists                                                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `core/crdt/replica.ts`           | CRDT plus its durable log. The log is authoritative; text is derived.                                        |
+| `core/crdt/diff.ts`              | Minimal change sets by element identity, so a remote keystroke is one edit and not a whole-document replace. |
+| `core/crdt/localEdits.ts`        | Editor edits → CRDT operations. The running-offset arithmetic, tested without a DOM.                         |
+| `core/crdt/seed.ts`              | Deterministic text → operations, so two devices seeding the same document agree.                             |
+| `client/storage/indexedDbLog.ts` | Durable log. Chosen over localStorage for the obvious reasons.                                               |
+| `client/sync/binding.ts`         | CodeMirror ↔ CRDT. Owns the echo guard and the drift repair.                                                 |
+| `client/sync/status.ts`          | The indicator's state machine, total and side-effect free.                                                   |
+| `server/documentStore.ts`        | One replica per open document, for materialising text and rejecting unreplayable writes.                     |
+
+`autosave.ts` was deleted. Two write paths would mean two sources of truth.
+
+### Four real bugs, found by tests written to look for them
+
+- **Insert and delete shared a dedup key.** The server's `element_key` was
+  `(site, clock)` for both, so a delete looked like a redelivered insert and was
+  dropped. A user deleted a word and it came back. Fixed by putting the operation
+  type in the key. The test that caught it is the one asserting a delete actually
+  removes the character.
+
+- **`LogicalClock.observe` was restricted to the local site, and nothing called
+  it.** This was the worst bug in the project so far, because it was invisible.
+  A replica with a low counter typing into a document a collaborator had written
+  produced an ID smaller than every sibling, so RGA's integration rule placed the
+  character at the **end of the document** instead of at the caret.
+
+  Nothing crashed. Convergence still held — every replica agreed on the same
+  wrong document. A convergence fuzzer cannot find this, because it _does_
+  converge.
+
+  Fixed by making the clock a proper Lamport clock, called on every applied
+  insert. Two Phase 2 tests had encoded the buggy output and now assert the
+  correct behaviour. [ADR-0010](./docs/adr/0010-lamport-clock.md).
+
+  The lesson worth keeping: **convergence and correctness are different
+  properties.** Convergence asks "do all replicas agree?"; correctness asks "does
+  the document match what the user typed?". A CRDT can satisfy the first and fail
+  the second completely. The test that now guards it walks every offset and builds
+  its expectation by slicing the original string, so a CRDT bug cannot make the
+  test agree with itself.
+
+- **PGlite is one connection, so `FOR UPDATE` bought nothing.** Two concurrent
+  `appendOps` calls interleaved their `BEGIN` and `COMMIT` and produced a primary
+  key violation. `SELECT ... FOR UPDATE` is the portable answer and is simply not
+  the right one for an embedded single-connection database. Replaced with an
+  in-process promise chain, and the code says so — including that it has to come
+  back if this ever runs against a networked Postgres.
+
+- **A redelivered operation consumed a sequence number.** `ON CONFLICT DO NOTHING`
+  dropped the row but the counter had already advanced, so the cursor returned to
+  the client ran ahead of the log. Harmless for a "since N" query, but the cursor
+  no longer meant what its name said. Fixed with `RETURNING seq`, so the value only
+  advances when a row was actually written.
+
+### Two decisions I got wrong in the first draft
+
+- **The diff assumed an invariant and did not check it.** `diffVisible` walked two
+  element snapshots and trusted that survivors keep their relative order — true for
+  RGA, but a wrong assumption produces plausible-looking edits rather than an
+  error. It now returns `null` on violation, and the binding falls back to a full
+  replacement and reports an anomaly. `applyChanges` then verifies the output
+  against the CRDT before the transaction is committed. Cheap insurance, because
+  the alternative is text on screen that disagrees with what gets saved.
+
+- **The first drift test did not actually drift.** It dispatched into a view whose
+  listener was wired, so the CRDT learned about the extra characters too. The test
+  passed for the wrong reason. Replaced with a second view that has no listener,
+  which is what the bug actually looks like.
+
+### Testing notes
+
+- **The binding needs a real DOM, and that is not optional.** The echo — dispatch,
+  listener fires, convert to operations, broadcast, peer sends it back — only
+  exists when the listener and the dispatch share one view. A mock cannot catch it
+  because it removes the very wiring that causes it. Hence `jsdom` and a real
+  `EditorView`.
+
+- **Test peers must send explicitly, not through a queue.** My first version of
+  the offline e2e test reused the outbox, and the reconnect cases failed for a
+  reason that had nothing to do with offline-first: the outbox belonged to the old
+  socket. Driving `send()` explicitly is honest about what the suite is testing —
+  the architecture — and leaves the outbox to `transport.test.ts`, which already
+  covers it.
+
+- **`fake-indexeddb` is a real implementation, not a mock.** It runs the spec in
+  Node, so transaction semantics, key order and cursor behaviour are exercised for
+  real. Worth the dependency.
+
+### Known limitations, recorded so they are not rediscovered
+
+- `document_ops` is one row per character and grows forever. Needs compaction
+  (tombstone squashing plus periodic snapshots) before it is more than a demo.
+- The IndexedDB cap prunes against a hard ceiling only. Pruning breaks replay, so
+  a real policy needs a snapshot-and-truncate scheme.
+- `materializeContent` is O(document) and exists mainly for repair. The relay's
+  replica and the log could disagree if a replica were evicted mid-write; it is
+  not, so this is theoretical today.
+- One full-suite run had a flaky `fetch failed` in `api.test.ts` under load. It
+  passed in isolation and in every run since. Not root-caused.
 
 ---
 
@@ -208,9 +320,23 @@ likely thing to be wrong. Verify the harness before changing the code.
 
 ## Log
 
+- **Phase 4** — Offline-first. 397 tests. Two ADRs. The headline claim is now
+  tested end to end against a real relay and a real database. Caught a Lamport
+  clock bug that sent every local keystroke to the end of the document while
+  converging perfectly, and a dedup key that made deleted text come back.
+
+- **Phase 3** — WebSocket relay, jittered reconnect, real operation validation.
+  213 tests. Two ADRs. The relay stayed dumb on purpose, so there is exactly one
+  merge implementation in the project.
+
+- **Phase 2** — RGA sequence CRDT with a seeded convergence fuzzer. Found no
+  divergence in 5,000 seeds. The fuzzer is still the strongest artifact here and
+  still cannot catch a bug that converges to the wrong document.
+
 - **Phase 1** — Editor, persistence, autosave, and designed loading/error states.
   106 tests. Two ADRs. Caught a real content-type bug that would have corrupted
-  non-ASCII text for some clients.
+  non-ASCII text for some clients. Superseded in Phase 4: autosave is gone, and
+  its role is taken by the operation log.
 
 - **Phase 0** — Toolchain, strict TS, CI, and the `(site, clock)` element ID
   primitive with a total-order test. 39 tests passing, 97.3% statement

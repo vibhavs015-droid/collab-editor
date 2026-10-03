@@ -23,15 +23,20 @@
 
         <div class="toolbar__right">
           <!--
-            The status indicator reports what is actually true, not what we hope.
-            A save UI that overstates its state is worse than no save UI.
+            The sync indicator reports what is actually true about replication,
+            not about local persistence. Since Phase 4 the local operation log is
+            written synchronously with every keystroke, so a separate "saved"
+            indicator would claim something the app cannot actually promise.
+
+            The states are deliberately distinct rather than one boolean: "offline
+            but safe" and "conflict" call for completely different reactions.
           -->
-          <div id="save-status" class="status" role="status" aria-live="polite" aria-atomic="true">
-            <span class="status__dot" aria-hidden="true"></span>
-            <span id="save-status-text" class="status__text">Loading…</span>
+          <div id="sync-status" class="sync" role="status" aria-live="polite" aria-atomic="true">
+            <span class="sync__dot" aria-hidden="true"></span>
+            <span id="sync-status-text" class="sync__text">Starting</span>
           </div>
 
-          <button id="save-now" class="button" type="button">Save now</button>
+          <span id="peer-count" class="peers" title="Collaborators connected"></span>
         </div>
       </header>
 
@@ -63,7 +68,9 @@
         <span class="statusbar__sep" aria-hidden="true">·</span>
         <span id="char-count" class="statusbar__item">0 characters</span>
         <span class="statusbar__sep" aria-hidden="true">·</span>
-        <span id="last-saved" class="statusbar__item"></span>
+        <span id="log-depth" class="statusbar__item" title="Operations stored locally"></span>
+        <span class="statusbar__spacer"></span>
+        <span id="sync-detail" class="statusbar__item statusbar__item--muted"></span>
       </footer>
     </div>
 

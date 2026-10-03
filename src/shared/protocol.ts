@@ -59,7 +59,7 @@ export interface HelloMessage {
    * The highest operation clock this client has already applied.
    * Lets the server decide between sending a delta and a full snapshot.
    */
-  readonly lastAppliedClock: number;
+  readonly lastAppliedSeq: number;
 }
 
 export interface SubmitOpsMessage {
@@ -79,6 +79,15 @@ export interface PresenceMessage {
 export interface ResyncRequestMessage {
   readonly type: 'resync';
   readonly documentId: string;
+  /**
+   * Replay everything strictly after this sequence.
+   *
+   * Carried on the request rather than remembered per connection, because a client
+   * may reconnect with a new socket while carrying state from the old one. A
+   * server-side cache of cursors would silently lose that state on restart, which
+   * is precisely the failure this design exists to prevent.
+   */
+  readonly sinceSeq: number;
 }
 
 export type ClientMessage =
@@ -92,9 +101,16 @@ export interface WelcomeMessage {
   /** This client's replica identity for the session. */
   readonly site: string;
   readonly documentId: string;
-  /** Authoritative snapshot, used to catch a fresh client up. */
+  /**
+   * Operations the client is missing, in sequence order.
+   *
+   * Sent on the first `hello` of a connection, so a client that has been offline
+   * catches up in one frame. Operations the client already applied are never
+   * resent: `lastAppliedSeq` is the cursor.
+   */
   readonly snapshot: readonly Operation[];
-  readonly clock: number;
+  /** Sequence of the last operation in `snapshot`. Resume from here. */
+  readonly seq: number;
 }
 
 export interface OpsMessage {
@@ -116,7 +132,8 @@ export interface SyncStateMessage {
   /** Authoritative connection state, so the UI can show a truthful banner. */
   readonly state: 'synced' | 'pending' | 'offline' | 'error';
   readonly pendingOps: number;
-  readonly clock: number;
+  /** Server's current sequence for this document, so the client can resume. */
+  readonly seq: number;
 }
 
 export interface ErrorMessage {
@@ -178,20 +195,24 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     case 'hello': {
       const protocolVersion = parsed['protocolVersion'];
       const token = parsed['token'];
-      const lastAppliedClock = parsed['lastAppliedClock'];
+      const lastAppliedSeq = parsed['lastAppliedSeq'];
 
       if (
         typeof documentId !== 'string' ||
         typeof token !== 'string' ||
         typeof protocolVersion !== 'number' ||
         !Number.isFinite(protocolVersion) ||
-        typeof lastAppliedClock !== 'number' ||
-        !Number.isFinite(lastAppliedClock)
+        typeof lastAppliedSeq !== 'number' ||
+        !Number.isFinite(lastAppliedSeq) ||
+        // A negative cursor is not "before the beginning of time", it is a client
+        // bug. Accepting it would let a malformed value walk back through the
+        // whole log one replay at a time.
+        lastAppliedSeq < 0
       ) {
         return null;
       }
 
-      return { type, protocolVersion, token, documentId, lastAppliedClock };
+      return { type, protocolVersion, token, documentId, lastAppliedSeq };
     }
 
     case 'ops': {
@@ -223,11 +244,20 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     }
 
     case 'resync': {
+      const sinceSeq = parsed['sinceSeq'];
+
       if (typeof documentId !== 'string') {
         return null;
       }
 
-      return { type, documentId };
+      // Required, not defaulted. A resync with no cursor would mean "send
+      // everything", which is a valid question but never the one being asked, and
+      // defaulting it would turn a client bug into an enormous catch-up.
+      if (typeof sinceSeq !== 'number' || !Number.isFinite(sinceSeq) || sinceSeq < 0) {
+        return null;
+      }
+
+      return { type, documentId, sinceSeq };
     }
 
     default:

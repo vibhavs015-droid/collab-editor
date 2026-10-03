@@ -41,6 +41,14 @@ export interface TransportOptions {
   readonly maxRetryMs?: number;
   /** Max operations buffered while disconnected before the oldest are dropped. */
   readonly maxQueuedOps?: number;
+  /**
+   * Log sequence this client already holds when the transport is created.
+   *
+   * Persisted next to the operation log so a reload resumes rather than
+   * re-downloading the document. Defaults to 0, which is correct and merely
+   * slower for a fresh client.
+   */
+  readonly initialSeq?: number;
 }
 
 export class SyncTransport {
@@ -58,6 +66,14 @@ export class SyncTransport {
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Deliberately not cleared on disconnect: these are local edits awaiting relay. */
   #outbox: Operation[] = [];
+  /**
+   * Highest server sequence this client holds.
+   *
+   * Advanced only after inbound operations have been handed to the CRDT, never
+   * before. Advancing first would mean a crash between the two loses exactly the
+   * operations the client promised the server it already had.
+   */
+  #seq: number;
   /** Set while disconnect is intentional, so no reconnect is scheduled. */
   #closedByUser = false;
   #disposed = false;
@@ -70,6 +86,7 @@ export class SyncTransport {
     this.#maxRetryMs = options.maxRetryMs ?? 15_000;
     this.#maxQueuedOps = options.maxQueuedOps ?? 5_000;
     this.#socketFactory = options.socketFactory ?? ((url) => new WebSocket(url));
+    this.#seq = options.initialSeq ?? 0;
   }
 
   get state(): ConnectionState {
@@ -78,6 +95,11 @@ export class SyncTransport {
 
   get queuedOperationCount(): number {
     return this.#outbox.length;
+  }
+
+  /** Highest log sequence this client has been told it holds. */
+  get serverSeq(): number {
+    return this.#seq;
   }
 
   connect(): void {
@@ -110,7 +132,10 @@ export class SyncTransport {
         protocolVersion: PROTOCOL_VERSION,
         token: 'phase-3-no-auth',
         documentId: this.#documentId,
-        lastAppliedClock: 0,
+        // `#seq` is what the SERVER has numbered, not what this client has typed. Queued
+        // local operations have no server sequence yet, so claiming them here would
+        // ask the server to skip operations this client has never seen.
+        lastAppliedSeq: this.#seq,
       });
       this.#flushOutbox();
     };
@@ -207,7 +232,32 @@ export class SyncTransport {
       return;
     }
 
-    this.#send({ type: 'resync', documentId: this.#documentId });
+    // The cursor travels with the request. A reconnect opens a new socket, and a
+    // server-side per-connection cache would not survive that.
+    this.#send({ type: 'resync', documentId: this.#documentId, sinceSeq: this.#seq });
+  }
+
+  /**
+   * Push whatever is queued, right now.
+   *
+   * Used on page unload. Best effort, and the transport is honest about that: a
+   * browser may discard a WebSocket frame sent during teardown, so this is a latency
+   * optimisation rather than a durability mechanism. Nothing is lost if it fails,
+   * because every queued operation is already in the durable local log.
+   *
+   * @returns true when the queue was empty or fully handed to the socket.
+   */
+  flushNow(): boolean {
+    if (this.#outbox.length === 0) {
+      return true;
+    }
+
+    if (this.#state !== 'open') {
+      return false;
+    }
+
+    this.#flushOutbox();
+    return this.#outbox.length === 0;
   }
 
   #flushOutbox(): void {
@@ -250,6 +300,12 @@ export class SyncTransport {
         this.#handlers.onPresence(parsed.cursors);
         return;
       case 'syncState':
+        // The server's sequence is authoritative and only ever moves forward. A
+        // stale frame arriving after a newer one must not walk the cursor back and
+        // force a pointless re-replay.
+        if (parsed.seq > this.#seq) {
+          this.#seq = parsed.seq;
+        }
         this.#handlers.onSyncState(parsed.state, parsed.pendingOps);
         return;
       case 'error':

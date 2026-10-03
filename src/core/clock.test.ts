@@ -117,15 +117,45 @@ describe('LogicalClock', () => {
     expect(clock.tick().clock).toBe(501);
   });
 
-  it('ignores observed ids from other sites', () => {
-    // Another replica's counter must not consume our clock values.
+  it('advances past an observed id from another site', () => {
+    // Lamport semantics, and the reason this is not optional. RGA orders
+    // siblings by descending ID, so a local insert only lands where the user
+    // typed if its ID is larger than every sibling already present. A replica
+    // that ignored remote clocks would issue a small ID and its keystrokes would
+    // jump past whatever a collaborator had typed most recently.
     const clock = new LogicalClock('alice');
     clock.tick();
 
     clock.observe(id('bob', 9999));
 
-    expect(clock.current).toBe(1);
-    expect(clock.tick().clock).toBe(2);
+    expect(clock.current).toBe(9999);
+    expect(clock.tick().clock).toBe(10000);
+  });
+
+  it('cannot collide with another site no matter how large its clock grows', () => {
+    // The reason absorbing remote clocks is safe: uniqueness is per site.
+    const clock = new LogicalClock('alice');
+    clock.observe(id('bob', 1_000_000));
+
+    const issued = clock.tick();
+
+    expect(issued.site).toBe('alice');
+    expect(issued.clock).toBe(1_000_001);
+  });
+
+  it('ignores a malformed observed clock', () => {
+    // A hostile or buggy peer must not be able to park this replica's counter at
+    // a value its own inserts can never sort past, which would silently break
+    // caret positioning for the rest of the session.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 1.5, -5, 2 ** 60]) {
+      const clock = new LogicalClock('alice');
+      clock.tick();
+
+      clock.observe(id('bob', bad));
+
+      expect(clock.current).toBe(1);
+      expect(clock.tick().clock).toBe(2);
+    }
   });
 
   it('never moves backward', () => {

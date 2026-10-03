@@ -57,18 +57,69 @@ const STALE_CONNECTION_MS = 60_000;
 /** Heartbeat interval. Must be comfortably under the stale threshold. */
 const HEARTBEAT_INTERVAL_MS = 25_000;
 
+/**
+ * Operations replayed per round trip when catching a client up.
+ *
+ * Big enough that an ordinary reconnect is a single frame, small enough that a
+ * week-long absence does not produce a megabyte-long frame that every peer in the
+ * room has to wait behind.
+ */
+const DEFAULT_REPLAY_BATCH = 500;
+
+/**
+ * Upper bound on replay pages for one request.
+ *
+ * A backstop, not a design. It exists so a log that never reports a short page
+ * (a bug, or a concurrent writer outpacing the reader) cannot spin this loop
+ * forever and pin a socket open. At the default batch size it covers 250,000
+ * operations, far beyond any realistic catch-up.
+ */
+const MAX_REPLAY_ROUNDS = 500;
+
+/**
+ * Read side of the durable operation log.
+ *
+ * A port, not the Database class, for the same reason the transport validates
+ * the envelope rather than importing the CRDT (ADR-0004): the relay needs
+ * "give me what this client is missing" and has no business knowing it comes
+ * from Postgres. Tests supply a memory log; production supplies the database.
+ */
+export interface RelayLog {
+  /**
+   * Operations strictly after `sinceSeq`, in sequence order.
+   *
+   * @param limit batch cap, so a client that has been offline for a week is
+   *   caught up in several frames rather than one enormous one.
+   */
+  readSince(documentId: string, sinceSeq: number, limit?: number): Promise<RelayPage>;
+}
+
+export interface RelayPage {
+  readonly ops: readonly JsonValue[];
+  /** Sequence of the last operation in `ops`, or `sinceSeq` when empty. */
+  readonly seq: number;
+}
+
 export interface RelayOptions {
   /** Milliseconds between pings. Set to 0 to disable, for tests. */
   readonly heartbeatMs?: number;
+  /** Durable log. Without one the relay is Phase 3 again: broadcast only. */
+  readonly log?: RelayLog;
+  /** Operations handed to the log in one read-replay round trip. */
+  readonly replayBatchSize?: number;
 }
 
 export class Relay {
   readonly #rooms = new Map<string, Set<Client>>();
   readonly #heartbeat: ReturnType<typeof setInterval> | null;
+  readonly #log: RelayLog | null;
+  readonly #replayBatchSize: number;
   #siteCounter = 0;
 
   constructor(options: RelayOptions = {}) {
     const heartbeatMs = options.heartbeatMs ?? HEARTBEAT_INTERVAL_MS;
+    this.#log = options.log ?? null;
+    this.#replayBatchSize = options.replayBatchSize ?? DEFAULT_REPLAY_BATCH;
 
     this.#heartbeat =
       heartbeatMs > 0
@@ -137,6 +188,9 @@ export class Relay {
     // immediate send is silently dropped by the readyState guard and the client
     // never receives its site id -- it then cannot mint unique element IDs, and
     // two clients collide on the same IDs and corrupt the document.
+    //
+    // Only the identity is sent here. The catch-up snapshot depends on the
+    // client's cursor, which arrives in `hello`, so it cannot be built yet.
     const sendWelcome = (): void => {
       this.#send(client, {
         type: 'welcome',
@@ -144,7 +198,7 @@ export class Relay {
         site: client.site,
         documentId,
         snapshot: [],
-        clock: 0,
+        seq: 0,
       });
     };
 
@@ -244,6 +298,11 @@ export class Relay {
           });
           return;
         }
+
+        // The client has just declared how much of the log it holds. Everything
+        // after that point goes down the socket in one frame, so an offline
+        // client is current again before it sends a single keystroke.
+        void this.#replayFrom(client, message.lastAppliedSeq);
         return;
       }
 
@@ -276,15 +335,11 @@ export class Relay {
       }
 
       case 'resync': {
-        // Phase 4 replays the operation log for a reconnecting client. For now
-        // the acknowledgement is enough to prove the message is handled.
-        this.#send(client, {
-          type: 'syncState',
-          documentId: client.documentId,
-          state: 'synced',
-          pendingOps: 0,
-          clock: 0,
-        });
+        // A client asking for a specific range, not for "everything since you
+        // last saw me". The cursor travels with the request, so a reconnect onto a
+        // different socket resumes from the client's own state rather than from
+        // whatever the server happened to remember.
+        void this.#replayFrom(client, message.sinceSeq);
         return;
       }
 
@@ -292,6 +347,68 @@ export class Relay {
         return;
       }
     }
+  }
+
+  /**
+   * Send everything after `sinceSeq`, then acknowledge the new cursor.
+   *
+   * Loops until a short page comes back. Only the short page terminates the loop:
+   * stopping on an empty page instead would stop early whenever a batch happened
+   * to divide evenly, leaving the client silently behind while the server reported
+   * it as caught up.
+   */
+  async #replayFrom(client: Client, sinceSeq: number): Promise<void> {
+    if (this.#log === null) {
+      // No durable log configured. Say so honestly rather than reporting "synced"
+      // for a catch-up that never happened.
+      this.#send(client, {
+        type: 'syncState',
+        documentId: client.documentId,
+        state: 'synced',
+        pendingOps: 0,
+        seq: sinceSeq,
+      });
+      return;
+    }
+
+    let cursor = sinceSeq;
+
+    try {
+      for (let round = 0; round < MAX_REPLAY_ROUNDS; round += 1) {
+        const page = await this.#log.readSince(client.documentId, cursor, this.#replayBatchSize);
+
+        if (page.ops.length > 0) {
+          this.#send(client, {
+            type: 'ops',
+            documentId: client.documentId,
+            ops: page.ops,
+          });
+        }
+
+        cursor = page.seq;
+
+        if (page.ops.length < this.#replayBatchSize) {
+          break;
+        }
+      }
+    } catch {
+      // A storage failure must not leave the client believing it is current. It
+      // will retry with jittered backoff, which is the recovery path that exists.
+      this.#send(client, {
+        type: 'error',
+        code: 'INTERNAL',
+        message: 'Could not read the operation log.',
+      });
+      return;
+    }
+
+    this.#send(client, {
+      type: 'syncState',
+      documentId: client.documentId,
+      state: 'synced',
+      pendingOps: 0,
+      seq: cursor,
+    });
   }
 
   /** Cursor offset by `${documentId}:${site}`, covering every open room. */

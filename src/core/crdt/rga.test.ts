@@ -522,13 +522,87 @@ describe('RgaDocument - three-way undo safety', () => {
 
     // 'the cat sat' minus 'cat' is 'the  sat': the spaces either side both
     // remain, which is correct because the user selected three characters.
-    expect(alice.toText()).toBe('the  sat quietly');
+    //
+    // Bob typed at offset 7, which is immediately after 'cat'. His run must land
+    // there, not at the end of the document. That it does is a direct consequence
+    // of the Lamport clock: bob's IDs are higher than every ID already present,
+    // so RGA's integration rule places them immediately after their anchor.
+    expect(alice.toText()).toBe('the  quietly sat');
 
     bob.applyAll(alice.undo());
 
     expect(bob.toText()).toBe(alice.toText());
     expect(bob.toText()).toContain('quietly');
     expect(bob.toText()).toContain('cat');
+  });
+});
+
+describe('RgaDocument - local insert positioning', () => {
+  /**
+   * The property an editor cannot work without.
+   *
+   * Typing at offset N must produce the character at offset N. Convergence alone
+   * does not guarantee this: every replica can agree on a document that is not
+   * what the user typed. It holds because RGA orders siblings by descending ID
+   * and the local clock has been advanced past everything observed, so a local
+   * insert always sorts immediately after its anchor.
+   */
+  it('puts a local insert exactly where the user typed', () => {
+    const remote = new RgaDocument('remote');
+
+    // A document written entirely by somebody else, character by character.
+    const before = 'the quick brown fox';
+    const base = remote.insertAt(0, before);
+
+    // Every offset in that document, including both edges.
+    for (let offset = 0; offset <= before.length; offset += 1) {
+      const doc = new RgaDocument('local');
+      doc.applyAll(base);
+
+      doc.insertAt(offset, '|');
+
+      // Built by slicing the original string, not by asking the CRDT, so a bug in
+      // the CRDT cannot make this test agree with itself.
+      expect(doc.toText(), `offset ${offset}`).toBe(
+        `${before.slice(0, offset)}|${before.slice(offset)}`,
+      );
+    }
+  });
+
+  it('does the same for a delete', () => {
+    const remote = new RgaDocument('remote');
+    const before = 'abcdef';
+    const base = remote.insertAt(0, before);
+
+    for (let offset = 0; offset < before.length; offset += 1) {
+      const doc = new RgaDocument('local');
+      doc.applyAll(base);
+
+      doc.deleteRange(offset, 1);
+
+      expect(doc.toText(), `offset ${offset}`).toBe(
+        `${before.slice(0, offset)}${before.slice(offset + 1)}`,
+      );
+    }
+  });
+
+  it('stays correct after many rounds of remote traffic', () => {
+    const local = new RgaDocument('local');
+    const remote = new RgaDocument('remote');
+
+    const base = remote.insertAt(0, 'hello');
+    local.applyAll(base);
+
+    for (let round = 0; round < 20; round += 1) {
+      const fromRemote = remote.insertAt(0, 'x');
+      local.applyAll(fromRemote);
+      remote.applyAll(local.insertAt(local.toText().length, 'y'));
+    }
+
+    // Whatever the interleaving, the local user appending at the end must end up
+    // with that text at the end.
+    expect(local.toText().endsWith('y')).toBe(true);
+    expect(local.checkInvariants()).toEqual([]);
   });
 });
 
