@@ -222,14 +222,37 @@ describe('PATCH /api/documents/:id', () => {
 
 describe('GET /api/documents', () => {
   it('lists documents newest first', async () => {
+    // Touches 'a' after creating 'b', so this asserts `updated_at` ordering rather
+    // than insertion order. Insertion order would pass either way.
     await createDocument('a', 'A');
     await createDocument('b', 'B');
+    await fetch(`${baseUrl}/api/documents/a`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'touched last' }),
+    });
 
     const res = await fetch(`${baseUrl}/api/documents`);
     expect(res.status).toBe(200);
 
     const body = (await res.json()) as { documents: { id: string }[] };
-    expect(body.documents[0]?.id).toBe('b');
+    expect(body.documents[0]?.id).toBe('a');
+  });
+
+  it('returns a stable order for documents sharing a timestamp', async () => {
+    await createDocument('x', 'X');
+    await createDocument('y', 'Y');
+    await createDocument('z', 'Z');
+
+    const read = async (): Promise<string[]> => {
+      const res = await fetch(`${baseUrl}/api/documents`);
+      const body = (await res.json()) as { documents: { id: string }[] };
+      return body.documents.map((doc) => doc.id);
+    };
+
+    // Two identical requests must produce two identical orders. Anything else means
+    // the endpoint cannot be paginated against.
+    expect(await read()).toEqual(await read());
   });
 
   it('returns an empty list rather than an error when there is nothing stored', async () => {

@@ -154,12 +154,33 @@ describe('renameDocument', () => {
 
 describe('listDocuments', () => {
   it('returns newest first', async () => {
+    // Deliberately saves 'a' after creating 'b' before listing, so the assertion is
+    // about `updated_at` rather than about insertion order. Asserting on insertion
+    // order would pass whether or not the ORDER BY worked at all.
     await db.createDocument({ id: 'a', title: 'A' });
-    await db.saveDocument('a', 'touch a');
     await db.createDocument({ id: 'b', title: 'B' });
+    await db.saveDocument('a', 'touch a last');
 
     const list = await db.listDocuments();
-    expect(list[0]?.id).toBe('b');
+    expect(list[0]?.id).toBe('a');
+  });
+
+  it('is stable when two documents share a timestamp', async () => {
+    // Rows written in the same clock tick have equal `updated_at`, and Postgres
+    // returns tied rows in whatever order the heap gives it. Without the id
+    // tiebreaker this test fails on some machines and passes on others, which is
+    // the worst property a list endpoint can have.
+    await db.createDocument({ id: 'a', title: 'A' });
+    await db.createDocument({ id: 'b', title: 'B' });
+    await db.createDocument({ id: 'c', title: 'C' });
+
+    const first = await db.listDocuments();
+    const second = await db.listDocuments();
+
+    expect(first.map((doc) => doc.id)).toEqual(second.map((doc) => doc.id));
+
+    // And the order must be a total one: descending by timestamp, then by id.
+    expect(first.map((doc) => doc.id)).toEqual(['c', 'b', 'a']);
   });
 
   it('honours the limit', async () => {

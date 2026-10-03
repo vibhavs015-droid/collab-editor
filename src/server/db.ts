@@ -271,10 +271,17 @@ export class Database {
 
   async listDocuments(limit = 50): Promise<DocumentRecord[]> {
     // Parameterised, not interpolated: `limit` is user-controlled from Phase 5.
+    //
+    // `id` is a tiebreaker, not decoration. Two documents written inside the same
+    // clock tick have equal `updated_at`, and Postgres is free to return tied rows
+    // in any order it likes — heap order, most often. A list endpoint whose order
+    // silently changes between identical calls cannot be paginated against, and a
+    // test asserting "newest first" on tied rows fails on a fast machine and passes
+    // on a slow one, which is the worst possible failure mode for a test.
     const result = await this.#pg.query<DocumentRow>(
       `SELECT id, title, content, clock, updated_at
        FROM documents
-       ORDER BY updated_at DESC
+       ORDER BY updated_at DESC, id DESC
        LIMIT $1`,
       [limit],
     );
