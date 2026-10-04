@@ -50,6 +50,7 @@
     "@codemirror/view": "6.38.1",
     "@electric-sql/pglite": "0.5.8",
     "codemirror": "6.0.2",
+    "jose": "^6.2.12",
     "ws": "8.22.0"
   }
 }

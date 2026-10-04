@@ -167,10 +167,20 @@ export interface SyncStateMessage {
   readonly seq: number;
 }
 
+/**
+ * Why a request failed.
+ *
+ * Named rather than numeric, and a closed set, so a client can branch on the
+ * reason instead of parsing a sentence. The wire protocol and the HTTP API share
+ * it: the same condition produces the same code on both, which is what lets the
+ * client handle one failure the same way regardless of transport.
+ */
+export type ErrorCode =
+  'BAD_MESSAGE' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'DOCUMENT_NOT_FOUND' | 'INTERNAL';
+
 export interface ErrorMessage {
   readonly type: 'error';
-  readonly code:
-    'BAD_MESSAGE' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'DOCUMENT_NOT_FOUND' | 'INTERNAL';
+  readonly code: ErrorCode;
   readonly message: string;
 }
 

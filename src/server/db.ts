@@ -44,13 +44,26 @@ export interface DocumentRecord {
   /** Highest CRDT clock applied. Always 0 until Phase 2. */
   readonly clock: number;
   readonly updatedAt: string;
+  /**
+   * Subject that created this document, or null when unowned.
+   *
+   * Null is not a failure. It means the document predates authentication, or was
+   * created outside the API, and it is world-writable. See ADR-0012 and
+   * {@link Database.claimOwnership}.
+   */
+  readonly owner: string | null;
 }
 
 export interface CreateDocumentInput {
   readonly id: string;
-  /** Optional — defaults to `'Untitled'`, matching the column default. */
+  /** Optional - defaults to `'Untitled'`, matching the column default. */
   readonly title?: string;
   readonly content?: string;
+  /**
+   * Subject to record as owner. Omit or pass null to create an unowned document,
+   * which anyone may then read and write.
+   */
+  readonly owner?: string | null;
 }
 
 export interface SaveResult {
@@ -170,6 +183,47 @@ const MIGRATIONS: readonly { readonly name: string; readonly sql: string }[] = [
         'Newest compaction snapshot per document. Replaces document_ops below its seq.';
     `,
   },
+  {
+    name: '0004_document_ownership',
+    sql: `
+      -- Who may touch a document. See ADR-0012.
+      --
+      -- Added as a migration rather than into 0001 because 0001 has shipped. A
+      -- migration is append-only: editing a shipped one would leave existing
+      -- databases on a schema no code expects.
+      --
+      -- owner IS NULL means UNOWNED, which means anyone may read and write. That
+      -- is the pre-authentication behaviour and it is deliberately preserved, so
+      -- every document created before this migration keeps working instead of
+      -- becoming unreachable. claimOwnership() is how one becomes owned.
+      --
+      -- The alternative -- NOT NULL with a backfill -- would lock every existing
+      -- document to an arbitrary sentinel owner, which is ownership by accident
+      -- rather than by decision.
+      ALTER TABLE documents ADD COLUMN IF NOT EXISTS owner TEXT;
+
+      -- Explicit grants. A collaborative editor where only the creator may write
+      -- is not a collaborative editor, and building a share UI is CRUD, so the
+      -- grant is the smallest thing that makes collaboration possible.
+      CREATE TABLE IF NOT EXISTS document_collaborators (
+        document_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+        subject     TEXT NOT NULL,
+        granted_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (document_id, subject)
+      );
+
+      -- Authorisation reads every grant for one document. The primary key already
+      -- serves that as an index scan, so this only exists to cover the reverse
+      -- question: "what can this subject reach?", which the list endpoint asks.
+      CREATE INDEX IF NOT EXISTS document_collaborators_subject_idx
+        ON document_collaborators (subject);
+
+      COMMENT ON COLUMN documents.owner IS
+        'Subject that created this document. NULL means unowned and world-writable.';
+      COMMENT ON TABLE document_collaborators IS
+        'Explicit access grants. Owner is not repeated here; see canAccess.';
+    `,
+  },
 ];
 
 export class Database {
@@ -287,13 +341,13 @@ export class Database {
 
   async createDocument(input: CreateDocumentInput): Promise<DocumentRecord> {
     const result = await this.#pg.query<DocumentRow>(
-      `INSERT INTO documents (id, title, content)
-       VALUES ($1, $2, $3)
-       RETURNING id, title, content, clock, updated_at`,
+      `INSERT INTO documents (id, title, content, owner)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, title, content, clock, updated_at, owner`,
       // Explicit fallbacks rather than relying on column DEFAULT. Postgres
       // applies a DEFAULT only when the column is *omitted* from the INSERT;
       // binding NULL passes a real NULL through, which violates NOT NULL.
-      [input.id, input.title ?? 'Untitled', input.content ?? ''],
+      [input.id, input.title ?? 'Untitled', input.content ?? '', input.owner ?? null],
     );
 
     const row = result.rows[0];
@@ -316,7 +370,7 @@ export class Database {
 
   async getDocument(id: string): Promise<DocumentRecord | null> {
     const result = await this.#pg.query<DocumentRow>(
-      'SELECT id, title, content, clock, updated_at FROM documents WHERE id = $1',
+      'SELECT id, title, content, clock, updated_at, owner FROM documents WHERE id = $1',
       [id],
     );
 
@@ -324,6 +378,17 @@ export class Database {
     return row ? toRecord(row) : null;
   }
 
+  /**
+   * Every document, regardless of owner.
+   *
+   * NOT wired to the HTTP list endpoint. A global list handed to an authenticated
+   * caller discloses every title in the database to anyone who asks, which would be
+   * a new leak created by adding authentication rather than closed by it. The
+   * endpoint uses {@link listDocumentsFor}.
+   *
+   * Kept for tests, the boot-time backfill, and administrative tools, all of which
+   * already have database access by definition.
+   */
   async listDocuments(limit = 50): Promise<DocumentRecord[]> {
     // Parameterised, not interpolated: `limit` is user-controlled from Phase 5.
     //
@@ -337,7 +402,7 @@ export class Database {
     // identical calls, which makes it impossible to paginate against. This cost
     // two failed CI runs before it was understood; see db.test.ts.
     const result = await this.#pg.query<DocumentRow>(
-      `SELECT id, title, content, clock, updated_at
+      `SELECT id, title, content, clock, updated_at, owner
        FROM documents
        ORDER BY updated_at DESC, id DESC
        LIMIT $1`,
@@ -345,6 +410,152 @@ export class Database {
     );
 
     return result.rows.map(toRecord);
+  }
+
+  /**
+   * Documents one subject may reach: the ones it owns, the ones it was granted, and
+   * the unowned ones.
+   *
+   * The unowned rows are included deliberately. They are readable by everyone, so
+   * omitting them from the list while allowing them in the detail endpoint would
+   * make a document exist and not exist depending on which endpoint you asked.
+   *
+   * The same `updated_at DESC, id DESC` ordering as {@link listDocuments}, for the
+   * same reason: without the tiebreaker the order silently changes between
+   * identical calls and the endpoint cannot be paginated against.
+   */
+  async listDocumentsFor(subject: string, limit = 50): Promise<DocumentRecord[]> {
+    const result = await this.#pg.query<DocumentRow>(
+      `SELECT d.id, d.title, d.content, d.clock, d.updated_at, d.owner
+       FROM documents d
+       WHERE d.owner IS NULL
+          OR d.owner = $1
+          OR EXISTS (
+            SELECT 1 FROM document_collaborators c
+             WHERE c.document_id = d.id AND c.subject = $1
+          )
+       ORDER BY d.updated_at DESC, d.id DESC
+       LIMIT $2`,
+      [subject, limit],
+    );
+
+    return result.rows.map(toRecord);
+  }
+
+  /**
+   * May `subject` read and write `documentId`?
+   *
+   * The single authorisation decision. Both the HTTP API and the WebSocket relay
+   * call this, which is the point: two implementations of "may I touch this
+   * document" would eventually disagree, and the one that disagrees in the
+   * permissive direction is the one nobody notices.
+   *
+   * A document that does not exist returns false, so callers cannot use this to
+   * probe which ids are real. `DOCUMENT_NOT_FOUND` is then only reachable by an
+   * owner or a collaborator, which is the only situation where it is safe to say.
+   *
+   * Unowned documents return true for everyone. See ADR-0012 for why that is the
+   * honest default rather than a hole to route around.
+   */
+  async canAccess(documentId: string, subject: string): Promise<boolean> {
+    const result = await this.#pg.query<{ allowed: boolean }>(
+      `SELECT TRUE AS allowed
+         FROM documents d
+        WHERE d.id = $1
+          AND (d.owner IS NULL
+               OR d.owner = $2
+               OR EXISTS (
+                 SELECT 1 FROM document_collaborators c
+                  WHERE c.document_id = d.id AND c.subject = $2
+               ))
+        LIMIT 1`,
+      [documentId, subject],
+    );
+
+    return result.rows.length > 0;
+  }
+
+  /**
+   * Grant `subject` access to a document.
+   *
+   * @returns false when the document does not exist, so a grant cannot create one.
+   * @throws when the caller is not the owner. The check and the insert are not in
+   *   one transaction with the caller's authorisation decision; they are one
+   *   statement, which is what stops a concurrent owner change racing the grant.
+   */
+  async grantAccess(documentId: string, subject: string, grantedBy: string): Promise<boolean> {
+    const result = await this.#pg.query<{ id: string }>(
+      `INSERT INTO document_collaborators (document_id, subject)
+       SELECT id, $2 FROM documents
+        WHERE id = $1 AND (owner IS NULL OR owner = $3)
+       ON CONFLICT (document_id, subject) DO NOTHING
+       RETURNING document_id`,
+      [documentId, subject, grantedBy],
+    );
+
+    return result.rows.length > 0;
+  }
+
+  /**
+   * Remove a grant.
+   *
+   * @returns false when the document does not exist. A revocation that silently
+   *   did nothing would leave access in place while reporting success.
+   */
+  async revokeAccess(documentId: string, subject: string, revokedBy: string): Promise<boolean> {
+    const owned = await this.#isOwner(documentId, revokedBy);
+
+    if (!owned) {
+      return false;
+    }
+
+    await this.#pg.query(
+      'DELETE FROM document_collaborators WHERE document_id = $1 AND subject = $2',
+      [documentId, subject],
+    );
+
+    return true;
+  }
+
+  /**
+   * Take ownership of an unowned document.
+   *
+   * This is how a document created before authentication, or created by a script,
+   * stops being world-writable.
+   *
+   * `owner IS NULL` in the WHERE clause is the whole point. Without it this would be
+   * a takeover: any subject could seize any document and lock out its creator.
+   *
+   * @returns false when the document does not exist or is already owned.
+   */
+  async claimOwnership(documentId: string, subject: string): Promise<boolean> {
+    const result = await this.#pg.query<{ id: string }>(
+      `UPDATE documents SET owner = $2
+        WHERE id = $1 AND owner IS NULL
+       RETURNING id`,
+      [documentId, subject],
+    );
+
+    return result.rows.length > 0;
+  }
+
+  /** Subjects explicitly granted access, excluding the owner. */
+  async listCollaborators(documentId: string): Promise<string[]> {
+    const result = await this.#pg.query<{ subject: string }>(
+      'SELECT subject FROM document_collaborators WHERE document_id = $1 ORDER BY subject',
+      [documentId],
+    );
+
+    return result.rows.map((row: { subject: string }) => row.subject);
+  }
+
+  async #isOwner(documentId: string, subject: string): Promise<boolean> {
+    const result = await this.#pg.query<{ id: string }>(
+      'SELECT id FROM documents WHERE id = $1 AND owner = $2',
+      [documentId, subject],
+    );
+
+    return result.rows.length > 0;
   }
 
   /**
@@ -770,6 +981,7 @@ interface DocumentRow {
   content: string;
   clock: string | number;
   updated_at: Date;
+  owner: string | null;
 }
 
 /**
@@ -816,5 +1028,6 @@ function toRecord(row: DocumentRow): DocumentRecord {
     content: row.content,
     clock: toClock(row.clock),
     updatedAt: toIso(row.updated_at),
+    owner: row.owner,
   };
 }

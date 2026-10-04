@@ -24,6 +24,7 @@ import type { WebSocket } from 'ws';
 import {
   PROTOCOL_VERSION,
   type ClientMessage,
+  type ErrorCode,
   type JsonValue,
   type ServerMessage,
 } from '../shared/protocol.js';
@@ -39,7 +40,35 @@ interface Client {
   lastSeen: number;
   /** Consecutive frames sent while the socket buffer was full. */
   backpressureHits: number;
+  /**
+   * Verified subject, or null before `hello` has been authorised.
+   *
+   * Set once and never reassigned, so a frame arriving mid-authorisation cannot
+   * re-decide it.
+   */
+  subject: string | null;
+  /** Whether this client may receive operations or be counted in a room. */
+  authenticated: boolean;
+  /** True while an authorisation request is in flight, which makes `hello` idempotent. */
+  admitting: boolean;
+  /** When an unauthenticated socket is dropped for never saying hello. */
+  helloDeadline: number | null;
 }
+
+/**
+ * Outcome of an authorisation check.
+ *
+ * A discriminated union rather than a boolean, so the relay can forward the reason
+ * the caller gave and so "allowed" cannot be confused with "allowed, but there is
+ * no such document".
+ */
+export type AuthorizeResult =
+  | { readonly ok: true; readonly subject: string }
+  | {
+      readonly ok: false;
+      readonly code: Extract<ErrorCode, 'UNAUTHORIZED' | 'DOCUMENT_NOT_FOUND'>;
+      readonly message: string;
+    };
 
 /**
  * Frames sent to one client before giving up on it.
@@ -75,6 +104,15 @@ const DEFAULT_REPLAY_BATCH = 500;
  * operations, far beyond any realistic catch-up.
  */
 const MAX_REPLAY_ROUNDS = 500;
+
+/**
+ * How long a socket may stay connected without sending hello.
+ *
+ * Long enough that a client on a slow connection, or one that spent its time
+ * fetching a session token, is not dropped. Short enough that an unauthenticated
+ * connection costs a slot and a database lookup rather than sitting forever.
+ */
+const HELLO_TIMEOUT_MS = 10_000;
 
 /**
  * Read side of the durable operation log.
@@ -130,14 +168,48 @@ export interface RelayOptions {
   readonly onCursor?: (documentId: string, site: string, seq: number) => void;
   /** Called when a client leaves, so a departed peer stops holding the floor. */
   readonly onLeave?: (documentId: string, site: string) => void;
+
+  /**
+   * Verify a session token and check it may touch this document.
+   *
+   * Omit it and the relay admits every socket immediately, which is the Phase 3
+   * behaviour and is only appropriate for a relay with no session tokens at all.
+   * Supply it and no socket receives a single operation until it has passed.
+   *
+   * The relay deliberately does not know how tokens are signed, nor what a
+   * document's owner is. It asks, and obeys. Both decisions live in one place
+   * (`Database.canAccess`) so the HTTP path and the socket path cannot drift.
+   */
+  readonly authorize?: (documentId: string, token: string) => Promise<AuthorizeResult>;
+
+  /**
+   * How long a socket may stay connected without sending `hello`.
+   *
+   * Without this, an unauthenticated socket is indistinguishable from a slow one,
+   * and a server that admits sockets before checking them has an open door that
+   * nobody remembers is open.
+   */
+  readonly helloTimeoutMs?: number;
 }
 
 export class Relay {
   readonly #rooms = new Map<string, Set<Client>>();
+
+  /**
+   * Sockets that connected but have not been authorised.
+   *
+   * Held separately because they are in no room, which means every routine that
+   * walks rooms would miss them: the reaper, shutdown, and the client count. A
+   * client stuck between connect and hello is the resource an attacker wants to
+   * accumulate, so it needs to be visible to all three.
+   */
+  readonly #pending = new Set<Client>();
   readonly #heartbeat: ReturnType<typeof setInterval> | null;
   readonly #log: RelayLog | null;
   readonly #onCursor: RelayOptions['onCursor'];
   readonly #onLeave: RelayOptions['onLeave'];
+  readonly #authorize: RelayOptions['authorize'];
+  readonly #helloTimeoutMs: number;
   readonly #replayBatchSize: number;
   #siteCounter = 0;
 
@@ -146,6 +218,8 @@ export class Relay {
     this.#log = options.log ?? null;
     this.#onCursor = options.onCursor;
     this.#onLeave = options.onLeave;
+    this.#authorize = options.authorize;
+    this.#helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
     this.#replayBatchSize = options.replayBatchSize ?? DEFAULT_REPLAY_BATCH;
 
     this.#heartbeat =
@@ -166,6 +240,16 @@ export class Relay {
       total += room.size;
     }
     return total;
+  }
+
+  /**
+   * Sockets connected but not yet authorised.
+   *
+   * Exposed because a number that only goes up is an attack, not a bug. Watched in
+   * tests and reported by the metrics endpoint.
+   */
+  get pendingCount(): number {
+    return this.#pending.size;
   }
 
   /** Number of rooms with at least one client. */
@@ -200,39 +284,31 @@ export class Relay {
    *   that needs real operations validates them there.
    */
   attach(socket: WebSocket, documentId: string, onOps?: (ops: readonly JsonValue[]) => void): void {
+    const requiresAuth = this.#authorize !== undefined;
+
     const client: Client = {
       socket,
       site: this.#mintSite(),
       documentId,
       lastSeen: Date.now(),
       backpressureHits: 0,
+      subject: null,
+      // No authoriser configured means there is nothing to wait for, so the client
+      // is admitted straight away. One flag, one code path.
+      authenticated: !requiresAuth,
+      admitting: false,
+      helloDeadline: requiresAuth ? Date.now() + this.#helloTimeoutMs : null,
     };
 
-    this.#join(client);
-
-    // Wait for 'open' before sending. When attach() runs inside a
-    // handleUpgrade callback the socket's readyState is still CONNECTING, so an
-    // immediate send is silently dropped by the readyState guard and the client
-    // never receives its site id -- it then cannot mint unique element IDs, and
-    // two clients collide on the same IDs and corrupt the document.
-    //
-    // Only the identity is sent here. The catch-up snapshot depends on the
-    // client's cursor, which arrives in `hello`, so it cannot be built yet.
-    const sendWelcome = (): void => {
-      this.#send(client, {
-        type: 'welcome',
-        protocolVersion: PROTOCOL_VERSION,
-        site: client.site,
-        documentId,
-        snapshot: [],
-        seq: 0,
-      });
-    };
-
-    if (socket.readyState === 1) {
-      sendWelcome();
+    if (client.authenticated) {
+      // #admit joins the room and sends the welcome, deferring until the socket is
+      // open. That deferral matters: attach() runs inside a handleUpgrade callback
+      // where readyState is still CONNECTING, and an immediate send would be
+      // silently dropped -- so the client would never learn its site id, could not
+      // mint unique element IDs, and two clients would collide on the same IDs.
+      this.#admit(client);
     } else {
-      socket.once('open', sendWelcome);
+      this.#pending.add(client);
     }
 
     socket.on('message', (data: Buffer) => {
@@ -266,6 +342,62 @@ export class Relay {
   }
 
   /**
+   * Bring an authorised client into the room and greet it.
+   *
+   * Everything that makes a client able to affect or observe a document happens
+   * here and nowhere else: joining the room, which is what broadcasts reach, and
+   * the welcome that carries its site.
+   *
+   * Deliberately NOT clearing the hello deadline here. If the client was admitted
+   * without ever having sent `hello` (no authoriser configured), the deadline is
+   * already null; and if it was admitted by a real `hello`, the reaper has nothing
+   * left to reap.
+   */
+  #admit(client: Client): void {
+    if (!client.authenticated || client.admitting) {
+      return;
+    }
+
+    client.admitting = true;
+
+    try {
+      // Admitted, so it must stop counting against the hello deadline whether or not
+      // the join succeeds.
+      this.#pending.delete(client);
+      this.#join(client);
+      this.#sendWelcome(client);
+    } finally {
+      client.admitting = false;
+    }
+  }
+
+  /**
+   * Send the welcome frame once the socket can actually carry it.
+   *
+   * Separate from {@link admit} because the two concerns differ: admission is a
+   * decision, the socket's readiness is a fact about the network.
+   */
+  #sendWelcome(client: Client): void {
+    const frame = {
+      type: 'welcome',
+      protocolVersion: PROTOCOL_VERSION,
+      site: client.site,
+      documentId: client.documentId,
+      snapshot: [],
+      seq: 0,
+    } as const;
+
+    if (client.socket.readyState === 1) {
+      this.#send(client, frame);
+      return;
+    }
+
+    client.socket.once('open', () => {
+      this.#send(client, frame);
+    });
+  }
+
+  /**
    * The single parse boundary.
    *
    * Nothing reaches the relay without passing through `parseClientMessage`, so
@@ -284,6 +416,10 @@ export class Relay {
   }
 
   #leave(client: Client): void {
+    // Always, first. A pending client was never in a room, and a rejected one was
+    // just removed from one, so returning early on "no room" would strand it here.
+    this.#pending.delete(client);
+
     const room = this.#rooms.get(client.documentId);
     if (!room) {
       return;
@@ -315,11 +451,120 @@ export class Relay {
     });
   }
 
+  /**
+   * Verify a token, and admit the client if it holds up.
+   *
+   * Failure closes the socket rather than merely refusing this one frame. A
+   * connection that failed authorisation has no reason to send another, and
+   * leaving it open means every future frame re-runs the same database lookup --
+   * an unauthenticated client becomes a way to generate load for free.
+   *
+   * A repeated `hello` while this is in flight is ignored rather than queued. Two
+   * concurrent authorisations for one socket would both admit, and admitting twice
+   * would send two welcomes and two replays.
+   */
+  async #authenticate(client: Client, token: string, lastAppliedSeq: number): Promise<void> {
+    const authorize = this.#authorize;
+
+    if (authorize === undefined) {
+      client.authenticated = true;
+      this.#admit(client);
+      void this.#replayFrom(client, lastAppliedSeq);
+      return;
+    }
+
+    if (client.admitting) {
+      return;
+    }
+
+    client.admitting = true;
+
+    let result: AuthorizeResult;
+
+    try {
+      result = await authorize(client.documentId, token);
+    } catch (error) {
+      // An authoriser that throws has not said yes. Failing closed is the only safe
+      // reading: the alternative is that a database blip grants access.
+      process.stderr.write(
+        `[relay] authorisation failed for ${client.documentId}: ${String(error)}\n`,
+      );
+      this.#reject(client, 'UNAUTHORIZED', 'Could not verify the session.');
+      return;
+    } finally {
+      client.admitting = false;
+    }
+
+    if (!result.ok) {
+      this.#reject(client, result.code, result.message);
+      return;
+    }
+
+    // Anything that closed the socket while the check was in flight must not be
+    // admitted afterwards. A client whose connection has already gone should not
+    // be left in a room it can no longer be reached in.
+    if (client.socket.readyState !== 1) {
+      return;
+    }
+
+    client.subject = result.subject;
+    client.helloDeadline = null;
+    client.authenticated = true;
+
+    this.#admit(client);
+
+    // The client has just declared how much of the log it holds. Everything after
+    // that point goes down the socket in one frame, so an offline client is current
+    // again before it sends a single keystroke.
+    void this.#replayFrom(client, lastAppliedSeq);
+  }
+
+  /** Tell a client why it is being disconnected, then disconnect it. */
+  #reject(client: Client, code: ErrorCode, message: string): void {
+    this.#send(client, { type: 'error', code, message });
+
+    // 1008 is RFC 6455's "policy violation". The code is the part a client can act
+    // on: 1000 would look like a normal shutdown and retry forever.
+    this.#close(client, 1008, 'Unauthorized');
+  }
+
+  /**
+   * Close a socket and take it out of every room.
+   *
+   * Goes through `#leave` rather than trusting the socket's own `close` event,
+   * because that event may never arrive for a socket that was never fully open.
+   */
+  #close(client: Client, code: number, reason: string): void {
+    this.#leave(client);
+
+    try {
+      if (client.socket.readyState === 0 || client.socket.readyState === 1) {
+        client.socket.close(code, reason);
+      } else {
+        // Already closing or closed. `terminate()` is still needed to release the
+        // handle, and is safe to call on a socket in any state.
+        client.socket.terminate();
+      }
+    } catch {
+      // A socket that refuses to close is already broken; nothing useful is left
+      // to do and the reaper will clean up.
+    }
+  }
+
   #handle(
     client: Client,
     message: ClientMessage,
     onOps?: (ops: readonly JsonValue[]) => void,
   ): void {
+    // Nothing but `hello` is accepted from a client that has not been authorised.
+    //
+    // This is the gate, and it is above the switch on purpose: a check inside each
+    // case is a check someone eventually forgets to add. `hello` itself is exempt
+    // because it is the frame that produces authorisation.
+    if (!client.authenticated && message.type !== 'hello') {
+      this.#reject(client, 'UNAUTHORIZED', 'Send hello before anything else.');
+    }
+
     switch (message.type) {
       case 'hello': {
         if (message.protocolVersion !== PROTOCOL_VERSION) {
@@ -331,10 +576,15 @@ export class Relay {
           return;
         }
 
-        // The client has just declared how much of the log it holds. Everything
-        // after that point goes down the socket in one frame, so an offline
-        // client is current again before it sends a single keystroke.
-        void this.#replayFrom(client, message.lastAppliedSeq);
+        if (client.authenticated) {
+          // Already admitted: either there is no authoriser, or this is a second
+          // hello on a live socket. Either way the client just wants catching up
+          // again, which is harmless and cheaper than re-authorising.
+          void this.#replayFrom(client, message.lastAppliedSeq);
+          return;
+        }
+
+        void this.#authenticate(client, message.token, message.lastAppliedSeq);
         return;
       }
 
@@ -547,9 +797,17 @@ export class Relay {
     for (const room of [...this.#rooms.values()]) {
       for (const client of [...room]) {
         if (client.lastSeen < cutoff) {
-          client.socket.close(1001, 'Stale connection');
-          this.#leave(client);
+          this.#close(client, 1001, 'Stale connection');
         }
+      }
+    }
+
+    // Sockets that connected and never said hello are in no room, so the loop above
+    // cannot see them. They are exactly the connections nobody is waiting for, so
+    // they are the ones that must be swept.
+    for (const client of [...this.#pending]) {
+      if (client.helloDeadline !== null && Date.now() > client.helloDeadline) {
+        this.#close(client, 1008, 'No hello');
       }
     }
   }
@@ -566,6 +824,13 @@ export class Relay {
       }
     }
 
+    // Pending sockets are in no room, so the loop above misses them. Leaving them
+    // open would keep the process alive after close() returned.
+    for (const client of this.#pending) {
+      client.socket.close(1001, 'Server shutting down');
+    }
+
+    this.#pending.clear();
     this.#rooms.clear();
     this.#presence.clear();
   }
