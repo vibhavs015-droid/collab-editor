@@ -162,7 +162,7 @@ with the real `Replica`, and runs in CI.
 | Lint            | `npm run lint`                 | 0 problems  |
 | Format          | `npm run format:check`         | clean       |
 | Line endings    | `npm run check:line-endings`   | clean       |
-| Tests           | `npm test`                     | 711 passing |
+| Tests           | `npm test`                     | 768 passing |
 | Vulnerabilities | `npm audit --audit-level=high` | 0           |
 
 CI runs each as a separate gate, plus a dependency-audit job.
@@ -263,19 +263,41 @@ npm run dev 2>&1 | jq 'select(.level != "info")'
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in values. `.env` is gitignored;
-`.env.example` is committed and must never contain real credentials.
+Copy `.env.example` to `.env` and fill in values. `.env` is gitignored; `.env.example` is
+committed and must never contain real credentials.
 
-| Variable          | Default              | What it does                                                                                    |
-| ----------------- | -------------------- | ----------------------------------------------------------------------------------------------- |
-| `JWT_SECRET`      | _unset_              | Signs session tokens. Unset means auth is **open**, which is refused when `NODE_ENV=production` |
-| `AUTH_MODE`       | inferred             | `required` or `open`, to pin the decision explicitly                                            |
-| `LOG_LEVEL`       | `info`               | `debug` to include per-connection detail                                                        |
-| `PORT` / `HOST`   | `3001` / `127.0.0.1` | Where the server listens                                                                        |
-| `PGLITE_DATA_DIR` | `./.data/pgdata`     | Where the database lives                                                                        |
+| Variable          | Default              | What it does                                                                                         |
+| ----------------- | -------------------- | ---------------------------------------------------------------------------------------------------- |
+| `JWT_SECRET`      | _unset_              | Signs session tokens. Unset means auth is **open**, which is refused when `NODE_ENV=production`      |
+| `AUTH_MODE`       | inferred             | `required` or `open`, to pin the decision explicitly                                                 |
+| `LOG_LEVEL`       | `info`               | `debug` to include per-connection detail                                                             |
+| `PORT` / `HOST`   | `3001` / `127.0.0.1` | Where the server listens. **`HOST` must be `0.0.0.0` in a container** — see [deploy](docs/deploy.md) |
+| `PGLITE_DATA_DIR` | `./.data/pgdata`     | Where the database lives. Must be a mounted volume in a container                                    |
+| `CLIENT_DIST`     | `./dist/client`      | Where the built client lives, served by the same process                                             |
+
+`.env.example` documents exactly the variables the code reads. A test compares it against
+the source in both directions, so a variable that does nothing — or a variable that does
+something but is undocumented — fails CI rather than misleading the next reader.
 
 Without `JWT_SECRET`, the server logs a warning on startup and `/api/health` reports
 `"auth": "open"`. It refuses to start that way under `NODE_ENV=production`.
+
+---
+
+## Running it in a container
+
+```bash
+export JWT_SECRET="$(openssl rand -base64 48)"
+docker compose up --build      # http://127.0.0.1:3001
+```
+
+One process serves the API, the WebSocket and the client on one port, from one origin —
+which is why no CORS configuration exists anywhere in this project.
+
+`PGLITE_DATA_DIR` must be a mounted volume. Without one, every rebuild starts from an
+empty database. [`docs/deploy.md`](docs/deploy.md) covers the free-tier deploy options,
+the three container traps that each produce a container which starts and serves nothing,
+and — importantly — **what has and has not been verified** about the image.
 
 ---
 
@@ -285,6 +307,7 @@ Without `JWT_SECRET`, the server logs a warning on startup and `/api/health` rep
 | --------------------------------------- | ---------------------------------------------- |
 | [`NOTES.md`](NOTES.md)                  | Running log: what confused me, what went wrong |
 | [`docs/`](docs/README.md)               | Architecture decisions, benchmarks, rationale  |
+| [`docs/deploy.md`](docs/deploy.md)      | Containers, free-tier deployment, the traps    |
 | [`src/*/README.md`](src/core/README.md) | Per-directory rules and planned contents       |
 
 Recording _why_ a decision was made is the highest-signal part of this project.

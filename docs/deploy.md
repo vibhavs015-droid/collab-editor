@@ -1,0 +1,271 @@
+# Deploying
+
+**Read the "What has and has not been verified" section before trusting this page.** The
+Docker image described here has never been built, because Docker is not installed on the
+machine it was written on. What _has_ been verified is the runtime contract the image
+depends on, listed precisely below.
+
+Nothing here costs money. Every option is on a free tier or self-hosted, and the
+architecture is arranged so that staying free is the default rather than a compromise.
+
+---
+
+## What has and has not been verified
+
+Verified by running it, on this machine, against a **production-only dependency tree** —
+a real `npm ci --omit=dev` into a clean directory, `dist/` copied in, nothing else:
+
+| Claim                                                                  | Verified how                                                                                                                                  |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm ci --omit=dev` yields every runtime dependency the server imports | Server started from that tree; see below                                                                                                      |
+| `node dist/server/index.js` is the server entrypoint                   | Started and served requests                                                                                                                   |
+| `HOST=0.0.0.0` `PORT=8080` work                                        | Started, bound `http://0.0.0.0:8080`                                                                                                          |
+| `PGLITE_DATA_DIR` and `CLIENT_DIST` are honoured                       | Absolute paths outside the repo, both effective                                                                                               |
+| `/api/health` answers                                                  | 200                                                                                                                                           |
+| `/` serves the app shell                                               | 200, `text/html`                                                                                                                              |
+| The health-check command in the Dockerfile exits 0                     | Run verbatim against the running server                                                                                                       |
+| Anonymous session → create → write → read round-trips                  | Content written and read back verbatim                                                                                                        |
+| Documents persist across a restart                                     | Second process saw the first process's document                                                                                               |
+| One subject cannot see another's document                              | 404, not 403 (no existence oracle)                                                                                                            |
+| `NODE_ENV=production` with no `JWT_SECRET` refuses to start            | Exited non-zero with a JSON error                                                                                                             |
+| Logs are JSON lines                                                    | Every line of stdout parsed as JSON                                                                                                           |
+| `dist/index.js` is the Phase 0 self-check, not the server              | Ran it: prints a summary, exits 0, serves nothing                                                                                             |
+| The Dockerfile's `COPY` list is enough to build the image              | Built from exactly that file set in a clean directory; `dist/server/index.js`, `dist/client/index.html` and `dist/client/assets` all produced |
+
+**Not verified, and not verifiable without Docker:**
+
+- The image builds at all, on Linux, on `bookworm-slim`.
+- PGlite runs under musl-free Debian as a non-root user.
+- The `/data` volume inherits the right ownership.
+- `tini` is installed at `/usr/bin/tini` and receives signals.
+- The Linux-only `HEALTHCHECK` JSON array form parses.
+- `.dockerignore` excludes what it should — verified by reading, not by building.
+
+So: the build inputs, the dependency tree, the runtime contract and the health check are
+verified by running them. The image packaging is not. Treat the first
+`docker compose up --build` as a test with a real chance of finding something.
+
+Two things from that verification worth recording, because both probes were wrong before
+the third one passed:
+
+- The first end-to-end probe reported an empty title and empty content. The API nests its
+  responses under `document`, and the probe read `body.id` and `body.content`. The probe
+  was wrong, not the server. Check the response shape before believing a failure.
+- The second probe reused a document id from the first run, got `ALREADY_EXISTS`, then
+  `DOCUMENT_NOT_FOUND` — which looks exactly like a broken deployment and was in fact the
+  existence-oracle protection working: a _different_ anonymous subject could not see the
+  first run's document, which is the intended behaviour. Two probes, two wrong
+  assumptions, and only the third produced a clean pass.
+
+---
+
+## Locally, with Docker
+
+```bash
+# 1. Generate a signing secret. The server refuses to start in production without one.
+openssl rand -base64 48
+#    Windows PowerShell:
+#    [Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Maximum 256 }))
+
+# 2. Put it in the environment for this shell. Not in docker-compose.yml — see below.
+export JWT_SECRET='<paste>'
+
+# 3. Build and run.
+docker compose up --build
+```
+
+Then open <http://127.0.0.1:3001>.
+
+**`JWT_SECRET` is read from the host environment, not from `docker-compose.yml`.** The
+compose file contains `${JWT_SECRET:-}`, so the value comes from your shell and never
+enters a file that could be committed. The alternative — pasting a real secret into a
+tracked YAML — is the single easiest way to leak a deployment credential.
+
+Check it is actually up:
+
+```bash
+curl -s localhost:3001/api/health          # {"status":"ok","auth":"required"}
+docker compose ps                           # STATUS should show (healthy)
+docker compose logs -f app                  # JSON lines
+```
+
+Stop it, keeping the data:
+
+```bash
+docker compose down
+```
+
+Stop it and **destroy the data**:
+
+```bash
+docker compose down -v
+```
+
+---
+
+## Without Docker
+
+The same production path, on the host:
+
+```bash
+npm ci
+npm run build
+JWT_SECRET=$(openssl rand -base64 48) \
+NODE_ENV=production HOST=0.0.0.0 PORT=3001 \
+  node dist/server/index.js
+```
+
+`npm run serve` is the same command without the environment.
+
+---
+
+## Deploying for free
+
+### The constraint that shapes everything
+
+**PGlite is the database, and it is a directory on disk.** There is no separate database to
+provision, no connection string, no host to pay for, and no idle timeout to fight. That
+was chosen for local development (ADR-0006) and it turns out to be the single biggest
+reason a free deployment is possible at all.
+
+Its cost is equally real: **state lives in the container's filesystem.** So a free
+deployment must attach durable storage, and the platform must not put the app behind
+something that assumes a stateless process.
+
+### Option A — Fly.io (recommended, if you want it to stay up)
+
+- Free allowance exists; a single `shared-cpu-1x` machine is small and this application
+  is not demanding.
+- **Attach a volume.** `fly volumes create collab_data` then mount it at `/data`. Without
+  this, `fly deploy` replaces the machine and every document is gone.
+- WebSockets work: Fly terminates TLS and passes `Upgrade` through.
+- Set `HOST=0.0.0.0` and `PORT=8080` (Fly allocates a port and passes it in `$PORT`).
+- Set `JWT_SECRET` as a Fly secret: `fly secrets set JWT_SECRET=...`. Never in
+  `fly.toml`.
+
+Sketch:
+
+```toml
+# fly.toml
+[build]
+  dockerfile = "Dockerfile"
+
+[mounts]
+  source = "collab_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+
+[[vm]]
+  size = "shared-cpu-1x"
+```
+
+### Option B — Render, Railway, or any OCI host
+
+The image is a plain OCI image, so it runs anywhere that does. The requirements are the
+same everywhere:
+
+1. A **persistent disk** mounted at `/data`, or `PGLITE_DATA_DIR` pointed at it.
+2. `HOST=0.0.0.0`, `PORT` from the platform.
+3. `JWT_SECRET` in the platform's secret store.
+4. WebSocket support enabled. Some hosts disable it or terminate it without passing
+   `Upgrade`; check before assuming.
+
+### Option C — your own machine
+
+```bash
+docker compose up -d --build
+```
+
+Behind a tunnel for HTTPS if you want a real certificate (`cloudflared tunnel --url
+http://localhost:3001` needs no account and no domain).
+
+### What none of these give you
+
+Stated rather than left to be discovered:
+
+- **Horizontal scaling.** One process, one event loop (ADR-0007). Two replicas would each
+  hold their own in-memory connections and their own PGlite, and a document edited on both
+  would diverge silently. **Run exactly one instance** until the Phase 6 pub/sub question is
+  answered.
+- **A free tier that stays free under load.** Free tiers have CPU and memory caps, and a
+  public URL attracts traffic that is not yours.
+- **Backups.** The volume is the database. Copy `/data` and that is the entire backup
+  story — there is no point-in-time recovery.
+- **Secrets rotation.** Changing `JWT_SECRET` invalidates every outstanding session, so
+  every open editor becomes a 401 until the client re-authenticates. The client does handle
+  that (`resolveToken` runs per connect), but a rotation is still every user reloading.
+
+---
+
+## The three container traps
+
+Each of these produces a container that starts cleanly, reports healthy, and serves
+nothing. They are the reason the Dockerfile sets them explicitly rather than relying on
+defaults.
+
+### 1. `HOST` defaults to `127.0.0.1`
+
+Inside a container, loopback is the container's own loopback namespace. A server bound to
+it is unreachable from the host and from the platform's proxy, while still being perfectly
+able to reach itself — so a health check that runs _inside_ the container passes. The
+Dockerfile sets `HOST=0.0.0.0`.
+
+### 2. `PGLITE_DATA_DIR` needs a volume
+
+The default is `./.data/pgdata`, which inside the image is inside the container's
+writable layer. Every `docker compose up --build`, every image replacement and every
+platform deploy starts from an empty database. The data is not "lost" in any recoverable
+sense — it was never written anywhere durable — but the symptom is identical to data loss
+and the logs say nothing about it.
+
+The Dockerfile declares `VOLUME ["/data"]` and compose attaches a named volume.
+
+### 3. `dist/index.js` is not the server
+
+Two entrypoints exist. `dist/index.js` is the Phase 0 toolchain self-check: it prints a
+CRDT summary and exits 0 without binding a port. It is the right thing for CI's
+self-check step and the wrong thing for `CMD`.
+
+---
+
+## Environment variables
+
+`.env.example` is the reference, and it documents exactly the variables the code reads —
+enforced by [`env-example.test.ts`](../scripts/env-example.test.ts), which compares the
+file against the code and fails on drift in either direction.
+
+There are deliberately **no** `DATABASE_URL`, `SUPABASE_*` or `REDIS_URL` entries. An
+earlier version of that file listed all six; no code read them. A variable that does
+nothing is worse than an absent one, because setting it and seeing the server start
+convinces you it took effect.
+
+---
+
+## Operational notes
+
+**Logs.** JSON lines on stdout, one per line, including the last. Every level is JSON, so
+a log parser never has to cope with a human-readable warning in the middle of a stream.
+`LOG_LEVEL=debug` for more. Tokens are redacted.
+
+**Metrics.** `GET /api/metrics`, Prometheus text format, unauthenticated. It contains
+counters only, never document content, so a scraper needs no session and its existence
+discloses nothing. Route labels are templated: `/api/documents/:id`, `/assets/index-*.js`,
+`/index.html`. This matters more than it looks — an untemplated asset label is one dead
+time series per deploy, forever.
+
+**Health.** `GET /api/health` returns `{status, auth}`. It is unauthenticated, because
+that is what a load balancer or an orchestrator has. It proves the process is up _and_ the
+database migrated, since startup migrates before listening.
+
+**Shutdown.** `SIGTERM` drains connections and closes the database before exiting.
+`tini` is PID 1 so the signal is delivered and children are reaped; without it a container
+stop is a ten-second wait followed by `SIGKILL` mid-write.
+
+**Upgrades.** `fly deploy` rebuilds from the Dockerfile. The image is immutable and the
+volume is not, so a deploy preserves documents. There is no schema migration step to
+remember — `Database.open` runs migrations itself, on a cold volume too.

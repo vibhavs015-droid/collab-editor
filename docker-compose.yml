@@ -1,0 +1,76 @@
+# Local reproducibility, mirroring what CI and production do.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS WHEN `npm run dev` ALSO WORKS
+# ---------------------------------------------------------------------------
+# `npm run dev` runs the source through tsx on the host, against PGlite in a
+# local directory. That is the right loop for writing code and the wrong one for
+# reproducing a problem, because it shares the host's Node version, its npm cache
+# and its filesystem layout.
+#
+# The failure this prevents: "works on my machine" where the difference is a
+# dependency version, a native module, or a path that only resolves on Windows.
+# Building the image pins all three.
+#
+# ---------------------------------------------------------------------------
+# THIS FILE HAS NOT BEEN RUN
+# ---------------------------------------------------------------------------
+# Docker is not installed on the development machine this was written on, so the
+# image has never been built. What HAS been verified is the contract the image
+# depends on - see docs/deploy.md, which lists exactly what was checked and how.
+# Treat the first `docker compose up --build` as the real test.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: collab-editor:local
+    ports:
+      # Host 3001 -> container 8080. The container listens on 8080 because that
+      # is the conventional internal port, while 3001 is what every dev script and
+      # the .env.example already assume.
+      - '127.0.0.1:3001:8080'
+    environment:
+      NODE_ENV: production
+      # 0.0.0.0 inside the container. The Dockerfile already sets this, and it is
+      # repeated here because it is the setting whose absence produces a container
+      # that starts cleanly and is unreachable, and because a reader looking at
+      # compose should see it without opening the Dockerfile.
+      HOST: 0.0.0.0
+      PORT: 8080
+      PGLITE_DATA_DIR: /data
+      CLIENT_DIST: /app/dist/client
+      LOG_LEVEL: info
+      # Empty on purpose. With no secret and NODE_ENV=production the server
+      # REFUSES to start (ADR-0012), which is the correct behaviour and the
+      # reason the instructions below put generating one first.
+      #
+      # Never commit a real value here. Read it from the host environment instead:
+      #   JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET before starting}
+      JWT_SECRET: ${JWT_SECRET:-}
+    volumes:
+      # Named volume, not a bind mount. PGlite owns this directory's internal
+      # layout; a host directory risks exposing it through a Windows path that
+      # does not behave like the POSIX paths PGlite expects.
+      - collab-data:/data
+    restart: unless-stopped
+    healthcheck:
+      # Duplicated from the Dockerfile so `docker compose ps` shows health without
+      # inspecting the image. Compose wins when both specify one.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      # Generous, because PGlite runs migrations on a cold volume and the
+      # container must not be declared unhealthy while it is still booting.
+      # 40s is not arbitrary: it is the measured cost of a cold PGlite start.
+      start_period: 40s
+      retries: 3
+
+volumes:
+  collab-data:
+    name: collab-editor-data

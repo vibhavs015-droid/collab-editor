@@ -1,0 +1,68 @@
+# Build context exclusions.
+#
+# The rule: anything not needed to BUILD the image, and anything that would make the
+# build context large enough to be slow or leak something, is excluded. Docker sends
+# the whole context to the daemon before the first instruction runs, so a missing
+# entry here costs seconds on every build even when no layer changes.
+
+# Dependencies: reinstalled inside the image by `npm ci`. Copying the host's
+# node_modules is the classic mistake - it is built for the host's platform and
+# its Node ABI, so it either breaks in the image or silently pins the image to
+# whatever the developer happened to have installed.
+node_modules
+
+# Build output: rebuilt inside the image. Copying the host's dist would make the
+# image a wrapper around whatever was on the machine rather than a build of the
+# source that is actually in the context.
+dist
+coverage
+.data
+*.tsbuildinfo
+
+# Load-suite artifacts and logs. Generated, not source, and the metrics files are
+# large enough to notice in the transfer size.
+docs/benchmarks
+docs/load-artifacts
+*.log
+.smoke.*
+
+# k6 binary, downloaded into the repository and ~100 MB.
+.tools
+
+# Version control and CI. .git alone can be hundreds of megabytes, and the CI
+# directory describes how to test the image rather than being part of it.
+.git
+.gitignore
+.gitattributes
+.github
+.claude
+
+# Docker's own files, which would otherwise be copied into the image they define.
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Documentation. Not needed to build or run, and the deployment notes would
+# otherwise need to stay accurate about paths inside the image.
+# ADRs and NOTES are kept out for the same reason: they are for readers, not the
+# runtime.
+docs
+*.md
+LICENSE
+
+# Editor and OS noise.
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# The template is not a secret, but nothing inside the image reads it, and a
+# future version of this file might be pasted into rather than left empty.
+.env
+.env.*
+!.env.example
+
+# Local tooling config that affects development only.
+.eslintcache
+.prettierignore
+.editorconfig

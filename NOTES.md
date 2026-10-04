@@ -1028,4 +1028,69 @@ remove a different security property. This one was caught by noticing, not by
 the suite - and the reason it was not caught is a coverage gap that had been
 there since Phase 5.
 
+## Docker, and what could not be verified
+
+Docker is not installed on this machine. Rather than write a `Dockerfile` and hope,
+the parts that could be verified without Docker were verified by simulating its
+stages:
+
+- **The `deps` stage**: a real `npm ci --omit=dev` into a clean directory. Then `dist/`
+  copied in and nothing else - 10 packages, no devDependencies. The server started and
+  served from it, which is the single most common Dockerfile failure and it does not
+  reproduce on a developer machine that still has every devDependency installed.
+- **The `build` stage**: exactly the `COPY` list from the Dockerfile, nothing more, built
+  with `npm run build`. Produced `dist/server/index.js`, `dist/client/index.html` and
+  `dist/client/assets`, which is everything the runtime stage consumes. A `COPY` that
+  misses one file produces a build error 200 lines from the omission.
+- **The runtime contract**, against that tree, in production mode with `JWT_SECRET`:
+  health check 200, app shell 200, anonymous session, document created, content written
+  and read back, scoped listing showing only that subject's document, a _different_
+  subject getting 404 rather than 403, data surviving a restart, production refusing to
+  start without a secret, and every log line parsing as JSON.
+- **The health-check command**, run verbatim.
+- **`dist/index.js` is not the server**, by running it: it prints a CRDT summary and
+  exits 0. The Dockerfile's `CMD` comment claims this matters; better to have checked than
+  to have asserted it.
+
+What that leaves unverified is stated at the top of `docs/deploy.md` in a table: the image
+does not build here, PGlite is not proven under Debian as a non-root user, the volume
+ownership is not proven, `tini` is not proven, and `.dockerignore` has been read rather
+than exercised. **The first `docker compose up --build` is a test with a real chance of
+finding something**, and the document says so rather than implying otherwise.
+
+### Two probes that were wrong before the third was right
+
+Worth recording, because both looked like a broken deployment and neither was.
+
+The first read `body.id` and `body.content`; the API nests its responses under
+`document`. The second reused a document id from the first run, got `ALREADY_EXISTS`,
+then `DOCUMENT_NOT_FOUND` on read - which is the existence-oracle protection working
+correctly, since a _different_ anonymous subject must not see it.
+
+Neither was a bug. Both would have been reported as one if the probe had not been
+checked against the API's actual response shape, and "the deployment is broken" is a
+conclusion expensive to act on.
+
+### `.env.example` was lying, and now a test says so
+
+It advertised `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+`SUPABASE_SERVICE_ROLE_KEY` and `REDIS_URL`. No code read any of them - Supabase is
+deferred by ADR-0006 and pub/sub by ADR-0007 - and it also used `K6_VUS` and
+`K6_DURATION` where the harness reads `LOAD_VUS` and `LOAD_DURATION`, which is the exact
+naming mistake that once made a benchmark run the wrong length.
+
+Setting one of those and watching the server start normally is convincing, which is what
+makes it worse than not listing them at all.
+
+`scripts/env-example.test.ts` now compares the file against the source in **both**
+directions and fails on drift either way. Two details worth keeping:
+
+- It asserts it found something (`expect(readByCode.size).toBeGreaterThan(5)`). A scanner
+  that silently stops matching empties both sets, every assertion passes, and the test is
+  worth nothing.
+- `vitest.config.ts` `include` had to widen from `src/**` to include `scripts/**`, and
+  `eslint.config.js` `allowDefaultProject` to `scripts/*.test.ts` - not `**`, because
+  typescript-eslint rejects it, and the failure names a real performance reason rather
+  than being arbitrary.
+
 ## Log

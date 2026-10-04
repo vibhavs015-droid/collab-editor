@@ -4,7 +4,11 @@ export default defineConfig({
   test: {
     // Phase 2 adds property-based fuzzing here (fast-check).
     // The fuzz test IS the project's strongest artifact — keep it fast enough to run on every push.
-    include: ['src/**/*.test.ts'],
+    // `scripts/` is included because some of what needs testing is the repository's own
+    // tooling rather than the application. `.env.example` documented six variables no
+    // code read, and nothing noticed: a test that compares it against the code is the
+    // only reason the next such drift gets caught.
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
     // PGlite boots a WASM Postgres per suite: roughly 2.5s of real startup
     // cost. Running files in parallel does not help, because the total is
     // dominated by Postgres initialisation rather than assertion count.

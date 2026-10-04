@@ -10,11 +10,29 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        // tsconfig.json only includes src/, so the tool's own config files sit
-        // outside any project. allowDefaultProject lets them be linted anyway
-        // instead of being silently skipped or excluded.
+        // tsconfig.json only includes src/, so the tool's own config files and the
+        // tests that check repo tooling sit outside any project. allowDefaultProject
+        // lets them be linted anyway instead of being silently skipped or excluded.
+        //
+        // `scripts/**/*.test.ts` is here for the same reason as `*.config.ts`: vitest
+        // runs it (see vitest.config.ts), so it is real test code that belongs under
+        // the same gate as everything else.
+        //
+        // The limitation is real and worth stating: without a tsconfig project, the
+        // type-aware rules in these files see imports as `any`. Rules that do not need
+        // cross-file types - unused variables, undefined references, `no-explicit-any`
+        // on locally annotated values - still apply. The alternative was widening
+        // `include` in tsconfig.json, which would drag these files into `dist/` and
+        // break the build output layout, so the weaker checking is the better trade.
+        //
+        // `scripts/*.test.ts` and not `scripts/**/*.test.ts`: typescript-eslint rejects
+        // `**` here, for a real reason - every file on the default project costs
+        // type information the service cannot cache across projects. The tests that
+        // exist here sit directly in `scripts/`, so one level of `*` is enough, and if
+        // one moves into a subdirectory it should be named explicitly rather than
+        // answered by widening the glob.
         projectService: {
-          allowDefaultProject: ['*.config.ts', '*.config.js'],
+          allowDefaultProject: ['*.config.ts', '*.config.js', 'scripts/*.test.ts'],
         },
         tsconfigRootDir: import.meta.dirname,
       },
