@@ -25,6 +25,12 @@
 import type { ElementId, SiteId } from '../clock.js';
 import type { Origin } from './rga.js';
 import { RgaDocument, type Operation } from './rga.js';
+import {
+  createSnapshot,
+  snapshotCovers,
+  snapshotToOperations,
+  type DocumentSnapshot,
+} from './snapshot.js';
 
 /** A stored operation with the metadata a log needs to be replayable. */
 export interface LoggedOperation {
@@ -47,7 +53,61 @@ export interface OperationLog {
   /** Drop entries below a sequence number. Phase 4 tombstones this. */
   truncateBefore(seq: number): Promise<void>;
   clear(): Promise<void>;
+  /**
+   * Replace history with a snapshot, atomically.
+   *
+   * Optional, and this is the interesting part of the interface: a log that does not
+   * implement it simply cannot be compacted, and {@link Replica.compactLog} reports
+   * that rather than falling back to deleting a prefix. Truncating is always available
+   * and always wrong for a log with live history in it, so an implementation that
+   * offered no alternative would be an invitation to reintroduce that bug.
+   */
+  replaceWithSnapshot?(snapshotOps: readonly Operation[], keepFromSeq: number): Promise<boolean>;
 }
+
+/** What a compaction attempt did. */
+export interface CompactionResult {
+  /** False means nothing was written: the log is unchanged. */
+  readonly committed: boolean;
+  /** Why not, when `committed` is false. */
+  readonly reason?: string;
+  /** Entries before and after, or null when nothing was attempted. */
+  readonly operationsBefore: number;
+  readonly operationsAfter: number | null;
+  /** The sequence the snapshot represents. */
+  readonly snapshotSeq: number;
+}
+
+export interface CompactOptions {
+  /**
+   * How many entries to keep after compaction.
+   *
+   * The retained tail is what a peer that is slightly behind will be sent, so this is
+   * also the window in which a lagging peer can catch up incrementally instead of
+   * needing a full baseline.
+   */
+  readonly keepAtLeast?: number;
+  /**
+   * Operations not yet accepted by a server.
+   *
+   * Required in practice. An unsent delete naming an element the snapshot drops can
+   * never be sent and never applied, which is silent divergence. Passing the queue
+   * makes `createSnapshot` carry those tombstones so the edit survives compaction.
+   *
+   * Omitting it is allowed, because a fully synced replica has nothing unsent and
+   * forcing a caller to pass an empty array would be noise.
+   */
+  readonly unsent?: readonly Operation[];
+}
+
+/**
+ * Default retained tail.
+ *
+ * 200 rather than a round number chosen for looks: a peer reconnecting after a brief
+ * drop should catch up by delta, and 200 operations is far more than a few seconds of
+ * typing for one person while still keeping the log bounded.
+ */
+const DEFAULT_KEEP_TAIL = 200;
 
 export interface ReplicaOptions {
   readonly site: SiteId;
@@ -173,6 +233,135 @@ export class Replica {
     this.#appliedSeq = -1;
 
     this.#record([...baseline], 'remote');
+  }
+
+  /**
+   * Snapshot the current document, for compaction.
+   *
+   * Exists on `Replica` rather than on the log because the snapshot needs the live
+   * document and only the replica has it. It also records `#appliedSeq` itself, so a
+   * caller cannot pass a stale sequence and produce a snapshot that claims to cover
+   * operations it does not.
+   *
+   * @param retainTombstones operations that will be replayed after this snapshot.
+   *   Tombstones they name are carried, because dropping one would make them
+   *   unplaceable. Pass the unsent queue here: an unsent delete whose target the
+   *   snapshot drops is an edit that can never be sent.
+   *
+   * @throws when called before {@link init}, since the document would be empty and the
+   *   snapshot would silently be of nothing.
+   */
+  snapshot(retainTombstones: readonly Operation[] = []): DocumentSnapshot {
+    this.#assertReady();
+
+    return createSnapshot(this.#doc, this.#appliedSeq, retainTombstones);
+  }
+
+  /**
+   * Replace the log's history with a snapshot, keeping a tail.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY NOT JUST DELETE THE OLD ENTRIES
+   * ---------------------------------------------------------------------------
+   * An RGA insert names the element it anchors to. Deleting a prefix of the log
+   * therefore deletes elements the surviving operations still refer to, and
+   * {@link init} throws rather than guessing, because guessing produces a document
+   * missing text the user typed. The old entry cap did exactly this on every append,
+   * once the log passed it.
+   *
+   * Compaction replaces what it drops with a snapshot that carries those elements
+   * forward with their original ids, so nothing downstream can tell the difference.
+   * Same idea as the server's compaction (ADR-0011), on the client's own log.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THE UNSENT QUEUE IS A PARAMETER
+   * ---------------------------------------------------------------------------
+   * An unsent delete naming a dropped element is an edit that can never be sent and
+   * never applied. That is silent divergence between this device and the server, and
+   * it is invisible until someone reads the document back.
+   *
+   * The decision of what is unsent belongs to the transport, which is the only thing
+   * that knows whether an operation was acknowledged. So it is passed in rather than
+   * guessed at here.
+   *
+   * @returns what happened. `committed: false` always means the log is unchanged, so
+   *   a caller can treat a refusal as a no-op without inspecting anything.
+   */
+  async compactLog(options: CompactOptions = {}): Promise<CompactionResult> {
+    this.#assertReady();
+
+    const entries = await this.#log.load();
+    const before = entries.length;
+    const keepAtLeast = options.keepAtLeast ?? DEFAULT_KEEP_TAIL;
+    const snapshotSeq = this.#appliedSeq;
+
+    if (this.#log.replaceWithSnapshot === undefined) {
+      return {
+        committed: false,
+        reason: 'this log cannot be compacted; only truncated',
+        operationsBefore: before,
+        operationsAfter: null,
+        snapshotSeq,
+      };
+    }
+
+    // Nothing to gain below the threshold. Attempting anyway would rewrite the whole
+    // log on every call, which for a short document is pure write amplification.
+    if (before <= keepAtLeast) {
+      return {
+        committed: false,
+        reason: 'log is already at or below the retained tail',
+        operationsBefore: before,
+        operationsAfter: before,
+        snapshotSeq,
+      };
+    }
+
+    const unsent = options.unsent ?? [];
+    const snapshot = this.snapshot(unsent);
+    const snapshotOps = snapshotToOperations(snapshot);
+
+    // The floor: everything from here up survives untouched. Chosen so the snapshot
+    // and the tail cannot overlap, which would mean an operation present twice.
+    const keepFrom = snapshotSeq - keepAtLeast + 1;
+    const tail = entries.filter((entry) => entry.seq >= keepFrom).map((entry) => entry.op);
+
+    // The check that makes this safe rather than hopeful. If the snapshot cannot carry
+    // everything the tail references, refuse: the alternative is a log that throws on
+    // the next load, which is a far worse outcome than a log that stays large.
+    const coverage = snapshotCovers(snapshot, [...snapshotOps, ...tail].slice(snapshotOps.length));
+
+    if (!coverage.covered) {
+      return {
+        committed: false,
+        reason: coverage.reason ?? 'snapshot would drop live operations',
+        operationsBefore: before,
+        operationsAfter: before,
+        snapshotSeq,
+      };
+    }
+
+    const committed = await this.#log.replaceWithSnapshot(
+      snapshotOps,
+      Math.max(0, keepFrom - snapshotOps.length),
+    );
+
+    if (!committed) {
+      return {
+        committed: false,
+        reason: 'the log refused the write (quota, or the store went away)',
+        operationsBefore: before,
+        operationsAfter: before,
+        snapshotSeq,
+      };
+    }
+
+    return {
+      committed: true,
+      operationsBefore: before,
+      operationsAfter: snapshotOps.length + tail.length,
+      snapshotSeq,
+    };
   }
 
   #assertReady(): void {

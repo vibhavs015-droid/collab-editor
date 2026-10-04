@@ -1093,4 +1093,93 @@ directions and fails on drift either way. Two details worth keeping:
   typescript-eslint rejects it, and the failure names a real performance reason rather
   than being arbitrary.
 
+## The client log was destroying its own anchors
+
+The client operation log capped itself at 50,000 entries by **deleting the oldest**, and
+it did that from inside `append` - so every single write could trigger it.
+
+That is not a tuning problem. An RGA insert names the element it anchors to. Deleting a
+prefix of the log deletes the elements the surviving operations still refer to.
+`Replica.init()` refuses to guess and **throws**, so the document stops opening on the
+next page load. It was a hard failure rather than silent divergence, which is the one
+mercy.
+
+### The test that passed anyway
+
+The existing coverage asserted **seq contiguity** after pruning. Contiguity is _true_
+after a prefix delete - it is contiguity of the counter, not integrity of the history -
+and it says nothing at all about whether the anchors still exist.
+
+So the test confirmed the counter was not corrupted while the document was. There is now
+a test named `keeps seq contiguous through it, which is why the old test passed` whose
+entire job is to make that false negative impossible to re-add by accident.
+
+### What replaced it
+
+Snapshot-and-truncate, reusing the server's machinery rather than writing a second
+implementation - `createSnapshot`, `snapshotToOperations` and `snapshotCovers` already
+existed and already had ADR-0011 behind them.
+
+Three pieces:
+
+- `Replica.snapshot(retainTombstones)`. On the replica, not the log, because the snapshot
+  needs the live document and the log cannot see it. It also records `appliedSeq` itself,
+  so a caller cannot pass a stale sequence and get a snapshot that claims coverage it
+  does not have.
+- `IndexedDbOperationLog.replaceWithSnapshot(...)`. **One transaction** for the writes and
+  the deletes. Done separately there is a failure mode that destroys the document: crash
+  after the truncate and the log holds a tail whose inserts anchor to elements the
+  snapshot would have carried. A browser tab closing mid-compaction is not exotic.
+- `Replica.compactLog({ keepAtLeast, unsent })`. Owns the coverage check and refuses
+  rather than truncating into something `init()` will throw on.
+
+`append` no longer prunes. Bounding the log is still necessary - it just has to happen
+where the document is visible.
+
+### Why `unsent` is a parameter and not a guess
+
+An unsent delete naming a dropped element is an edit that can never be sent and never
+applied: silent divergence from the server, invisible until someone reads the document
+back. The transport is the only thing that knows what is acknowledged, so it passes its
+outbox in. `SyncTransport` grew a `queuedOperations` getter because it only exposed a
+_count_, which is not enough.
+
+Compaction is wired into `main.ts` on `onSyncState === 'synced'`, not `onStateChange`. A
+socket can be open while operations are still queued, and compacting then drops tombstones
+the queued deletes still need.
+
+### Two things the tests found that I had got wrong
+
+**`snapshotText` was a trap.** It concatenates every element including tombstones, so for
+a snapshot of `"acd"` carrying the tombstone for `"b"` it returns `"abcd"`. That is correct
+for its purpose and wrong for the obvious one. The doc comment now says so, and
+`snapshotVisibleText` exists next to it - naming both is cheaper than a comment nobody
+reads at the call site.
+
+**Compaction can make a log longer.** A snapshot element is one stored operation; a
+carried tombstone is an insert _and_ a delete. So on a document whose history is barely
+longer than its text, compaction produces a bigger log. There is a test for that case
+alongside the test where it reclaims 902 entries down to 104, because the first thing
+anyone would do on seeing the log grow is assume compaction is broken and disable it.
+
+### Assumptions that turned out to be wrong, caught by checking
+
+Three of my own expectations failed and all three were mine, not the code's:
+
+- Clocks start at **1**, not 0.
+- `insertAt(offset, 'abcd')` emits **four** operations, one per character - so `insertAt`
+  is not "one operation per call".
+- `deleteRange(10, 6)` emits **six** delete operations, one per deleted character. My
+  "unsent delete" test passed one target and was declined because the other five were not
+  declared. The refusal was correct.
+
+The last is the best of the three: the coverage check caught a test that had not declared
+enough pending work, which is exactly the bug class compaction exists to prevent. It is
+now a test of its own - `declines rather than dropping a tombstone the tail still needs`.
+
+Verified by sabotage too: inverting `truncateBefore`'s key range took the failures from 4
+to 6, which confirms the new tests bite. The first sabotage attempt replaced a write's
+_content_ rather than deleting the write, so the existence guard correctly passed and
+proved nothing - the same mistake as with the load harness, and the second time.
+
 ## Log

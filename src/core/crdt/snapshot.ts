@@ -200,11 +200,40 @@ export function snapshotToOperations(snapshot: DocumentSnapshot): Operation[] {
  * Not a shortcut around the CRDT — a cross-check. A caller that uses this instead
  * of replaying has quietly stopped testing the CRDT, and this exists so the
  * cheaper path can be verified against it.
+ *
+ * ---------------------------------------------------------------------------
+ * NOT THE VISIBLE TEXT WHEN TOMBSTONES ARE CARRIED
+ * ---------------------------------------------------------------------------
+ * This concatenates *every* element, including ones marked `deleted`. A snapshot built
+ * with `retainTombstones` carries tombstones so later operations can resolve, and
+ * their `value` is included here — so for a snapshot of "acd" that carries the
+ * tombstone for "b" this returns "abcd".
+ *
+ * That is correct for its purpose, which is what the elements concatenate to. It is a
+ * trap for a caller who wanted visible text, and the difference is invisible unless it
+ * is written down. Use {@link snapshotVisibleText} for that.
  */
 export function snapshotText(snapshot: DocumentSnapshot): string {
   let out = '';
   for (const element of snapshot.elements) {
     out += element.value;
+  }
+  return out;
+}
+
+/**
+ * Visible text of a snapshot, ignoring tombstones carried for resolvability.
+ *
+ * Exists because {@link snapshotText} is the more obvious name and gives the *wrong*
+ * answer for a snapshot that carries tombstones. Naming both is cheaper than a
+ * comment nobody reads at the call site.
+ */
+export function snapshotVisibleText(snapshot: DocumentSnapshot): string {
+  let out = '';
+  for (const element of snapshot.elements) {
+    if (element.deleted !== true) {
+      out += element.value;
+    }
   }
   return out;
 }

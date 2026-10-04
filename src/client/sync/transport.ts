@@ -177,6 +177,21 @@ export class SyncTransport {
     return this.#outbox.length;
   }
 
+  /**
+   * Operations sent but not yet handed to a socket.
+   *
+   * Exposed as the operations themselves, not just a count, because client-side log
+   * compaction has to know exactly which operations the server has not seen. Anything
+   * in here may still be the only record of an edit, and compaction must not drop the
+   * elements those edits reference.
+   *
+   * Read-only by type: a caller that could mutate this would be able to silently
+   * discard an edit that has never left the device.
+   */
+  get queuedOperations(): readonly Operation[] {
+    return this.#outbox;
+  }
+
   /** Highest log sequence this client has been told it holds. */
   get serverSeq(): number {
     return this.#seq;

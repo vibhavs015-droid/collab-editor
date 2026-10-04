@@ -156,9 +156,24 @@ describe('IndexedDbOperationLog - truncation', () => {
 });
 
 describe('IndexedDbOperationLog - pruning', () => {
-  it('keeps the newest entries and drops the oldest', async () => {
+  it('never prunes as a side effect of append', async () => {
+    // The bug. `append` used to end with `await this.prune()`, so every write could
+    // delete history - and deleting a prefix deletes the elements the surviving
+    // operations anchor to. The bound on the log belongs to `Replica.compactLog`,
+    // which can replace what it drops with a snapshot.
+    //
+    // See logCompaction.test.ts for what a pruned log does to `Replica.init()`.
     const log = makeLog({ maxEntries: 10 });
     await log.append(Array.from({ length: 25 }, (_, index) => entry(index)));
+
+    expect(await log.count()).toBe(25);
+  });
+
+  it('keeps the newest entries and drops the oldest when asked', async () => {
+    const log = makeLog({ maxEntries: 10 });
+    await log.append(Array.from({ length: 25 }, (_, index) => entry(index)));
+
+    expect(await log.prune()).toBe(true);
 
     const loaded = await log.load();
 
@@ -173,17 +188,23 @@ describe('IndexedDbOperationLog - pruning', () => {
     const log = makeLog({ maxEntries: 10 });
     await log.append(Array.from({ length: 5 }, (_, index) => entry(index)));
 
+    // Nothing to remove, and reported as such rather than as a failure.
+    expect(await log.prune()).toBe(false);
     expect(await log.count()).toBe(5);
   });
 
-  it('stays contiguous after pruning, so replay has no gaps', async () => {
+  it('keeps seq contiguous when pruning, which is necessary but not sufficient', async () => {
+    // Contiguity is what a prefix delete preserves, and it is NOT evidence the log is
+    // still replayable: the surviving operations can reference elements that were
+    // deleted. This test is kept because contiguity is genuinely necessary, with the
+    // comment saying plainly that it is not the property that matters. The property that
+    // matters is in logCompaction.test.ts.
     const log = makeLog({ maxEntries: 6 });
     await log.append(Array.from({ length: 20 }, (_, index) => entry(index)));
+    await log.prune();
 
     const seqs = (await log.load()).map((e) => e.seq);
 
-    // A gap would mean an operation anchored to a truncated element, which the
-    // replay in Replica.init() refuses to guess at.
     for (let index = 1; index < seqs.length; index += 1) {
       expect(seqs[index]).toBe((seqs[index - 1] ?? 0) + 1);
     }
@@ -194,6 +215,7 @@ describe('IndexedDbOperationLog - pruning', () => {
 
     for (let batch = 0; batch < 4; batch += 1) {
       await log.append([entry(batch * 2), entry(batch * 2 + 1)]);
+      await log.prune();
     }
 
     const loaded = await log.load();
@@ -218,7 +240,9 @@ describe('IndexedDbOperationLog - degraded environments', () => {
 
       await expect(log.truncateBefore(0)).resolves.toBeUndefined();
       await expect(log.clear()).resolves.toBeUndefined();
-      await expect(log.prune()).resolves.toBeUndefined();
+      // Reports false rather than resolving void: a caller can tell "nothing to"
+      // from "removed some" without counting entries.
+      await expect(log.prune()).resolves.toBe(false);
 
       // close() is synchronous by design: it is called on unload, where a
       // promise nobody awaits would be pointless.
@@ -297,7 +321,9 @@ describe('IndexedDbOperationLog - degraded environments', () => {
     await expect(log.append([entry(1)])).resolves.toBeUndefined();
     await expect(log.truncateBefore(0)).resolves.toBeUndefined();
     await expect(log.clear()).resolves.toBeUndefined();
-    await expect(log.prune()).resolves.toBeUndefined();
+    // Reports false rather than resolving void: a caller can tell "nothing to"
+    // from "removed some" without counting entries.
+    await expect(log.prune()).resolves.toBe(false);
     await expect(log.count()).resolves.toBe(0);
   });
 });

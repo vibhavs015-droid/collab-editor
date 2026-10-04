@@ -68,6 +68,26 @@ const els = {
 const SITE_KEY = 'collab-editor:site';
 
 /**
+ * Log size at which the client compacts, in entries.
+ *
+ * 5,000 is chosen from what compaction actually costs and saves. A snapshot element
+ * becomes one stored operation, so a log of 5,000 entries on a 1,000-character document
+ * costs roughly 10x what the text needs. The threshold is well above a normal working
+ * session - a fast typist produces a few thousand keystrokes an hour - so compaction is
+ * rare in practice rather than constant, which matters because it rewrites the log.
+ */
+const COMPACT_THRESHOLD_ENTRIES = 5_000;
+
+/**
+ * Operations kept after compaction.
+ *
+ * A tail, not a floor: this is what a peer that is slightly behind can be sent as a
+ * delta rather than a full baseline. 200 is far more than a few seconds of typing for
+ * one person.
+ */
+const COMPACT_KEEP_TAIL = 200;
+
+/**
  * Identity for this browser tab.
  *
  * Persisted so a reload keeps its own history rather than colliding with the
@@ -462,6 +482,17 @@ async function openDocument(documentId: string): Promise<void> {
           syncInputs.serverState = state;
           syncInputs.pendingOps = pendingOps;
           renderSync();
+
+          // Compaction only makes sense once there is nothing in flight. While the
+          // outbox holds operations, the local log is the only record of them.
+          //
+          // `onSyncState` rather than `onStateChange`: 'synced' is a statement about
+          // the outbox being empty, which is a sync fact. A socket can be open while
+          // operations are still queued, and compacting then would drop tombstones the
+          // queued deletes still need.
+          if (state === 'synced') {
+            void maybeCompactLog();
+          }
         },
         onBaseline: (baseline) => {
           // The server says this device is below the compaction floor, so the
@@ -492,6 +523,66 @@ async function openDocument(documentId: string): Promise<void> {
     syncInputs.serverState = null;
     syncInputs.unplacedOps = 0;
     syncInputs.peers = 0;
+
+    /**
+     * Replace the local log's history with a snapshot, when it is worth doing.
+     *
+     * ---------------------------------------------------------------------------
+     * WHY IT IS NOT AUTOMATIC ON EVERY WRITE
+     * ---------------------------------------------------------------------------
+     * `IndexedDbOperationLog.append` used to enforce a hard cap by deleting the oldest
+     * entries. That is unsafe: an RGA insert names the element it anchors to, so
+     * deleting a prefix deletes the elements the surviving operations still refer to,
+     * and the next page load throws in `Replica.init()` rather than opening the document.
+     *
+     * Compaction is the safe version, because it replaces what it drops with a snapshot
+     * that carries those elements forward with their original ids. Same idea as the
+     * server's compaction, on the client's own log.
+     *
+     * ---------------------------------------------------------------------------
+     * WHY IT WAITS FOR AN EMPTY OUTBOX
+     * ---------------------------------------------------------------------------
+     * The outbox is the list of operations the server has not seen. Those operations
+     * are still in the local log and nowhere else, so the snapshot has to carry the
+     * tombstones they reference. Refusing to compact while any exist is simpler than
+     * computing which ones matter, and it can only ever delay compaction by a keystroke.
+     */
+    async function maybeCompactLog(): Promise<void> {
+      if (session === null || transport === null) {
+        return;
+      }
+
+      const unsent = transport.queuedOperations;
+
+      if (unsent.length > 0) {
+        return;
+      }
+
+      try {
+        // A cheap count, not a load. `compactLog` reads the whole log, and doing that on
+        // every sync to discover there is nothing to do would be the expensive part.
+        if ((await log.count()) < COMPACT_THRESHOLD_ENTRIES) {
+          return;
+        }
+
+        const result = await replica.compactLog({
+          keepAtLeast: COMPACT_KEEP_TAIL,
+          unsent,
+        });
+
+        if (result.committed) {
+          console.info(
+            `[collab-editor] compacted the local log: ` +
+              `${result.operationsBefore} -> ${result.operationsAfter} operations`,
+          );
+          renderCounts(replica.text);
+        }
+      } catch (error) {
+        // Compaction is an optimisation. A storage failure must not surface as a broken
+        // editor, and the log is still correct without it - just longer than ideal.
+        console.warn('[collab-editor] local log compaction skipped', error);
+      }
+    }
 
     binding.start();
     editor.bindHistory({
