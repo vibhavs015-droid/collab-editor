@@ -29,6 +29,9 @@ import {
   type ServerMessage,
 } from '../shared/protocol.js';
 import { parseClientMessage } from '../shared/protocol.js';
+import { Logger } from './observability/logger.js';
+import { Metrics } from './observability/metrics.js';
+import { M, declareMetrics } from './observability/index.js';
 
 /** One connected client. */
 interface Client {
@@ -190,6 +193,16 @@ export interface RelayOptions {
    * nobody remembers is open.
    */
   readonly helloTimeoutMs?: number;
+
+  /**
+   * Where to report connections, rejections and relay volume.
+   *
+   * Defaults to a private registry and a silent logger, so a relay built in a test
+   * produces no output and shares nothing. The real server passes one registry to the
+   * API, the relay and the store, so a single /metrics scrape sees all of them.
+   */
+  readonly metrics?: Metrics;
+  readonly logger?: Logger;
 }
 
 export class Relay {
@@ -210,6 +223,8 @@ export class Relay {
   readonly #onLeave: RelayOptions['onLeave'];
   readonly #authorize: RelayOptions['authorize'];
   readonly #helloTimeoutMs: number;
+  readonly #metrics: Metrics;
+  readonly #logger: Logger;
   readonly #replayBatchSize: number;
   #siteCounter = 0;
 
@@ -220,6 +235,9 @@ export class Relay {
     this.#onLeave = options.onLeave;
     this.#authorize = options.authorize;
     this.#helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
+    this.#metrics = options.metrics ?? new Metrics();
+    this.#logger = options.logger ?? Logger.silent();
+    declareMetrics(this.#metrics);
     this.#replayBatchSize = options.replayBatchSize ?? DEFAULT_REPLAY_BATCH;
 
     this.#heartbeat =
@@ -231,6 +249,23 @@ export class Relay {
 
     // Do not hold the process open for a heartbeat timer in tests or scripts.
     this.#heartbeat?.unref?.();
+  }
+
+  /**
+   * Push current room and pending sizes into gauges.
+   *
+   * Called from every path that changes either number, rather than computed at scrape
+   * time, because the relay has no scrape hook and a gauge read only when something
+   * happens is a gauge that is wrong exactly when it matters.
+   */
+  #publishRoomSizes(): void {
+    let active = 0;
+    for (const room of this.#rooms.values()) {
+      active += room.size;
+    }
+
+    this.#metrics.set(M.wsConnectionsActive, {}, active);
+    this.#metrics.set(M.wsPendingUnauthenticated, {}, this.#pending.size);
   }
 
   /** Total clients connected. Used by tests and the health endpoint. */
@@ -309,7 +344,10 @@ export class Relay {
       this.#admit(client);
     } else {
       this.#pending.add(client);
+      this.#publishRoomSizes();
     }
+
+    this.#metrics.increment(M.wsConnectionsOpened);
 
     socket.on('message', (data: Buffer) => {
       client.lastSeen = Date.now();
@@ -413,15 +451,23 @@ export class Relay {
     const room = this.#rooms.get(client.documentId) ?? new Set<Client>();
     room.add(client);
     this.#rooms.set(client.documentId, room);
+    this.#publishRoomSizes();
   }
 
   #leave(client: Client): void {
+    this.#metrics.increment(M.wsConnectionsClosed, { reason: 'left' });
+
     // Always, first. A pending client was never in a room, and a rejected one was
     // just removed from one, so returning early on "no room" would strand it here.
     this.#pending.delete(client);
 
     const room = this.#rooms.get(client.documentId);
+
     if (!room) {
+      // Published on every path out, and only after the membership change is complete.
+      // Publishing before `room.delete` reported the count as it was before the leave,
+      // which is the opposite of what a gauge is for.
+      this.#publishRoomSizes();
       return;
     }
 
@@ -440,8 +486,11 @@ export class Relay {
       // Do not accumulate empty rooms: a long-lived server would otherwise leak
       // one entry per document ever opened.
       this.#rooms.delete(client.documentId);
+      this.#publishRoomSizes();
       return;
     }
+
+    this.#publishRoomSizes();
 
     // Tell the remaining clients someone left, so their cursors can be cleaned up.
     this.#broadcast(client.documentId, client.site, {
@@ -486,9 +535,11 @@ export class Relay {
     } catch (error) {
       // An authoriser that throws has not said yes. Failing closed is the only safe
       // reading: the alternative is that a database blip grants access.
-      process.stderr.write(
-        `[relay] authorisation failed for ${client.documentId}: ${String(error)}\n`,
-      );
+      this.#metrics.increment(M.wsRejected, { code: 'INTERNAL' });
+      this.#logger.error('authorisation failed', {
+        document: client.documentId,
+        error,
+      });
       this.#reject(client, 'UNAUTHORIZED', 'Could not verify the session.');
       return;
     } finally {
@@ -496,6 +547,11 @@ export class Relay {
     }
 
     if (!result.ok) {
+      this.#metrics.increment(M.wsRejected, { code: result.code });
+      this.#logger.info('rejected websocket client', {
+        document: client.documentId,
+        code: result.code,
+      });
       this.#reject(client, result.code, result.message);
       return;
     }
@@ -504,6 +560,7 @@ export class Relay {
     // admitted afterwards. A client whose connection has already gone should not
     // be left in a room it can no longer be reached in.
     if (client.socket.readyState !== 1) {
+      this.#metrics.increment(M.wsRejected, { code: 'gone' });
       return;
     }
 
@@ -592,6 +649,8 @@ export class Relay {
         // The relay does not interpret operations. It forwards them verbatim.
         // Interpreting them here would duplicate the CRDT and create a second
         // source of truth.
+        this.#metrics.increment(M.opsReceived, { type: 'batch' }, message.ops.length);
+
         this.#broadcast(client.documentId, client.site, {
           type: 'ops',
           documentId: message.documentId,
@@ -645,6 +704,9 @@ export class Relay {
    * it as caught up.
    */
   async #replayFrom(client: Client, sinceSeq: number): Promise<void> {
+    const startedAt = process.hrtime.bigint();
+    let replayed = 0;
+
     if (this.#log === null) {
       // No durable log configured. Say so honestly rather than reporting "synced"
       // for a catch-up that never happened.
@@ -666,6 +728,9 @@ export class Relay {
         const page = await this.#log.readSince(client.documentId, cursor, this.#replayBatchSize);
 
         if (page.snapshot !== null && !baselineSent) {
+          // A baseline carries a whole document in one frame, which is exactly the case
+          // worth seeing in a percentile.
+          replayed += page.snapshot.length;
           // Sent alone, ahead of any delta. If a delta arrived first the client
           // would apply it to a document it is about to discard.
           this.#send(client, {
@@ -687,6 +752,9 @@ export class Relay {
         }
 
         if (page.ops.length > 0) {
+          replayed += page.ops.length;
+          this.#metrics.increment(M.opsBroadcast, {}, page.ops.length);
+
           this.#send(client, {
             type: 'ops',
             documentId: client.documentId,
@@ -718,6 +786,14 @@ export class Relay {
       pendingOps: 0,
       seq: cursor,
     });
+
+    const seconds = Number(process.hrtime.bigint() - startedAt) / 1e9;
+
+    // A catch-up that moved nothing is still worth recording: a client that is always
+    // already current, and one that always needs a full replay, look identical without
+    // this.
+    this.#metrics.increment(M.replayOps, {}, replayed);
+    this.#metrics.observe(M.replayDuration, {}, seconds);
 
     // Only now is this client actually current, so this is the moment its cursor
     // can be trusted. Reporting it earlier would let compaction prune below a
@@ -776,7 +852,12 @@ export class Relay {
       client.backpressureHits += 1;
 
       if (client.backpressureHits > MAX_BACKPRESSURE_FRAMES) {
-        client.socket.close(1013, 'Client too slow');
+        this.#metrics.increment(M.wsBackpressureDrops);
+        this.#logger.warn('dropping a client that cannot keep up', {
+          document: client.documentId,
+          buffered: client.socket.bufferedAmount,
+        });
+        this.#close(client, 1013, 'Client too slow');
         return;
       }
     } else {
@@ -784,6 +865,7 @@ export class Relay {
     }
 
     client.socket.send(JSON.stringify(payload));
+    this.#metrics.increment(M.wsFramesSent, { type: payload.type });
   }
 
   /*

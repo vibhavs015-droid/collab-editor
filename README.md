@@ -170,13 +170,65 @@ the console. A CRDT project should make the CRDT inspectable.
 
 ---
 
+## Observing it
+
+Two endpoints, no collector, no external service, no configuration.
+
+### Metrics — `GET /api/metrics`
+
+Prometheus text format. Point a scraper at it, or just:
+
+```bash
+curl -s localhost:3001/api/metrics | grep -E '^(collab|http|ws)_'
+```
+
+The ones worth watching, in the order they matter for this project:
+
+| Metric                             | Read it as                                                                                                 |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `collab_operations_unplaced_total` | **The CRDT health signal.** Non-zero means some peer is waiting for an operation that never arrived        |
+| `ws_pending_unauthenticated`       | Sockets connected but not authorised. A number that only goes up is an attack, not a bug                   |
+| `collab_compaction_skipped_total`  | Why compaction declined. A policy that never fires and one that fires constantly look identical without it |
+| `collab_replay_duration_seconds`   | How long a reconnecting client takes to become current                                                     |
+| `http_request_duration_seconds`    | By route template                                                                                          |
+
+Every label is bounded. Routes are templates (`/api/documents/:id`), never raw paths,
+because one series per document is how a monitoring system falls over while the
+application is fine. There is a property test for that, and a second cap in the
+registry for anyone who adds a raw path by accident.
+
+### Logs
+
+JSON lines on stdout, one object per line. **Every line is JSON, including the
+startup-failure line** — a human-readable warning in the middle of a stream breaks
+every parser downstream, and that is exactly the line you want to be able to read
+programmatically.
+
+Fields that look like credentials are replaced with `[redacted]` at the point records
+become bytes, not per call site. `token`, `authorization`, `password`, `cookie`,
+`session`, `secret`, `api_key`, and anything containing them, at any nesting depth.
+
+```bash
+npm run dev 2>&1 | jq 'select(.level != "info")'
+```
+
+---
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in values. `.env` is gitignored;
 `.env.example` is committed and must never contain real credentials.
 
-Phase 1 requires no environment variables. `PGLITE_DATA_DIR` overrides where the
-database is stored; it defaults to `./.data/pgdata`.
+| Variable          | Default              | What it does                                                                                    |
+| ----------------- | -------------------- | ----------------------------------------------------------------------------------------------- |
+| `JWT_SECRET`      | _unset_              | Signs session tokens. Unset means auth is **open**, which is refused when `NODE_ENV=production` |
+| `AUTH_MODE`       | inferred             | `required` or `open`, to pin the decision explicitly                                            |
+| `LOG_LEVEL`       | `info`               | `debug` to include per-connection detail                                                        |
+| `PORT` / `HOST`   | `3001` / `127.0.0.1` | Where the server listens                                                                        |
+| `PGLITE_DATA_DIR` | `./.data/pgdata`     | Where the database lives                                                                        |
+
+Without `JWT_SECRET`, the server logs a warning on startup and `/api/health` reports
+`"auth": "open"`. It refuses to start that way under `NODE_ENV=production`.
 
 ---
 

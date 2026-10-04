@@ -29,6 +29,9 @@ import { decideCompaction, type CompactionPolicy } from './compaction.js';
 import type { JsonValue } from '../shared/protocol.js';
 import type { Database } from './db.js';
 import type { RelayLog, RelayPage } from './relay.js';
+import { Logger } from './observability/logger.js';
+import { Metrics } from './observability/metrics.js';
+import { M, declareMetrics } from './observability/index.js';
 
 /**
  * Write side of the store, implemented by {@link Database}.
@@ -53,6 +56,15 @@ export interface DocumentStoreOptions {
   readonly compaction?: boolean;
   /** Override the compaction thresholds. Defaults are in compaction.ts. */
   readonly compactionPolicy?: CompactionPolicy;
+  /**
+   * Where to report operation volume and compaction outcomes.
+   *
+   * Defaults to a private registry and a silent logger, so a store built in a test
+   * shares nothing. The real server passes one registry to the API, the relay and the
+   * store, so a single /metrics scrape sees all of them.
+   */
+  readonly metrics?: Metrics;
+  readonly logger?: Logger;
 }
 
 /** Outcome of applying one inbound batch. */
@@ -101,6 +113,8 @@ const DEFAULT_WRITES_PER_COMPACTION = 40;
 
 export class DocumentStore {
   readonly #db: OperationSink;
+  readonly #metrics: Metrics;
+  readonly #logger: Logger;
   readonly #log: RelayLog;
   /** One replica per open document, created on first sight. */
   readonly #replicas = new Map<string, RgaDocument>();
@@ -136,6 +150,9 @@ export class DocumentStore {
 
   constructor(options: DocumentStoreOptions) {
     this.#db = options.db;
+    this.#metrics = options.metrics ?? new Metrics();
+    this.#logger = options.logger ?? Logger.silent();
+    declareMetrics(this.#metrics);
     this.#log = options.log ?? defaultReadSince(options.db);
 
     if (options.compaction !== false) {
@@ -208,6 +225,7 @@ export class DocumentStore {
    */
   async compact(documentId: string): Promise<CompactionResult> {
     if (!this.#compaction.enabled) {
+      this.#metrics.increment(M.compactionRuns, { outcome: 'disabled' });
       return { compacted: false, reason: 'compaction-disabled' };
     }
 
@@ -245,6 +263,11 @@ export class DocumentStore {
       );
 
       if (!decision.compact) {
+        // Why it declined is the useful signal: a policy that never fires and one that
+        // fires constantly look identical from the outside.
+        this.#metrics.increment(M.compactionRuns, { outcome: 'declined' });
+        this.#metrics.increment(M.compactionSkipped, { reason: decision.reason });
+
         return { compacted: false, reason: decision.reason };
       }
 
@@ -254,6 +277,10 @@ export class DocumentStore {
       });
 
       const pruned = (await sink.pruneOpsThrough?.(documentId, decision.pruneThrough)) ?? 0;
+
+      this.#metrics.increment(M.compactionRuns, { outcome: 'compacted' });
+      this.#metrics.increment(M.compactionPruned, {}, pruned);
+      this.#metrics.set(M.logLength, {}, ops.length);
 
       return {
         compacted: true,
@@ -307,6 +334,20 @@ export class DocumentStore {
 
       const unplaced = replica.applyInAnyOrder(ops);
       const placeable = ops.length - unplaced;
+
+      this.#metrics.increment(M.opsReceived, { type: 'accepted' }, placeable);
+      this.#metrics.increment(M.opsRejected, {}, raw.length - ops.length);
+
+      // THE metric for a CRDT server. An operation that cannot be placed is an
+      // operation some peer is still waiting for, and if it never arrives the peer stays
+      // silently behind. Non-zero here is the signal that something is wrong upstream.
+      if (unplaced > 0) {
+        this.#metrics.increment(M.opsUnplaced, {}, unplaced);
+        this.#logger.warn('operations could not be placed', {
+          document: documentId,
+          unplaced,
+        });
+      }
 
       if (placeable > 0) {
         await this.#db.appendOps(

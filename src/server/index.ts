@@ -12,12 +12,28 @@ import { AuthError, resolveAuthenticator } from './auth.js';
 import { Database } from './db.js';
 import { DocumentStore } from './documentStore.js';
 import { Relay, type AuthorizeResult } from './relay.js';
+import { Logger } from './observability/logger.js';
+import { Metrics } from './observability/metrics.js';
+import { declareMetrics, M } from './observability/index.js';
 
 /** Where PGlite persists. Relative to the repo root, and gitignored. */
 const DATA_DIR = process.env['PGLITE_DATA_DIR'] ?? './.data/pgdata';
 
 /** Path clients use for the sync socket. */
 const WS_PATH = '/ws';
+
+/**
+ * The process logger.
+ *
+ * Module level, not inside `main`, for one reason: `main` can fail before it gets far
+ * enough to build anything, and a startup failure reported as plain text is the one
+ * line in an otherwise machine-readable stream. Every line this process writes is JSON,
+ * including the last one.
+ */
+const logger = new Logger({
+  level: process.env['LOG_LEVEL'] === 'debug' ? 'debug' : 'info',
+  base: { service: 'collab-editor' },
+});
 
 /**
  * Graceful shutdown.
@@ -36,8 +52,9 @@ async function shutdown(
   relay: Relay,
   wss: WebSocketServer,
   db: Database,
+  logger: Logger,
 ): Promise<void> {
-  process.stdout.write(`\n[server] ${signal} received, shutting down...\n`);
+  logger.info('shutting down', { signal });
 
   try {
     await server.close();
@@ -54,10 +71,10 @@ async function shutdown(
     });
 
     await db.close();
-    process.stdout.write('[server] closed cleanly.\n');
+    logger.info('closed cleanly');
     process.exit(0);
   } catch (error) {
-    process.stderr.write(`[server] shutdown failed: ${String(error)}\n`);
+    logger.error('shutdown failed', { error });
     process.exit(1);
   }
 }
@@ -68,17 +85,21 @@ async function main(): Promise<void> {
   // running that looks fine and serves everyone's documents to anyone who asks.
   const { authenticator, summary } = resolveAuthenticator(process.env);
 
-  if (authenticator.isOpen) {
-    // Loud, because this is the state nobody should ship by accident.
-    process.stderr.write('[server] WARNING: authentication is OPEN. Anyone who can reach\n');
-    process.stderr.write('[server]          this port can read and write every document.\n');
-    process.stderr.write('[server]          Set JWT_SECRET before exposing it.\n');
-  }
+  // One registry for the whole process, shared by the API, the relay and the store. A
+  // /metrics scrape therefore sees all three. Creating one per component would give
+  // three registries, three of which a scraper could reach only by being told about
+  // three URLs.
+  const metrics = new Metrics();
+  declareMetrics(metrics);
 
-  process.stdout.write(`[server] ${summary}\n`);
+  logger.info('starting', {
+    auth: summary,
+    dataDir: DATA_DIR,
+    nodeEnv: process.env['NODE_ENV'] ?? 'development',
+  });
 
   const db = await Database.openAt(DATA_DIR);
-  process.stdout.write(`[server] database ready at ${DATA_DIR}\n`);
+  logger.info('database ready', { dataDir: DATA_DIR });
 
   /**
    * The one authorisation decision, shared by HTTP and WebSocket.
@@ -97,7 +118,8 @@ async function main(): Promise<void> {
       // log line costs nothing. Telling the client which one it was tells an
       // attacker too.
       const reason = error instanceof AuthError ? error.reason : 'unknown';
-      process.stderr.write(`[server] rejected session for ${documentId}: ${reason}\n`);
+      metrics.increment(M.authFailures, { reason });
+      logger.warn('rejected session', { document: documentId, reason, transport: 'websocket' });
 
       return { ok: false, code: 'UNAUTHORIZED', message: 'Session is not valid.' };
     }
@@ -119,7 +141,7 @@ async function main(): Promise<void> {
 
   // One store per process, shared by the relay and the API. The relay writes
   // through it; the API reads the text it materialises.
-  const store = new DocumentStore({ db });
+  const store = new DocumentStore({ db, metrics, logger: logger.child('store') });
 
   const relay = new Relay({
     log: {
@@ -133,6 +155,8 @@ async function main(): Promise<void> {
     // logs, browser history and Referer headers, and a bearer token in any of those
     // is a credential that has already leaked.
     authorize,
+    metrics,
+    logger: logger.child('relay'),
 
     // Feeds the causal-stability floor. Compaction prunes only below the lowest
     // cursor reported here, so a peer that has not caught up keeps the history it
@@ -170,7 +194,7 @@ async function main(): Promise<void> {
           store.maybeCompact(documentId);
         })
         .catch((error: unknown) => {
-          process.stderr.write(`[server] could not persist ${documentId}: ${String(error)}\n`);
+          logger.error('could not persist', { document: documentId, error });
         });
     });
   });
@@ -178,6 +202,7 @@ async function main(): Promise<void> {
   const server = new ApiServer({
     db,
     auth: authenticator,
+    observability: { metrics, logger: logger.child('api') },
     host: process.env['HOST'] ?? '127.0.0.1',
     port: Number(process.env['PORT'] ?? 3001),
   });
@@ -193,21 +218,38 @@ async function main(): Promise<void> {
   });
 
   const address = await server.listen();
-  process.stdout.write(`[server] listening on http://${address.host}:${address.port}\n`);
-  process.stdout.write(
-    `[server] websocket at ws://${address.host}:${address.port}${WS_PATH}?doc=<id>\n`,
-  );
-  process.stdout.write('[server] press Ctrl+C to stop\n');
+
+  logger.info('listening', {
+    url: `http://${address.host}:${address.port}`,
+    websocket: `ws://${address.host}:${address.port}${WS_PATH}?doc=<id>`,
+    auth: authenticator.isOpen ? 'open' : 'required',
+  });
+
+  // Stated plainly rather than left for whoever deploys this to discover. Loud, because
+  // this is the state nobody should ship by accident.
+  if (authenticator.isOpen) {
+    logger.warn(
+      'authentication is OPEN: anyone who can reach this port can read and write every document',
+      {
+        remediation: 'set JWT_SECRET before exposing this',
+      },
+    );
+  }
+
+  logger.info('ready', { hint: 'Ctrl+C to stop' });
 
   process.on('SIGINT', () => {
-    void shutdown('SIGINT', server, relay, wss, db);
+    void shutdown('SIGINT', server, relay, wss, db, logger);
   });
   process.on('SIGTERM', () => {
-    void shutdown('SIGTERM', server, relay, wss, db);
+    void shutdown('SIGTERM', server, relay, wss, db, logger);
   });
 }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`[server] failed to start: ${String(error)}\n`);
+  // Every line this process writes is JSON, including this one. A startup failure is
+  // exactly when a machine-readable line matters most, because it is what a supervisor
+  // or a deploy script reads.
+  logger.error('failed to start', { error });
   process.exit(1);
 });

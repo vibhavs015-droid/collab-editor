@@ -16,6 +16,10 @@ import type { Duplex } from 'node:stream';
 import type { Database } from './db.js';
 import type { DocumentRecord } from './db.js';
 import { AuthError, OpenAuthenticator, newSubject, type Authenticator } from './auth.js';
+import { Logger } from './observability/logger.js';
+import { Metrics } from './observability/metrics.js';
+import { M, declareMetrics } from './observability/index.js';
+import { routeTemplate, statusClass } from './observability/routes.js';
 
 /**
  * Said whenever a document cannot be reached.
@@ -28,8 +32,19 @@ import { AuthError, OpenAuthenticator, newSubject, type Authenticator } from './
  */
 const NOT_FOUND_MESSAGE = 'Document does not exist, or you do not have access to it.';
 
+/**
+ * Path only, with the query string removed.
+ *
+ * A query string carries a document id and, on an upgrade request, whatever else a caller
+ * put there. It must never become a metric label.
+ */
+function templateFor(rawUrl: string | undefined): string {
+  return routeTemplate((rawUrl ?? '/').split('?')[0] ?? '/');
+}
+
 /** Outcome of identifying the caller. */
-type IdentifyResult = { ok: true; subject: string } | { ok: false; message: string };
+type IdentifyResult =
+  { ok: true; subject: string } | { ok: false; message: string; reason: string };
 
 export interface ApiServerOptions {
   readonly db: Database;
@@ -46,6 +61,29 @@ export interface ApiServerOptions {
    * authenticator when NODE_ENV=production.
    */
   readonly auth?: Authenticator;
+  /**
+   * Where request metrics and logs go.
+   *
+   * Defaults to a private registry and a silent logger, so a component constructed in
+   * a test produces no output and shares nothing with another component's registry.
+   * The real server passes one registry to the API, the relay and the store so a
+   * single /metrics scrape sees all of them.
+   */
+  readonly observability?: Observability;
+}
+
+/** The two things a component needs to report what it is doing. */
+export interface Observability {
+  readonly metrics: Metrics;
+  readonly logger: Logger;
+}
+
+/** Build an observability pair, filling in the quiet defaults. */
+export function observability(overrides: Partial<Observability> = {}): Observability {
+  return {
+    metrics: overrides.metrics ?? new Metrics(),
+    logger: overrides.logger ?? Logger.silent(),
+  };
 }
 
 /** Documents are addressed by a URL-safe id. */
@@ -84,6 +122,7 @@ export class ApiServer {
   readonly #port: number;
   readonly #onListen: ((address: { host: string; port: number }) => void) | undefined;
   readonly #auth: Authenticator;
+  readonly #obs: Observability;
   readonly #server: Server;
   /** Registered upgrade routes, checked before any request is handled. */
   readonly #upgrades: UpgradeHandler[] = [];
@@ -95,6 +134,8 @@ export class ApiServer {
     this.#port = options.port ?? 3001;
     this.#onListen = options.onListen;
     this.#auth = options.auth ?? new OpenAuthenticator();
+    this.#obs = observability(options.observability);
+    declareMetrics(this.#obs.metrics);
     this.#server = createServer((req, res) => {
       void this.#handle(req, res);
     });
@@ -176,6 +217,25 @@ export class ApiServer {
   }
 
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const startedAt = process.hrtime.bigint();
+    const template = templateFor(req.url);
+    const { metrics, logger } = this.#obs;
+
+    // add, not increment: this is a gauge that goes back down. A cumulative
+    // representation of it would report every request ever handled as still in flight.
+    metrics.add(M.httpInFlight, {}, 1);
+
+    // One finish listener, registered once, which is why the status is read off the
+    // response rather than returned by each handler. Handlers return void, so there is
+    // nothing else to wrap.
+    res.once('finish', () => {
+      const seconds = Number(process.hrtime.bigint() - startedAt) / 1e9;
+
+      metrics.add(M.httpInFlight, {}, -1);
+      metrics.increment(M.httpRequests, { route: template, status: statusClass(res.statusCode) });
+      metrics.observe(M.httpDuration, { route: template }, seconds);
+    });
+
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -191,6 +251,20 @@ export class ApiServer {
     try {
       if (path === '/api/health' && req.method === 'GET') {
         sendJson(res, 200, { status: 'ok', auth: this.#auth.isOpen ? 'open' : 'required' });
+        return;
+      }
+
+      // Prometheus exposition format. Unauthenticated on purpose: a scraper has no
+      // session, and requiring one would mean this endpoint is never the first thing
+      // anyone checks. It exposes counters, not content, so there is nothing in it that
+      // a document's existence would reveal.
+      if (path === '/api/metrics' && req.method === 'GET') {
+        this.#refreshProcessMetrics();
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+          'Content-Length': Buffer.byteLength(metrics.render()),
+        });
+        res.end(metrics.render());
         return;
       }
 
@@ -298,9 +372,20 @@ export class ApiServer {
     } catch (error) {
       // Never leak internals to the client: a stack trace can disclose schema
       // details and file paths.
-      process.stderr.write(`[api] unhandled error: ${String(error)}\n`);
+      logger.error('unhandled request error', { route: template, error });
       sendError(res, 500, 'INTERNAL', 'Something went wrong on the server.');
     }
+  }
+
+  /**
+   * Sample process memory at scrape time.
+   *
+   * Deliberately not a background timer: a gauge nobody reads should not cost anything
+   * to maintain, and the only moment the number is needed is the moment it is scraped.
+   */
+  #refreshProcessMetrics(): void {
+    const usage = process.memoryUsage();
+    this.#obs.metrics.set(M.processMemory, {}, usage.rss);
   }
 
   /**
@@ -314,6 +399,8 @@ export class ApiServer {
   async #issueSession(res: ServerResponse): Promise<void> {
     const issued = await this.#auth.issue(newSubject());
 
+    this.#obs.metrics.increment(M.sessionsIssued);
+
     sendJson(res, 200, {
       token: issued.token,
       subject: issued.subject,
@@ -326,7 +413,12 @@ export class ApiServer {
     const header = req.headers.authorization;
 
     if (typeof header !== 'string' || header.trim() === '') {
-      return { ok: false, message: 'Provide a session token in the Authorization header.' };
+      this.#rejectSession(templateFor(req.url), 'missing');
+      return {
+        ok: false,
+        reason: 'missing',
+        message: 'Provide a session token in the Authorization header.',
+      };
     }
 
     // Case-insensitive scheme, per RFC 7235. `startsWith('Bearer ')` would reject a
@@ -335,18 +427,40 @@ export class ApiServer {
     const match = /^Bearer\s+(\S+)$/i.exec(header.trim());
 
     if (!match) {
-      return { ok: false, message: 'Authorization header must be "Bearer <token>".' };
+      this.#rejectSession(templateFor(req.url), 'malformed-header');
+      return {
+        ok: false,
+        reason: 'malformed-header',
+        message: 'Authorization header must be "Bearer <token>".',
+      };
     }
 
     try {
       const identity = await this.#auth.verify(match[1] ?? '');
       return { ok: true, subject: identity.subject };
     } catch (error) {
+      const reason = error instanceof AuthError ? error.reason : 'unknown';
       const message =
         error instanceof AuthError ? error.message : 'Session token could not be verified.';
 
-      return { ok: false, message };
+      this.#rejectSession(templateFor(req.url), reason);
+
+      return { ok: false, reason, message };
     }
+  }
+
+  /**
+   * Record a refused token.
+   *
+   * Split in two on purpose. The metric is keyed by a bounded set of reasons, so it is
+   * safe to chart and shows the shape of the problem. The log gets the route, for the
+   * one person investigating. The message itself never leaves the process: which of
+   * "expired" and "bad-signature" applies is exactly what an attacker probing a
+   * verifier wants to learn.
+   */
+  #rejectSession(route: string, reason: string): void {
+    this.#obs.metrics.increment(M.authFailures, { reason });
+    this.#obs.logger.warn('rejected session', { route, reason });
   }
 
   /**

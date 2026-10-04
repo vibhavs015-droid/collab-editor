@@ -363,6 +363,107 @@ exact-list assertions order-dependent, which fails confusingly rather than loudl
 
 ---
 
+## Phase 5 — Observability
+
+704 tests, 31 files. Built before the load-testing work, because a benchmark whose
+numbers nothing can corroborate is a press release.
+
+### What was built
+
+| Module                     | Why it exists                                                 |
+| -------------------------- | ------------------------------------------------------------- |
+| `observability/metrics.ts` | Registry and Prometheus text rendering. No client dependency  |
+| `observability/logger.ts`  | JSON lines with redaction at the serialisation boundary       |
+| `observability/routes.ts`  | Bounded route templates for metric labels                     |
+| `observability/index.ts`   | Every metric name, type and help text, in one table           |
+| `GET /api/metrics`         | The scrape. Unauthenticated, because a scraper has no session |
+
+### Label cardinality is the thing that actually bites
+
+`requests_total{path="/api/documents/8f2c1a"}` is one series per document. Forty
+documents is forty series for one endpoint; a crawler creates thousands; the
+monitoring system falls over while the application is fine.
+
+Two defences, because one is a convention and conventions get broken:
+
+1. Labels are route **templates**. `/api/documents/:id` is one series forever.
+   `routes.ts` is 60 lines and a property test generates 2,000 hostile paths with a
+   delimiter-heavy alphabet and asserts the output is always one of ten known
+   strings.
+2. Every metric has a hard cap on distinct label combinations. Past it, new ones are
+   refused and counted, and `overflowedMetrics()` names the culprits. The backstop for
+   the case someone adds a raw path by accident.
+
+### Four findings
+
+**`declareMetrics` declared gauges as counters first.** It called `describe`, which
+creates a counter, then `ensure`d the same name as a gauge — which the registry
+correctly refused. My own guard, catching my own ordering bug. Fixed by putting every
+metric in one table with its type, so the order cannot be got wrong.
+
+**`http_requests_in_flight` used `increment` on a gauge.** Caught by the same guard,
+in the other direction. The fix is `add`: a cumulative representation of a gauge
+would report every request ever handled as still in flight.
+
+**`#leave` published the connection gauge before removing the client from the room.**
+So it reported the count as it was _before_ the leave — the opposite of what a gauge
+is for, and it made the gauge permanently stuck at its last high-water mark. Found by
+a test asserting the gauge returns to zero and never does.
+
+**The "authentication is OPEN" warning was emitted twice**, once as plain text and
+once as JSON. Only visible by running the real server and reading its output, which
+tests do not do: `index.ts` has no test coverage, and the warning was harmless-looking
+in the source. Every line the process writes is now JSON, including the startup-failure
+line, and there is a smoke check in NOTES for it.
+
+### Four test bugs, all measuring the wrong thing
+
+`http_requests_in_flight` asserted as `0` from inside a scrape. A scrape is itself a
+request, so while `/api/metrics` renders the gauge is legitimately 1 — the test was
+asserting on the timing of the scrape, not the behaviour.
+
+The cardinality test compared 50 documents against 0 and expected growth under 10. It
+grew by 80, all of it `/api/metrics` observing itself for the first time. Fixed by
+comparing 50 against 5, with a warm-up scrape so the endpoint has already recorded its
+own series.
+
+The same test then failed comparing series _lines_, which change value on every single
+request. Comparing series _names_ is the property; comparing lines reports growth on
+every call.
+
+WebSocket close timing used fixed sleeps. Those pass on a fast machine and fail on a
+slow one, which is exactly what a load-test run on the same CI budget is. Replaced
+with `waitFor`.
+
+### Also worth knowing
+
+The registry renders sample families in sorted order and is byte-stable between
+identical scrapes. A scrape that reorders itself makes every diff noisy, which is how
+people stop reading them.
+
+`DEFAULT_BUCKETS` ends with a real `+Inf` bucket rather than an implied one. Without
+it a 30-second replay appeared in `_count` and in no bucket at all, which reads as "no
+slow requests happened".
+
+### Known limitations
+
+- **No Prometheus client dependency**, so no remote write, no exemplars, no native
+  histograms. The text format is a few dozen lines and vendoring the ecosystem to
+  serialise a `Map` is a poor trade. A collector scraping `/api/metrics` is the
+  intended deployment and costs nothing.
+- **Metrics are per-process and in memory.** Two instances behind a load balancer each
+  report their own. Aggregation is the scraper's job; there is no shared store.
+- **The cardinality cap silently drops observations** past the limit. It counts the
+  drops and names the metric, but a histogram losing observations looks like latency
+  improving. The route templates are the real defence; the cap is the alarm.
+- **No tracing.** `x-request-id` is not propagated, so one request across the HTTP
+  handler and the database cannot be followed as a unit. Structured logs with a shared
+  `requestId` field would be the cheap version of this.
+- **No log sampling.** At INFO every request writes nothing, but a debug-level
+  deployment would write one line per request with no way to turn that down.
+
+---
+
 ## Phase 4 — Offline-first
 
 397 tests, 19 files. ~155s, still dominated by PGlite boots.
