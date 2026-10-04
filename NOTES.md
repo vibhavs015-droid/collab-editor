@@ -327,27 +327,41 @@ nothing lost" against a real relay and a real database.
 ### A CI failure that sat unnoticed for two phases
 
 After the Phase 4 push I checked CI for the first time since Phase 2 and found it
-had been **red the whole time**: `listDocuments > returns newest first` — expected
-`b`, received `a`.
+had been **red the whole time**: `listDocuments > returns newest first`.
 
-Two things were wrong and both mattered.
+This then took **three attempts to fix properly**, which is the interesting part.
 
-**The code.** `ORDER BY updated_at DESC` is not a total order. Two documents
-written in the same clock tick tie, and Postgres returns tied rows in whatever
-order the heap gives it. Fixed with `id DESC` as an explicit tiebreaker, because a
-list endpoint whose order changes between identical calls cannot be paginated
-against.
+**Attempt 1 — the code was genuinely wrong.** `ORDER BY updated_at DESC` is not a
+total order. Two documents written in the same transaction tie, and Postgres
+returns tied rows in whatever order the heap gives it. A list endpoint whose order
+changes between identical calls cannot be paginated against. Fixed with `id DESC`
+as an explicit tiebreaker.
 
-**The test, which was the worse problem.** It created `a`, saved `a`, then created
-`b` — so the assertion only held if the save and the second insert landed in
-different clock ticks. On a slow laptop they did. On a fast CI runner they did
-not.
+**Attempt 2 — the test was also wrong, and my fix made it worse.** I changed the
+test to touch `a` after creating `b`, so it asserted `updated_at` ordering rather
+than insertion order. That still assumed the timestamps would differ. It passed
+locally and failed again on CI.
 
-The lesson is not "add a tiebreaker". It is that **a test which passes locally and
-fails in CI for timing reasons has proved nothing**, and that I was verifying
-locally and assuming CI agreed. Checking CI after a push is part of the loop, not
-an optional extra. Two new tests now cover it: one asserts a tied-timestamp list
-is stable across repeated identical calls, one asserts the tiebreaker itself.
+**Attempt 3 — the actual cause.** `now()` in Postgres is the **transaction start
+time**, not the statement time. PGlite on CI batches aggressively enough that three
+sequential statements land in one transaction and share a timestamp. So the
+ordering was being decided by the tiebreaker, and the test was measuring Postgres's
+batching behaviour rather than anything in this code.
+
+The fix is to stop depending on the database's clock at all: `saveDocument` takes an
+optional `updatedAt`, and the tests set explicit timestamps. That is a real API
+addition with a real second use (restoring a document's age on import), not a test
+hook dressed up as one.
+
+Three lessons, in order of how much they cost:
+
+1. **Check CI after every push.** Two phases of red because I verified locally and
+   assumed the pipeline agreed.
+2. **A flaky test is a broken test, even when the code is fine.** Twice.
+3. **"Passes locally, fails in CI" is a fact about the test, not about the
+   machine.** I reached for the tiebreaker first and the clock second, when the
+   clock was the whole problem. The tiebreaker was still worth having — it is a
+   genuine correctness fix — but it was not the bug.
 
 Also worth noting: the Phase 2 CI run failed for an unrelated reason (a
 `concurrently` install step), and I never looked at either run until Phase 4.

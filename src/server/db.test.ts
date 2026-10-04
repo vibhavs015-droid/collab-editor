@@ -154,33 +154,64 @@ describe('renameDocument', () => {
 
 describe('listDocuments', () => {
   it('returns newest first', async () => {
-    // Deliberately saves 'a' after creating 'b' before listing, so the assertion is
-    // about `updated_at` rather than about insertion order. Asserting on insertion
-    // order would pass whether or not the ORDER BY worked at all.
+    // Timestamps are set explicitly rather than by calling saveDocument and hoping
+    // the clock moved.
+    //
+    // This test failed CI twice. `now()` is the TRANSACTION start time, and PGlite
+    // batches aggressively enough on CI that three sequential statements land in
+    // one transaction and share a timestamp. The ordering was then decided by the
+    // tiebreaker, not by the timestamps — so the test was measuring Postgres's
+    // batching, which is not a property of this code.
+    const base = Date.UTC(2026, 0, 1);
+
     await db.createDocument({ id: 'a', title: 'A' });
+    await db.saveDocument('a', 'first', { updatedAt: new Date(base) });
+
     await db.createDocument({ id: 'b', title: 'B' });
-    await db.saveDocument('a', 'touch a last');
+    await db.saveDocument('b', 'second', { updatedAt: new Date(base + 1000) });
+
+    await db.createDocument({ id: 'c', title: 'C' });
+    await db.saveDocument('c', 'third', { updatedAt: new Date(base + 2000) });
 
     const list = await db.listDocuments();
-    expect(list[0]?.id).toBe('a');
+
+    expect(list.map((doc) => doc.id)).toEqual(['c', 'b', 'a']);
   });
 
-  it('is stable when two documents share a timestamp', async () => {
-    // Rows written in the same clock tick have equal `updated_at`, and Postgres
-    // returns tied rows in whatever order the heap gives it. Without the id
-    // tiebreaker this test fails on some machines and passes on others, which is
-    // the worst property a list endpoint can have.
+  it('orders by updated_at even when creation order disagrees', async () => {
+    const base = Date.UTC(2026, 0, 2);
+
+    await db.createDocument({ id: 'newest', title: 'Newest' });
+    await db.saveDocument('newest', 'x', { updatedAt: new Date(base + 5000) });
+
+    await db.createDocument({ id: 'oldest', title: 'Oldest' });
+    await db.saveDocument('oldest', 'x', { updatedAt: new Date(base) });
+
+    // Created first, touched last. Asserting on creation order would pass whether
+    // or not the ORDER BY worked at all.
+    expect((await db.listDocuments()).map((doc) => doc.id)).toEqual(['newest', 'oldest']);
+  });
+
+  it('is stable and total when documents share a timestamp', async () => {
+    // `id DESC` is the tiebreaker, and it is what makes the order a total one.
+    // Without it Postgres returns tied rows in heap order, which changes between
+    // calls — and a list endpoint whose order moves cannot be paginated against.
+    const stamp = new Date(Date.UTC(2026, 0, 3));
+
     await db.createDocument({ id: 'a', title: 'A' });
+    await db.saveDocument('a', 'same', { updatedAt: stamp });
+
     await db.createDocument({ id: 'b', title: 'B' });
+    await db.saveDocument('b', 'same', { updatedAt: stamp });
+
     await db.createDocument({ id: 'c', title: 'C' });
+    await db.saveDocument('c', 'same', { updatedAt: stamp });
 
     const first = await db.listDocuments();
     const second = await db.listDocuments();
 
-    expect(first.map((doc) => doc.id)).toEqual(second.map((doc) => doc.id));
-
-    // And the order must be a total one: descending by timestamp, then by id.
     expect(first.map((doc) => doc.id)).toEqual(['c', 'b', 'a']);
+    expect(second.map((doc) => doc.id)).toEqual(first.map((doc) => doc.id));
   });
 
   it('honours the limit', async () => {

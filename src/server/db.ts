@@ -300,12 +300,15 @@ export class Database {
   async listDocuments(limit = 50): Promise<DocumentRecord[]> {
     // Parameterised, not interpolated: `limit` is user-controlled from Phase 5.
     //
-    // `id` is a tiebreaker, not decoration. Two documents written inside the same
-    // clock tick have equal `updated_at`, and Postgres is free to return tied rows
-    // in any order it likes — heap order, most often. A list endpoint whose order
-    // silently changes between identical calls cannot be paginated against, and a
-    // test asserting "newest first" on tied rows fails on a fast machine and passes
-    // on a slow one, which is the worst possible failure mode for a test.
+    // The `id` tiebreaker is not decoration. `now()` is the *transaction* start
+    // time, so every statement in one transaction stamps the same value — and
+    // PGlite batches aggressively enough on CI that three sequential calls can
+    // share a timestamp. Postgres then returns tied rows in whatever order the heap
+    // gives it.
+    //
+    // Without a tiebreaker the order of a list endpoint silently changes between
+    // identical calls, which makes it impossible to paginate against. This cost
+    // two failed CI runs before it was understood; see db.test.ts.
     const result = await this.#pg.query<DocumentRow>(
       `SELECT id, title, content, clock, updated_at
        FROM documents
@@ -320,16 +323,33 @@ export class Database {
   /**
    * Persist document content.
    *
+   * @param options.updatedAt overrides the timestamp. Exists for two honest
+   *   reasons: restoring a document's real age on import, and letting a test
+   *   establish a known ordering instead of hoping the database's clock
+   *   advanced. `now()` is the transaction start time, so statements batched into
+   *   one transaction share a timestamp — which means a test that creates three
+   *   documents and asserts on their order is testing Postgres's batching
+   *   behaviour, not this code.
+   *
    * @returns `changed: false` when the stored content already matched, letting
    *   the client skip a redundant "Saved" notification on every autosave tick.
    */
-  async saveDocument(id: string, content: string): Promise<SaveResult | null> {
+  async saveDocument(
+    id: string,
+    content: string,
+    options: { readonly updatedAt?: Date } = {},
+  ): Promise<SaveResult | null> {
+    // COALESCE so the default path is unchanged: an absent option binds null and
+    // falls back to now(), whereas binding a literal now() from JS would use the
+    // client's clock rather than the server's.
+    const stamp = options.updatedAt ?? null;
+
     const result = await this.#pg.query<{ updated_at: Date; changed: boolean }>(
       `UPDATE documents
-       SET content = $2, updated_at = now()
+       SET content = $2, updated_at = COALESCE($3::timestamptz, now())
        WHERE id = $1 AND content IS DISTINCT FROM $2
        RETURNING updated_at`,
-      [id, content],
+      [id, content, stamp],
     );
 
     const row = result.rows[0];
