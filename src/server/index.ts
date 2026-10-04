@@ -15,9 +15,51 @@ import { Relay, type AuthorizeResult } from './relay.js';
 import { Logger } from './observability/logger.js';
 import { Metrics } from './observability/metrics.js';
 import { declareMetrics, M } from './observability/index.js';
+import { openStatic, type StaticOptions } from './static.js';
+
+/**
+ * Open the built client, treating "not built yet" as normal.
+ *
+ * Returns undefined rather than throwing, because a missing `dist/client` is an expected
+ * state during development and an error in production. The two are told apart by the
+ * caller, which logs the difference: a developer sees why the page is blank, and a
+ * deployed instance reports it as the warning it is.
+ */
+async function openClient(root: string, logger: Logger): Promise<StaticOptions | undefined> {
+  try {
+    return await openStatic(root);
+  } catch {
+    if (process.env['NODE_ENV'] === 'production') {
+      // In production a missing bundle means a broken image, and serving nothing while
+      // reporting healthy is the failure mode worth shouting about.
+      logger.warn('client bundle missing: the API will answer, but no page will load', {
+        clientDist: root,
+      });
+    } else {
+      logger.info('no client bundle; API only. Run `npm run build` to serve the editor.', {
+        clientDist: root,
+      });
+    }
+
+    return undefined;
+  }
+}
 
 /** Where PGlite persists. Relative to the repo root, and gitignored. */
 const DATA_DIR = process.env['PGLITE_DATA_DIR'] ?? './.data/pgdata';
+
+/**
+ * Built client, served by the same process as the API.
+ *
+ * One origin for HTTP and WebSocket means no CORS and no second deployment unit, which
+ * is the same reason the relay shares this port.
+ *
+ * Optional because the path does not exist until `npm run build` has run, and a
+ * developer running `tsx src/server/index.ts` before building should get a clear
+ * message rather than a stack trace. A deployed server has the directory and serves it;
+ * `CLIENT_DIST` exists for the rare deployment where the bundle lives elsewhere.
+ */
+const CLIENT_DIST = process.env['CLIENT_DIST'] ?? './dist/client';
 
 /** Path clients use for the sync socket. */
 const WS_PATH = '/ws';
@@ -199,10 +241,20 @@ async function main(): Promise<void> {
     });
   });
 
+  // Resolve the client bundle before opening the port, for the same reason the database
+  // migrates first: a server that accepts requests and then cannot serve `/` looks
+  // healthy to every health check while being useless to every user.
+  const staticFiles = await openClient(CLIENT_DIST, logger);
+
   const server = new ApiServer({
     db,
     auth: authenticator,
     observability: { metrics, logger: logger.child('api') },
+    // Spread rather than `static: staticFiles`, because `exactOptionalPropertyTypes` is
+    // on and a property present with value `undefined` is not the same as an absent one.
+    // Spreading omits the key entirely when there is no bundle, which is what the option
+    // actually means.
+    ...(staticFiles === undefined ? {} : { static: staticFiles }),
     host: process.env['HOST'] ?? '127.0.0.1',
     port: Number(process.env['PORT'] ?? 3001),
   });

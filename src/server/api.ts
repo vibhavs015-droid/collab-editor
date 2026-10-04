@@ -20,6 +20,7 @@ import { Logger } from './observability/logger.js';
 import { Metrics } from './observability/metrics.js';
 import { M, declareMetrics } from './observability/index.js';
 import { routeTemplate, statusClass } from './observability/routes.js';
+import { serveStatic, type StaticOptions } from './static.js';
 
 /**
  * Said whenever a document cannot be reached.
@@ -70,6 +71,17 @@ export interface ApiServerOptions {
    * single /metrics scrape sees all of them.
    */
   readonly observability?: Observability;
+  /**
+   * Built client to serve from this server.
+   *
+   * Optional, and omitted by every test: the suite exercises the API, not a build
+   * artifact, and depending on `dist/client` existing would make `npm test` fail on a
+   * clean checkout.
+   *
+   * A deployed server must provide it, or the browser gets a 401 for `/` and the
+   * application never loads. See static.ts for why this is unauthenticated.
+   */
+  readonly static?: StaticOptions;
 }
 
 /** The two things a component needs to report what it is doing. */
@@ -124,6 +136,8 @@ export class ApiServer {
   readonly #auth: Authenticator;
   readonly #obs: Observability;
   readonly #server: Server;
+  /** Built client to serve, when one was provided. Undefined disables static serving. */
+  readonly #static: StaticOptions | undefined;
   /** Registered upgrade routes, checked before any request is handled. */
   readonly #upgrades: UpgradeHandler[] = [];
   #createTimestamps: number[] = [];
@@ -134,6 +148,7 @@ export class ApiServer {
     this.#port = options.port ?? 3001;
     this.#onListen = options.onListen;
     this.#auth = options.auth ?? new OpenAuthenticator();
+    this.#static = options.static;
     this.#obs = observability(options.observability);
     declareMetrics(this.#obs.metrics);
     this.#server = createServer((req, res) => {
@@ -274,6 +289,19 @@ export class ApiServer {
       if (path === '/api/auth/session' && req.method === 'POST') {
         await this.#issueSession(res);
         return;
+      }
+
+      // Static assets, BEFORE authentication and before the API routes.
+      //
+      // Before auth, because a browser cannot send a bearer token when fetching the HTML
+      // shell, and the shell is what obtains the token. After the `/api/` routes above,
+      // so a file can never shadow a real endpoint.
+      if (this.#static !== undefined) {
+        const served = await serveStatic(this.#static, req, res, path);
+
+        if (served !== null) {
+          return;
+        }
       }
 
       // Everything below is about a specific document and needs a caller. Resolved

@@ -948,4 +948,84 @@ tested.
 tool-generated artifacts on commit buries the data that actually differs between two
 runs under indentation churn.
 
+## The deployment work found the app could not be deployed at all
+
+Starting on Docker exposed something with nothing to do with Docker.
+
+`npm run build` emits `dist/client`. Nothing served it. `npm run dev` worked
+because Vite's dev server proxies to the API; production had no equivalent.
+Starting the built server and asking for `/` returned **401**, and
+`/index.html` returned 401 too.
+
+Found by running the thing and requesting a URL, not by reading the routing
+table. A routing table with no static branch and no static handler looks correct
+right up until a browser asks for a document.
+
+`src/server/static.ts` now serves the built client. Public, deliberately: a
+browser cannot present a bearer token when fetching the HTML shell, and the
+shell is what obtains the token. That is only acceptable because nothing under
+the root is user content - document content is never written into
+`dist/client`, and `/api/` is refused by the resolver so no file can shadow a
+real endpoint.
+
+### Four bugs in the first version, two of them found by probing and two by tests
+
+**`/` resolved to null.** The root path normalised to the empty string, which
+the containment check treated as "nothing to serve", so the most common request
+in the application fell through to authentication. Caught by starting the server
+and probing `/`.
+
+**The SPA fallback looked in the wrong directory.** `/documents/abc` looked for
+`/documents/abc/index.html` instead of the root's `index.html`, so every
+client-side route 404'd. Also caught by probing - `resolveStaticPath` was
+correct, so a unit test of the resolver alone passed happily. That is the reason
+the suite has an HTTP-level group as well as direct tests of the pure functions.
+
+**`normalize` silently rewrote traversal attempts.** `/../package.json`
+normalised to `/package.json` on Windows, because `..` at the root of a rooted
+path is _dropped_. The result was safely inside the root so no escape was
+possible, but a malformed request was quietly rewritten to a different file
+instead of refused, and a probe would not appear in the access log. Now any `..`
+segment is rejected before normalising, which also means the segment check and
+the containment check test different things rather than the same thing twice.
+
+**Double-encoded traversal slipped through.** `/%252e%252e/x` decodes once to
+`/%2e%2e/x`, which is an ordinary directory name and not a `..` segment.
+Decoding is now repeated, bounded at three passes so a caller cannot turn it into
+a decompression loop.
+
+### Two rules that drifted apart, and why that is worth fixing structurally
+
+`static.ts` refused `/api` and `/api/...`. `routes.ts`, which builds metric
+labels, excluded only `/api/`. So a 401 for `/api` was reported as
+`/index.html` - every unauthenticated API call sharing one series with a
+successful page load.
+
+One predicate, `isApiPath`, is now exported from `static.ts` and used by both. A
+security check and an observability label that each have their own copy of "what
+is an API path" are a disagreement waiting to happen, and this was the
+disagreement.
+
+The same function also grows a new cardinality trap the moment static files
+exist: Vite names bundles `index-<hash>.js`, so one label per asset is one dead
+series per deploy, permanently, because nothing ever requests the old hash again.
+The existing bounded-output test caught my first attempt immediately - which is
+precisely why that test exists.
+
+The fix over-collapses on purpose: `collab-editor.js` becomes
+`/assets/collab-*.js`, because a hash is indistinguishable from an ordinary word
+by shape. Losing one distinguishable series costs nothing; leaving a dead series
+per deploy costs a registry that only ever grows.
+
+### Narrowing a security check is often just a new bug
+
+While wiring this in I changed `/api/auth/session` from POST-only to GET-or-POST
+by accident, while copying a block. **No test caught it**, because no test
+asserted that GET is refused. Reverted immediately, and the test now exists.
+
+Worth recording as a process point: the fix for a security bug can silently
+remove a different security property. This one was caught by noticing, not by
+the suite - and the reason it was not caught is a coverage gap that had been
+there since Phase 5.
+
 ## Log

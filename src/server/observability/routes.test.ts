@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { mulberry32 } from '../../core/rng.js';
+import { isApiPath } from '../static.js';
 import { routeTemplate, statusClass } from './routes.js';
 
 describe('routeTemplate', () => {
@@ -45,15 +46,94 @@ describe('routeTemplate', () => {
   it('folds an unknown path into a single series', () => {
     // Anything unrecognised becomes one string, so a crawler probing random URLs adds
     // exactly one series rather than thousands.
-    expect(routeTemplate('/etc/passwd')).toBe('other');
     expect(routeTemplate('/api')).toBe('other');
-    expect(routeTemplate('/')).toBe('other');
     expect(routeTemplate('')).toBe('other');
+    expect(routeTemplate('/a/b?c=1')).toBe('other');
+    expect(routeTemplate('/%2e%2e/x')).toBe('other');
+  });
+
+  it('labels a probed path as the shell when the shell is what answers', () => {
+    // `/etc/passwd` was `other` before static serving, because nothing answered it and it
+    // fell through to a 401. Now the static handler serves the app shell for any
+    // extensionless path, so `/index.html` is what actually happened. A crawler gets one
+    // series, which is the property that matters, and it is an accurate one.
+    expect(routeTemplate('/etc/passwd')).toBe('/index.html');
+    expect(routeTemplate('/wp-admin/setup-config.php')).toBe('other');
+  });
+
+  it('labels the app shell as such', () => {
+    // `/` used to be `other`, because before static serving nothing answered it. Now the
+    // server serves index.html for it and every client-side route, so labelling it
+    // `other` would group the app shell in with genuine 404s and 401s.
+    expect(routeTemplate('/')).toBe('/index.html');
+    expect(routeTemplate('/documents/abc123')).toBe('/index.html');
+    expect(routeTemplate('/documents/abc123/edit')).toBe('/index.html');
+  });
+
+  it('does not label a path the shell would not have served', () => {
+    // A label claims a response happened. These end in a 401 or a 404, so calling them
+    // `/index.html` would make the metric describe something that never occurred.
+    expect(routeTemplate('/assets/missing.js')).not.toBe('/index.html');
+    expect(routeTemplate('/weird.thing')).not.toBe('/index.html');
+    expect(routeTemplate('/has spaces/there')).not.toBe('/index.html');
+  });
+
+  it('collapses the content hash out of an asset name', () => {
+    // Vite names bundles `index-<hash>.js`. One series per hash would be one dead series
+    // per deploy, forever.
+    expect(routeTemplate('/assets/index-CdCt3Z4e.js')).toBe('/assets/index-*.js');
+    expect(routeTemplate('/assets/index-Bx91aA2f.js')).toBe('/assets/index-*.js');
+    expect(routeTemplate('/assets/index-CdCt3Z4e.css')).toBe('/assets/index-*.css');
+  });
+
+  it('never labels an API path as the static shell', () => {
+    // Regression: the shell rule matched any plain path, so `/api/documents/a/b/c`
+    // answered 401 while reporting itself as `/index.html`. That merges every
+    // unauthenticated API call into the same series as a successful page load.
+    expect(routeTemplate('/api/documents/a/b/c')).toBe('other');
+    expect(routeTemplate('/api/nonsense')).toBe('other');
+    expect(routeTemplate('/api/health/extra')).toBe('other');
+  });
+
+  it('agrees with the static resolver about what counts as an API path', () => {
+    // `/api` without the trailing slash is the exact case that drifted: the resolver
+    // refused it, the template did not, and a 401 for `/api` was reported as a page load.
+    // The two now share one predicate, and this asserts they still behave the same.
+    for (const path of ['/api', '/api/', '/api/health', '/api/documents/x']) {
+      expect(routeTemplate(path), `for ${path}`).not.toBe('/index.html');
+    }
+
+    // The two paths that legitimately ARE the shell, listed separately because putting
+    // them in the loop above is what made this test wrong the first time.
+    expect(routeTemplate('/')).toBe('/index.html');
+    expect(routeTemplate('/documents/abc')).toBe('/index.html');
+
+    expect(isApiPath('/api')).toBe(true);
+    expect(isApiPath('/api/')).toBe(true);
+    expect(isApiPath('/api/health')).toBe(true);
+    expect(isApiPath('/')).toBe(false);
+    expect(isApiPath('/apiary')).toBe(false);
+    expect(isApiPath('/documents/abc')).toBe(false);
+  });
+
+  it('collapses the trailing segment of an unhashed-looking name too', () => {
+    // Not every asset is hashed and there is no way to tell a hash from an ordinary word
+    // by shape. Over-collapsing costs one series; under-collapsing a hashed asset leaves a
+    // dead series per deploy, permanently.
+    expect(routeTemplate('/assets/collab-editor.js')).toBe('/assets/collab-*.js');
+  });
+
+  it('refuses to template an asset name carrying unusual characters', () => {
+    // The bound is what matters. A name outside the safe charset gets `other` rather than
+    // a template that embeds whatever the caller sent.
+    expect(routeTemplate('/assets/a b.js')).toBe('other');
+    expect(routeTemplate('/assets/a"b.js')).toBe('other');
+    expect(routeTemplate('/assets/a}b{js')).toBe('other');
+    expect(routeTemplate('/assets/a,b.js')).toBe('other');
+    expect(routeTemplate('/assets/noextension')).toBe('other');
   });
 
   it('does not let extra path segments impersonate a known route', () => {
-    expect(routeTemplate('/api/documents/a/b/c')).toBe('other');
-    expect(routeTemplate('/api/health/extra')).toBe('other');
     expect(routeTemplate('/api/documents/a/collaborators/b/c')).toBe('other');
   });
 
@@ -70,6 +150,9 @@ describe('routeTemplate', () => {
       '/api/documents/:id/collaborators/:subject',
       '/api/documents/:id/claim',
       '/ws',
+      '/index.html',
+      '/assets/index-*.js',
+      '/assets/index-*.css',
       'other',
     ]);
 
