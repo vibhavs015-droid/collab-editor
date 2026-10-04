@@ -611,10 +611,17 @@ export class RgaDocument {
    * every caller from reimplementing the same encoding, which is how two
    * different encodings end up silently failing to match.
    */
-  inspect(): readonly { key: string; id: ElementId; value: string; deleted: boolean }[] {
+  inspect(): readonly {
+    key: string;
+    id: ElementId;
+    origin: Origin;
+    value: string;
+    deleted: boolean;
+  }[] {
     return this.#elements.map((element) => ({
       key: elementIdKey(element.id),
       id: element.id,
+      origin: element.origin,
       value: element.value,
       deleted: element.deleted,
     }));

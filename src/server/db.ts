@@ -30,6 +30,7 @@ import { PGlite } from '@electric-sql/pglite';
 
 import { initialOperations, seedSiteFor } from '../core/crdt/seed.js';
 import { RgaDocument, type Operation } from '../core/crdt/rga.js';
+import { snapshotToOperations, type SnapshotElement } from '../core/crdt/snapshot.js';
 
 /** One saved document. */
 export interface DocumentRecord {
@@ -89,9 +90,9 @@ const MIGRATIONS: readonly { readonly name: string; readonly sql: string }[] = [
       -- a client that has been offline for a week reconciles by replaying
       -- operations, never by diffing text. See ADR-0009.
       --
-      -- seq is per-document and monotonic. It is the cursor a reconnecting
-      -- client resumes from, which is why it is part of the primary key rather
-      -- than a per-site clock.
+      -- seq is per-document and monotonic. It is the replay cursor a
+      -- reconnecting client resumes from, which is why it is part of the primary
+      -- key rather than a per-site clock.
       CREATE TABLE IF NOT EXISTS document_ops (
         document_id TEXT        NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
         seq         BIGINT      NOT NULL,
@@ -113,6 +114,33 @@ const MIGRATIONS: readonly { readonly name: string; readonly sql: string }[] = [
       -- later resume-from-cursor would skip or repeat an operation.
       CREATE UNIQUE INDEX IF NOT EXISTS document_ops_element_idx
         ON document_ops (document_id, element_key);
+    `,
+  },
+  {
+    name: '0003_document_snapshots',
+    sql: `
+      -- Compaction state. See ADR-0011.
+      --
+      -- A snapshot stores the live ELEMENT SET with its IDs preserved, not the
+      -- text. That distinction is the whole design: RGA anchors an insert to the
+      -- element its origin names, so a text-only snapshot would leave every
+      -- subsequent operation unplaceable and the peer silently behind.
+      --
+      -- Only the newest snapshot per document is kept. An older one can never be
+      -- served to anyone, because a peer at an older cursor is served the newest
+      -- snapshot plus the operations after it.
+      CREATE TABLE IF NOT EXISTS document_snapshots (
+        document_id TEXT        NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+        seq         BIGINT      NOT NULL,
+        elements    JSONB       NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (document_id)
+      );
+
+      -- One row per document, so the primary key already gives an O(1) lookup.
+      -- A secondary index would only cost write time.
+      COMMENT ON TABLE document_snapshots IS
+        'Newest compaction snapshot per document. Replaces document_ops below its seq.';
     `,
   },
 ];
@@ -462,9 +490,10 @@ export class Database {
    * than part of the write path.
    */
   async materializeContent(documentId: string): Promise<string | null> {
+    const snapshot = await this.readSnapshot(documentId);
     const ops = await this.readAllOps(documentId);
 
-    if (ops.length === 0) {
+    if (snapshot === null && ops.length === 0) {
       const existing = await this.getDocument(documentId);
 
       if (existing === null) {
@@ -476,7 +505,22 @@ export class Database {
     }
 
     const doc = new RgaDocument(seedSiteFor(documentId));
-    const unplaced = doc.applyInAnyOrder(ops);
+    let unplaced = 0;
+
+    // Snapshot FIRST, then the log. Since Phase 5 compaction prunes operations
+    // below the newest snapshot, so replaying the log alone reconstructs only the
+    // part that has not been compacted — on a fully compacted document, nothing.
+    //
+    // This failure is silent and destructive in a specific way: the method also
+    // WRITES its result back to `documents.content`. Replaying only the log after
+    // a compaction computed an empty document and overwrote a good cache with it.
+    if (snapshot !== null) {
+      unplaced += doc.applyInAnyOrder(
+        snapshotToOperations({ seq: snapshot.seq, elements: snapshot.elements }),
+      );
+    }
+
+    unplaced += doc.applyInAnyOrder(ops);
 
     if (unplaced > 0) {
       // A log that cannot be replayed is corrupt, and quietly writing a partial
@@ -538,6 +582,94 @@ export class Database {
 
     const row = result.rows[0];
     return row?.seq === null || row?.seq === undefined ? 0 : toClock(row.seq);
+  }
+
+  // ── Compaction ─────────────────────────────────────────────────────────────
+  //
+  // Snapshot-then-prune, gated on causal stability (ADR-0011). The order matters:
+  // the snapshot is written and committed BEFORE any operation is deleted, so a
+  // crash in between leaves both — wasteful, never incorrect.
+
+  /**
+   * Store a snapshot, replacing any older one.
+   *
+   * UPSERT rather than delete-then-insert so there is never a moment with no
+   * snapshot. A window without one would serve a peer below the floor a delta it
+   * cannot use.
+   */
+  async writeSnapshot(
+    documentId: string,
+    snapshot: { readonly seq: number; readonly elements: readonly unknown[] },
+  ): Promise<void> {
+    return this.#serialise(() =>
+      this.#pg
+        .query(
+          `INSERT INTO document_snapshots (document_id, seq, elements)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (document_id)
+         DO UPDATE SET seq = EXCLUDED.seq, elements = EXCLUDED.elements, created_at = now()`,
+          [documentId, snapshot.seq, JSON.stringify(snapshot.elements)],
+        )
+        .then(() => undefined),
+    );
+  }
+
+  /** Newest snapshot for a document, or `null` when it has never compacted. */
+  async readSnapshot(
+    documentId: string,
+  ): Promise<{ readonly seq: number; readonly elements: readonly SnapshotElement[] } | null> {
+    const result = await this.#pg.query<{ seq: string | number; elements: unknown }>(
+      'SELECT seq, elements FROM document_snapshots WHERE document_id = $1',
+      [documentId],
+    );
+
+    const row = result.rows[0];
+    if (!row) {
+      return null;
+    }
+
+    return { seq: toClock(row.seq), elements: row.elements as SnapshotElement[] };
+  }
+
+  /**
+   * Delete operations at or below `seq`.
+   *
+   * @returns how many rows were actually removed. Reported rather than assumed, so
+   *   a caller can tell a working compaction from one that did nothing.
+   */
+  async pruneOpsThrough(documentId: string, seq: number): Promise<number> {
+    return this.#serialise(async () => {
+      const result = await this.#pg.query(
+        'DELETE FROM document_ops WHERE document_id = $1 AND seq <= $2',
+        [documentId, seq],
+      );
+
+      return result.affectedRows ?? 0;
+    });
+  }
+
+  /** Row counts for a document, used by the compaction trigger and diagnostics. */
+  async logStats(
+    documentId: string,
+  ): Promise<{ readonly ops: number; readonly snapshotSeq: number | null }> {
+    const result = await this.#pg.query<{
+      ops: string | number | null;
+      snapshot_seq: string | number | null;
+    }>(
+      `SELECT (SELECT COUNT(*) FROM document_ops WHERE document_id = $1) AS ops,
+              (SELECT seq FROM document_snapshots WHERE document_id = $1) AS snapshot_seq`,
+      [documentId],
+    );
+
+    const row = result.rows[0];
+
+    return {
+      ops: row?.ops === null || row?.ops === undefined ? 0 : toClock(row.ops),
+      snapshotSeq:
+        row?.snapshot_seq === null || row?.snapshot_seq === undefined
+          ? null
+          : toClock(row.snapshot_seq),
+    };
   }
 
   async close(): Promise<void> {

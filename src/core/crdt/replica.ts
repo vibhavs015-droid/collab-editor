@@ -23,6 +23,7 @@
  */
 
 import type { ElementId, SiteId } from '../clock.js';
+import type { Origin } from './rga.js';
 import { RgaDocument, type Operation } from './rga.js';
 
 /** A stored operation with the metadata a log needs to be replayable. */
@@ -352,7 +353,13 @@ export class Replica {
    * of the fields the caller needs rather than the mutable Element objects, so
    * nothing outside this class can corrupt deletion state.
    */
-  #inspect(): readonly { key: string; id: ElementId; value: string; deleted: boolean }[] {
+  #inspect(): readonly {
+    key: string;
+    id: ElementId;
+    origin: Origin | null;
+    value: string;
+    deleted: boolean;
+  }[] {
     return this.#doc.inspect();
   }
 }

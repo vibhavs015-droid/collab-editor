@@ -134,6 +134,87 @@ toolchain underneath it has known holes.
 - [ ] Phase 6: Benchmark suite vs. end-to-end encryption as the differentiator.
       Pick one.
 
+## Phase 5 — Compaction
+
+452 tests, 22 files. ~200s.
+
+ADR-0009 left one limitation standing: `document_ops` is one row per character and
+nothing ever deletes anything. A document edited a thousand times stored a thousand
+times its size. That is not a demo limitation — it also means any load-test number
+would mostly be measuring table growth.
+
+### What was built
+
+| Module                        | Why it exists                                                                                  |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `core/crdt/snapshot.ts`       | Snapshot as a live element set with IDs. Replays through `applyInAnyOrder` like anything else. |
+| `server/compaction.ts`        | The decision: is it safe, and is it worth it? Total, pure, no I/O.                             |
+| `server/compaction.test.ts`   | 15 tests, including a 400-run property test on the safety invariant.                           |
+| `server/compactionDb.test.ts` | 15 tests against real Postgres, proving the reclaim is real.                                   |
+
+### Three bugs the tests caught, one of them serious
+
+- **A live element can anchor to a deleted one.** Delete "quick" from "the quick
+  brown fox" and the space before "brown" is still visible, but it was created as a
+  child of the deleted "k". My first implementation copied each element's original
+  origin, which means carrying every tombstone — so compaction reclaimed nothing
+  on exactly the documents that need it most, the heavily edited ones.
+
+  The fix is to **re-anchor live elements to their nearest live ancestor** and drop
+  tombstones entirely. That is safe because document order is preserved (elements
+  are emitted in order), sibling order is preserved (the integration rule compares
+  only the two IDs being ordered), and a later insert anchoring to X lands
+  identically because X's position has not changed — only its history differs.
+  Tombstones are now carried only when an operation that follows the snapshot names
+  one.
+
+- **`materializeContent` ignored snapshots, and then wrote the wrong answer back.**
+  This is the serious one. The method replays the log and _writes_ the result to
+  `documents.content`. Once compaction had pruned the log, it computed an empty
+  document and overwrote a perfectly good cache with it. Silent, and it destroyed
+  the exact thing the method exists to verify. Now it replays snapshot-then-log,
+  and there are two regression tests on it.
+
+- **Sequences were inferred from array position.** `latestSeq` was `ops.length` and
+  each op's sequence was `index + 1`. Both are correct only while the log is
+  contiguous from 1, and it stops being contiguous the instant a prune happens. So
+  every sequence would have been wrong after the first successful compaction —
+  silently. Sequences now travel with each entry.
+
+Also a smaller one: the `already-compacted` check was masked by `log-too-small`,
+because after a successful compaction the log below the floor is empty and the size
+check fired first. Reordered, so the real reason surfaces.
+
+### The causal-stability floor
+
+Prune only below the minimum acknowledged cursor across connected peers. One
+abandoned tab would otherwise stop compaction forever, which is handled by
+treating a disconnected peer as absent rather than as stalled.
+
+The invariant is asserted directly: over 400 seeded runs, the chosen snapshot
+sequence is never above the lowest peer cursor, and the result always rebuilds the
+document exactly.
+
+A consequence worth recording: **with no peers connected the floor is the tip, so
+after one compaction nothing new can ever be reclaimed until a peer reconnects and
+falls behind.** That is correct — there is nothing to protect — but it means
+compaction only runs meaningfully when clients are actively connected, which is
+also when it costs the least.
+
+### Known limitations
+
+- Compaction runs only when `store.compact()` is called. There is no trigger yet —
+  no timer, no threshold check on the write path. Deliberately left as an explicit
+  call so the policy is testable and so the relay can decide when.
+- Peer cursors are self-reported and unverified. A buggy client claiming to have
+  applied a sequence it has not would let the server prune too far.
+- A peer below the floor must be served a snapshot, which the protocol does not yet
+  do. `readSince` still assumes a contiguous log. Until that lands, compaction
+  would break a peer that had been away long enough — so the feature is not wired
+  into the relay yet, deliberately.
+
+---
+
 ## Phase 4 — Offline-first
 
 397 tests, 19 files. ~155s, still dominated by PGlite boots.

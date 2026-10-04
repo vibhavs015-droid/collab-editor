@@ -25,6 +25,7 @@
 
 import { RgaDocument, type Operation } from '../core/crdt/rga.js';
 import { parseOperations } from '../shared/operation-validation.js';
+import { decideCompaction, type CompactionPolicy } from './compaction.js';
 import type { JsonValue } from '../shared/protocol.js';
 import type { Database } from './db.js';
 import type { RelayLog, RelayPage } from './relay.js';
@@ -48,6 +49,10 @@ export interface DocumentStoreOptions {
   readonly db: Database | OperationSink;
   /** Read-side callback. Defaults to the database. */
   readonly log?: RelayLog;
+  /** Set false to leave the log growing. Used by tests that assert on raw counts. */
+  readonly compaction?: boolean;
+  /** Override the compaction thresholds. Defaults are in compaction.ts. */
+  readonly compactionPolicy?: CompactionPolicy;
 }
 
 /** Outcome of applying one inbound batch. */
@@ -56,6 +61,34 @@ export interface StoreResult {
   readonly rejected: number;
   /** Operations the replica could not place, so they were not persisted. */
   readonly unplaced: readonly Operation[];
+}
+
+/** Write side, extended with compaction. Optional so tests can supply a stub. */
+export interface CompactionSink extends OperationSink {
+  writeSnapshot?(
+    documentId: string,
+    snapshot: { readonly seq: number; readonly elements: readonly unknown[] },
+  ): Promise<void>;
+  pruneOpsThrough?(documentId: string, seq: number): Promise<number>;
+}
+
+/** What a compaction pass did. Returned so tests and diagnostics can assert it. */
+export interface CompactionResult {
+  readonly compacted: boolean;
+  readonly reason?: string;
+  readonly snapshotSeq?: number;
+  readonly pruned?: number;
+}
+
+/**
+ * A peer's acknowledged position in the log.
+ *
+ * The server cannot compact below the lowest of these, because an operation below
+ * it may still be referenced by something that peer has not sent (ADR-0011).
+ */
+export interface PeerCursor {
+  readonly site: string;
+  readonly seq: number;
 }
 
 export class DocumentStore {
@@ -72,9 +105,163 @@ export class DocumentStore {
    */
   readonly #queues = new Map<string, Promise<unknown>>();
 
+  /**
+   * Latest acknowledged sequence per peer, per document.
+   *
+   * Read by compaction to find the causal-stability floor. Held here rather than
+   * in the relay because compaction is a storage concern and has no business
+   * knowing about sockets.
+   */
+  readonly #cursors = new Map<string, Map<string, number>>();
+
   constructor(options: DocumentStoreOptions) {
     this.#db = options.db;
     this.#log = options.log ?? defaultReadSince(options.db);
+
+    if (options.compaction !== false) {
+      this.#compaction =
+        options.compactionPolicy === undefined
+          ? { enabled: true }
+          : { enabled: true, policy: options.compactionPolicy };
+    }
+  }
+
+  // ── Compaction ─────────────────────────────────────────────────────────────
+
+  #compaction: { enabled: boolean; policy?: CompactionPolicy } = { enabled: false };
+
+  /**
+   * Record where each connected peer has got to.
+   *
+   * Called from the relay on every acknowledgement. The store keeps the map
+   * because compaction needs the minimum across all peers and has no business
+   * knowing anything about sockets.
+   */
+  reportPeerCursor(documentId: string, site: string, seq: number): void {
+    let cursors = this.#cursors.get(documentId);
+
+    if (!cursors) {
+      cursors = new Map<string, number>();
+      this.#cursors.set(documentId, cursors);
+    }
+
+    cursors.set(site, seq);
+  }
+
+  /** Forget a departing peer, so it stops holding the compaction floor down. */
+  forgetPeer(documentId: string, site: string): void {
+    this.#cursors.get(documentId)?.delete(site);
+  }
+
+  /** Peers currently counted toward the floor. Used by tests and diagnostics. */
+  peerCursors(documentId: string): PeerCursor[] {
+    const cursors = this.#cursors.get(documentId);
+
+    if (!cursors) {
+      return [];
+    }
+
+    return [...cursors].map(([site, seq]) => ({ site, seq }));
+  }
+
+  /**
+   * Compact a document if it is safe and worthwhile to do so.
+   *
+   * Safe is decided by {@link decideCompaction}; this method performs the two
+   * writes, snapshot first.
+   *
+   * Order matters and is not an implementation detail: the snapshot is committed
+   * before any operation is deleted. A crash between the two leaves both, which
+   * wastes storage. The reverse order would leave a log with a hole in it, which
+   * loses data.
+   *
+   * @returns what happened, including why it declined.
+   */
+  async compact(documentId: string): Promise<CompactionResult> {
+    if (!this.#compaction.enabled) {
+      return { compacted: false, reason: 'compaction-disabled' };
+    }
+
+    const sink = this.#db as CompactionSink;
+
+    if (typeof sink.writeSnapshot !== 'function' || typeof sink.pruneOpsThrough !== 'function') {
+      return { compacted: false, reason: 'compaction-unsupported' };
+    }
+
+    return this.#enqueue(documentId, async () => {
+      const replica = await this.#replicaFor(documentId);
+
+      // readAllOps rather than readOpsSince(0): the decision needs every operation
+      // still retained, and paging it would be the same work with more code.
+      const ops = await this.#readRetained(documentId);
+
+      const snapshotRow = await this.#readSnapshot(documentId);
+
+      // Everything above the snapshot is retained and contiguous, so the newest
+      // sequence is the snapshot's plus however many rows remain. Deriving it any
+      // other way (row count, for instance) is wrong as soon as a prune has
+      // happened, and wrong silently.
+      const snapshotSeq = snapshotRow?.seq ?? null;
+      const latestSeq = (snapshotSeq ?? 0) + ops.length;
+
+      const decision = decideCompaction(
+        {
+          doc: replica,
+          ops,
+          peerCursors: this.peerCursors(documentId).map((peer) => peer.seq),
+          snapshotSeq,
+          latestSeq,
+        },
+        this.#compaction.policy,
+      );
+
+      if (!decision.compact) {
+        return { compacted: false, reason: decision.reason };
+      }
+
+      await sink.writeSnapshot?.(documentId, {
+        seq: decision.snapshotSeq,
+        elements: decision.snapshot.elements,
+      });
+
+      const pruned = (await sink.pruneOpsThrough?.(documentId, decision.pruneThrough)) ?? 0;
+
+      return {
+        compacted: true,
+        snapshotSeq: decision.snapshotSeq,
+        pruned,
+      };
+    });
+  }
+
+  /** Read every retained operation for a document. */
+  async #readAll(documentId: string): Promise<Operation[]> {
+    const withRead = this.#db as Partial<Database>;
+    return withRead.readAllOps?.(documentId) ?? [];
+  }
+
+  /**
+   * Read every retained operation with the sequence it was stored at.
+   *
+   * The sequence is recovered, not assumed. `readAllOps` returns operations in
+   * order without their sequences, and everything above the snapshot is contiguous
+   * from `snapshot + 1`, so it is recoverable. Deriving it from row position alone
+   * would be wrong the moment a prune has happened — and wrong silently.
+   */
+  async #readRetained(
+    documentId: string,
+  ): Promise<{ readonly seq: number; readonly op: Operation }[]> {
+    const ops = await this.#readAll(documentId);
+    const base = (await this.#readSnapshot(documentId))?.seq ?? 0;
+
+    return ops.map((op, index) => ({ seq: base + index + 1, op }));
+  }
+
+  async #readSnapshot(
+    documentId: string,
+  ): Promise<{ seq: number; elements: readonly unknown[] } | null> {
+    const withRead = this.#db as Partial<Database>;
+    return withRead.readSnapshot?.(documentId) ?? Promise.resolve(null);
   }
 
   /** Documents currently held in memory. Used by tests and the health endpoint. */

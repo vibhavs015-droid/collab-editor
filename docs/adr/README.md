@@ -36,6 +36,7 @@ infer from code.
 | [0008](./0008-jittered-backoff-for-reconnection.md)       | Jittered exponential backoff            | Accepted |
 | [0009](./0009-operation-log-is-the-document.md)           | The operation log is the document       | Accepted |
 | [0010](./0010-lamport-clock.md)                           | The local clock absorbs observed clocks | Accepted |
+| [0011](./0011-snapshot-compaction.md)                     | Snapshot compaction on causal stability | Accepted |
 
 ## Planned
 
@@ -44,9 +45,8 @@ decision is actually made.
 
 | Phase | Likely decision                                           |
 | ----- | --------------------------------------------------------- |
-| 4     | Tombstone garbage collection and log compaction           |
-| 5     | Observability stack                                       |
 | 5     | Auth: real tokens vs. the Phase 3 placeholder             |
+| 5     | Observability stack                                       |
 | 6     | Server fanout: single process vs. pub/sub broker          |
 | 6     | Differentiator: benchmark suite vs. end-to-end encryption |
 
