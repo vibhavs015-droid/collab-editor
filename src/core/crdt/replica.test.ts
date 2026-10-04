@@ -298,6 +298,111 @@ describe('Replica - undo and redo', () => {
   });
 });
 
+describe('Replica - resetTo', () => {
+  async function seeded(site: string, text: string): Promise<Replica> {
+    const log = new MemoryLog();
+    const replica = new Replica({ site, log, onOperations: () => undefined });
+    await replica.init();
+    replica.applyRemote(new RgaDocument(`${site}-seed`).insertAt(0, text));
+    return replica;
+  }
+
+  it('replaces the document rather than adding to it', async () => {
+    const replica = await seeded('alice', 'stale text that should vanish');
+    expect(replica.text).toContain('stale');
+
+    await replica.resetTo(new RgaDocument('server').insertAt(0, 'server baseline'));
+
+    // The whole point. Merging instead would leave the old document plus the
+    // baseline, which is visibly wrong.
+    expect(replica.text).toBe('server baseline');
+  });
+
+  it('clears the local log so a reload replays the baseline', async () => {
+    const log = new MemoryLog();
+    const replica = new Replica({ site: 'alice', log, onOperations: () => undefined });
+    await replica.init();
+    replica.applyRemote(new RgaDocument('a-seed').insertAt(0, 'before'));
+    expect(log.entries.length).toBeGreaterThan(0);
+
+    await replica.resetTo(new RgaDocument('server').insertAt(0, 'after'));
+
+    // The baseline is recorded as the new log, so a reload does not refetch it.
+    const reloaded = new Replica({ site: 'alice', log, onOperations: () => undefined });
+    await reloaded.init();
+
+    expect(reloaded.text).toBe('after');
+  });
+
+  it('keeps the site and the clock across a reset', async () => {
+    const replica = await seeded('alice', 'abc');
+    replica.insertAt(3, 'd');
+    const before = replica.site;
+
+    await replica.resetTo(new RgaDocument('server').insertAt(0, 'xyz'));
+
+    // Same identity, and a clock still ahead of everything in the adopted
+    // document. Clearing either would let this replica reissue an ID that already
+    // exists, which is the one failure the CRDT cannot detect for itself.
+    expect(replica.site).toBe(before);
+
+    const next = replica.insertAt(3, 'Q');
+    const first = next[0];
+
+    if (first === undefined || first.type !== 'insert') {
+      throw new Error('expected an insert');
+    }
+
+    expect(first.id.clock).toBeGreaterThan(3);
+    expect(replica.checkInvariants()).toEqual([]);
+  });
+
+  it('accepts operations recorded after the baseline', async () => {
+    const replica = await seeded('alice', 'old');
+
+    // The baseline and its tail, built by one author so the tail anchors into it.
+    const server = new RgaDocument('server');
+    const baseline = server.insertAt(0, 'new');
+    const tail = server.insertAt(3, '!');
+
+    await replica.resetTo(baseline);
+    expect(replica.applyRemote(tail)).toEqual([]);
+    expect(replica.text).toBe('new!');
+  });
+
+  it('refuses a baseline it cannot replay', async () => {
+    const replica = await seeded('alice', 'abc');
+
+    // Anchored to an element that does not exist. Adopting this would leave a
+    // document missing text, with nothing to report it.
+    await expect(
+      replica.resetTo([
+        {
+          type: 'insert',
+          id: { site: 'server', clock: 1 },
+          origin: { site: 'ghost', clock: 7 },
+          value: '?',
+        },
+      ]),
+    ).rejects.toThrow(/could not be placed/i);
+
+    // And the original document is untouched, because the reset is all-or-nothing.
+    expect(replica.text).toBe('abc');
+  });
+
+  it('leaves undo history empty, because the baseline is not an edit', async () => {
+    const replica = await seeded('alice', 'abc');
+    replica.insertAt(3, 'd');
+    expect(replica.canUndo).toBe(true);
+
+    await replica.resetTo(new RgaDocument('server').insertAt(0, 'fresh'));
+
+    // Undoing a server baseline would be meaningless, and pretending otherwise
+    // would let one user's undo reverse another user's whole document.
+    expect(replica.canUndo).toBe(false);
+  });
+});
+
 describe('Replica - cursor mapping', () => {
   let h: Harness;
 

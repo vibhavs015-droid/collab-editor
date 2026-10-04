@@ -62,7 +62,7 @@ export interface ReplicaOptions {
 }
 
 export class Replica {
-  readonly #doc: RgaDocument;
+  #doc: RgaDocument;
   readonly #log: OperationLog;
   readonly #onOperations: ReplicaOptions['onOperations'];
 
@@ -128,6 +128,51 @@ export class Replica {
     this.#appliedSeq = last?.seq ?? -1;
     this.#nextSeq = this.#appliedSeq + 1;
     this.#initialised = true;
+  }
+
+  /**
+   * Discard everything and rebuild from a baseline.
+   *
+   * The operation a client performs when the server tells it it is too far behind
+   * for a delta (ADR-0011). Applying a snapshot incrementally instead would leave
+   * the client with its old document PLUS the whole compacted history, which is
+   * visibly wrong.
+   *
+   * Two things are deliberately NOT cleared:
+   *
+   *   - **The site id.** This replica keeps its identity, so clocks stay
+   *     monotonic and its next local edit cannot collide with an id it issued
+   *     before the reset.
+   *   - **The local clock's high-water mark.** Clearing it would let the replica
+   *     reissue ids that already exist in the document it just adopted.
+   *
+   * The log IS cleared, because it is the thing being replaced.
+   *
+   * @param baseline operations that reconstruct the document from nothing. They are
+   *   recorded as the new log, so a reload replays them rather than refetching.
+   */
+  async resetTo(baseline: readonly Operation[]): Promise<void> {
+    this.#assertReady();
+
+    // New document, same site. See the note above on why the clock is not reset.
+    const replacement = new RgaDocument(this.#doc.site);
+    const unplaced = replacement.applyInAnyOrder(baseline);
+
+    if (unplaced > 0) {
+      // Adopting a baseline that cannot be replayed would leave a document
+      // missing text, with no way for the caller to tell. Refuse instead.
+      throw new Error(
+        `Replica reset failed: ${unplaced} baseline operation(s) could not be placed.`,
+      );
+    }
+
+    this.#doc = replacement;
+    await this.#log.clear();
+
+    this.#nextSeq = 0;
+    this.#appliedSeq = -1;
+
+    this.#record([...baseline], 'remote');
   }
 
   #assertReady(): void {

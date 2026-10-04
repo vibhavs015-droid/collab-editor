@@ -48,7 +48,7 @@ function memoryLog(seed: readonly JsonValue[] = []): RelayLog & { readonly entri
       const page = entries.slice(sinceSeq, sinceSeq + limit);
       const seq = sinceSeq + page.length;
 
-      return Promise.resolve({ ops: page, seq });
+      return Promise.resolve({ snapshot: null, ops: page, seq });
     },
   };
 }
@@ -544,7 +544,11 @@ describe('Relay', () => {
         log: {
           readSince: (_documentId, sinceSeq, limit = 10) => {
             const page = many.slice(sinceSeq, sinceSeq + limit);
-            return Promise.resolve({ ops: page, seq: sinceSeq + page.length });
+            return Promise.resolve({
+              snapshot: null,
+              ops: page,
+              seq: sinceSeq + page.length,
+            });
           },
         },
       });

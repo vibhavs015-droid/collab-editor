@@ -106,24 +106,33 @@ prune ops with seq <= floor
 A peer offline for a week is not connected, so it does not hold the floor up. It
 is protected by a different mechanism — see (3).
 
-### 3. A peer below the floor gets the snapshot, and only when it is safe
+### 3. A peer below the floor gets the baseline, and only when it is safe
 
 If a client's cursor is below the oldest retained sequence, the server cannot
-serve it a delta. It serves a snapshot instead, and the protocol makes the
-client's obligation explicit:
+serve it a delta. It serves a **baseline** instead:
 
 ```
-client → server   resync(sinceSeq = C)
-server → client   snapshot(seq = S, elements)     when C < oldest retained
-server → client   ops(seq = S+1 …)                then the delta
+client → server   hello { lastAppliedSeq: C }
+server → client   snapshot { elements, ops, seq: S }     when C < oldest retained
+server → client   ops { … }                              then the delta
+server → client   syncState { seq }
 ```
 
-The client applies the snapshot **only if its outbox is empty**. If it has
-unsent operations, it flushes first and re-requests. A client that has unsent
-work is never handed a snapshot, because a snapshot would discard that work.
+The client's obligation, and it is not optional:
 
-This is the whole reason the outbox is exposed as a count rather than being an
-internal detail.
+1. **Flush any unsent operations first.** A baseline replaces the document, so
+   anything the server has not seen yet would be discarded. That is data loss the
+   user believes did not happen.
+2. **Replace its replica** rather than adding to it.
+3. **Apply the tail** — operations recorded after the snapshot was taken.
+
+The transport enforces (1) rather than trusting callers to check, because the
+failure would be silent: a client that adopts a baseline over unsent work looks
+perfectly consistent right up until the next reload.
+
+This is the whole reason offline-first makes compaction hard. The floor protects
+peers who are _connected_; the baseline protects peers who are _not_, and the
+"flush first" rule is what keeps the two from contradicting each other.
 
 ## Rationale
 
@@ -146,10 +155,9 @@ No second code path, no "snapshot mode", nothing extra to test.
 the protocol rather than assumed, so a client bug that sends a resync while holding
 unsent work fails a test instead of losing a user's document.
 
-**Compaction is triggered by shape, not by size.** The trigger is "tombstones
-exceed a fraction of the log", because that is the condition where compaction
-actually buys something. Triggering on raw size would compact a document that is
-mostly live text and has nothing to reclaim.
+**Compaction is triggered by shape, not by size.** The trigger is "enough writes
+have accumulated", plus "tombstones exceed a fraction of the log", because that is
+the condition where compaction actually buys something.
 
 ## Consequences
 

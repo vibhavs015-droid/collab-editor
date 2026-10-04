@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Operation } from '../../core/crdt/rga.js';
-import { SyncTransport, type ConnectionState, type TransportHandlers } from './transport.js';
+import {
+  SyncTransport,
+  type Baseline,
+  type ConnectionState,
+  type TransportHandlers,
+} from './transport.js';
 
 /**
  * A scriptable WebSocket double.
@@ -86,6 +91,7 @@ interface Harness {
   readonly errors: { code: string; message: string }[];
   readonly sites: string[];
   readonly pending: { state: string; count: number }[];
+  readonly baselines: Baseline[];
 }
 
 function harness(options: { baseRetryMs?: number; maxRetryMs?: number } = {}): Harness {
@@ -95,10 +101,14 @@ function harness(options: { baseRetryMs?: number; maxRetryMs?: number } = {}): H
   const errors: { code: string; message: string }[] = [];
   const sites: string[] = [];
   const pending: { state: string; count: number }[] = [];
+  const baselines: Baseline[] = [];
 
   const handlers: TransportHandlers = {
     onOps: (received) => {
       ops.push(...received);
+    },
+    onBaseline: (baseline) => {
+      baselines.push(baseline);
     },
     onPresence: (received) => {
       cursors.push({ ...received });
@@ -126,8 +136,141 @@ function harness(options: { baseRetryMs?: number; maxRetryMs?: number } = {}): H
     maxRetryMs: options.maxRetryMs ?? 5000,
   });
 
-  return { transport, states, ops, cursors, errors, sites, pending };
+  return { transport, states, ops, cursors, errors, sites, pending, baselines };
 }
+
+describe('SyncTransport - snapshot baseline', () => {
+  /**
+   * Open the connection and return the live harness.
+   *
+   * Self-contained because this block sits outside the main `describe`, so it does
+   * not inherit that one's `beforeEach` reset. `FakeSocket.last()` is the socket
+   * the transport was handed, so `deliver` goes through exactly the same parse and
+   * validate path as a real frame. Driving `#receive` directly would skip the
+   * envelope handling that could itself be the bug.
+   */
+  function opened(): Harness {
+    FakeSocket.reset();
+    const h = harness();
+    h.transport.connect();
+    FakeSocket.last().triggerOpen();
+    return h;
+  }
+
+  const baselineFrame = {
+    type: 'snapshot',
+    documentId: 'doc-1',
+    elements: [{ id: { site: 's', clock: 1 }, value: 'h', origin: null }],
+    ops: [],
+    seq: 42,
+  };
+
+  it('adopts a baseline when the outbox is empty', () => {
+    const h = opened();
+
+    FakeSocket.last().deliver(baselineFrame);
+
+    expect(h.baselines).toHaveLength(1);
+    expect(h.baselines[0]?.seq).toBe(42);
+    expect(h.baselines[0]?.elements).toHaveLength(1);
+
+    // The cursor advances, so the client does not ask for the same baseline twice.
+    expect(h.transport.serverSeq).toBe(42);
+  });
+
+  it('refuses a baseline while unsent operations are queued', () => {
+    const h = opened();
+
+    // The socket dies without the transport noticing: the browser has not fired
+    // `close` yet, so the transport still believes it is open. This is the
+    // realistic case, and it is the window where a baseline would destroy work.
+    const socket = FakeSocket.last();
+    socket.readyState = 3;
+
+    h.transport.send(sampleOps);
+
+    // Still queued, because the frame could not actually be written.
+    expect(h.transport.queuedOperationCount).toBe(1);
+
+    // A frame that still arrives over the dead connection.
+    socket.deliver(baselineFrame);
+
+    // The whole safety property. Adopting here would discard the user's work with
+    // no error reported anywhere.
+    expect(h.baselines).toHaveLength(0);
+
+    // And it asks again rather than silently proceeding.
+    socket.readyState = 1;
+    h.transport.requestResync();
+    expect(socket.parsedSent().filter((m) => m['type'] === 'resync')).toHaveLength(1);
+  });
+
+  it('gives up rather than resyncing forever', () => {
+    const h = opened();
+    const socket = FakeSocket.last();
+
+    // A dead socket the transport has not detected, so it cannot flush and cannot
+    // clear the queue. Exactly the situation where a naive implementation would
+    // retry indefinitely.
+    socket.readyState = 3;
+    h.transport.send(sampleOps);
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      socket.deliver(baselineFrame);
+    }
+
+    // Bounded, and it says so. A client spinning here forever would be harder to
+    // diagnose than one that reports the disagreement.
+    expect(h.baselines).toHaveLength(0);
+    expect(h.errors.map((e) => e.code)).toContain('BASELINE_REFUSED');
+
+    // The operations are still queued. Giving up on the baseline must never mean
+    // giving up on the user's work.
+    expect(h.transport.queuedOperationCount).toBe(1);
+  });
+
+  it('ignores a baseline while disconnected', () => {
+    const h = opened();
+    FakeSocket.last().triggerClose();
+
+    h.transport.send(sampleOps);
+
+    const socket = FakeSocket.last();
+    const before = socket.sent.length;
+    socket.deliver(baselineFrame);
+
+    // Nothing was sent, because there is no socket. The reconnect re-sends `hello`,
+    // which triggers a fresh catch-up.
+    expect(h.baselines).toHaveLength(0);
+    expect(socket.sent).toHaveLength(before);
+  });
+
+  it('keeps operations queued when the socket cannot take them', () => {
+    const h = opened();
+
+    // A dead socket the transport has not detected yet.
+    FakeSocket.last().readyState = 3;
+    h.transport.send(sampleOps);
+
+    // Previously this cleared the queue and dropped the work on the floor. The
+    // outbox is only cleared once a frame is actually accepted.
+    expect(h.transport.queuedOperationCount).toBe(1);
+  });
+
+  it('drops malformed operations inside a baseline but keeps the elements', () => {
+    const h = opened();
+
+    FakeSocket.last().deliver({
+      ...baselineFrame,
+      // Not an operation. parseOperations drops it rather than the whole baseline,
+      // because a client cannot reject a batch it never receives.
+      ops: [{ nonsense: true }, sampleOps[0]],
+    });
+
+    expect(h.baselines).toHaveLength(1);
+    expect(h.baselines[0]?.ops).toEqual(sampleOps);
+  });
+});
 
 const sampleOps: Operation[] = [
   { type: 'insert', id: { site: 'a', clock: 1 }, origin: null, value: 'x' },
@@ -272,6 +415,7 @@ describe('SyncTransport', () => {
         url: 'ws://x',
         handlers: {
           onOps: () => undefined,
+          onBaseline: () => undefined,
           onPresence: () => undefined,
           onSyncState: () => undefined,
           onWelcome: () => undefined,
@@ -486,6 +630,7 @@ describe('SyncTransport', () => {
         url: 'ws://x',
         handlers: {
           onOps: () => undefined,
+          onBaseline: () => undefined,
           onPresence: () => undefined,
           onSyncState: () => undefined,
           onWelcome: () => undefined,

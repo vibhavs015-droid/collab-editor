@@ -27,10 +27,17 @@ import { createEditor, type EditorHandle } from './editor.js';
 import { IndexedDbOperationLog } from './storage/indexedDbLog.js';
 import { EditorBinding, type BindingAnomaly } from './sync/binding.js';
 import { describePeers, resolveSync, type SyncState } from './sync/status.js';
-import { SyncTransport, type ConnectionState } from './sync/transport.js';
+import { SyncTransport, type Baseline, type ConnectionState } from './sync/transport.js';
 import type { SiteId } from '../core/clock.js';
+import { parseElementId } from '../shared/operation-validation.js';
+import type { JsonValue } from '../shared/protocol.js';
 import { Replica } from '../core/crdt/replica.js';
 import { initialOperations } from '../core/crdt/seed.js';
+import {
+  snapshotToOperations,
+  type DocumentSnapshot,
+  type SnapshotElement,
+} from '../core/crdt/snapshot.js';
 
 /** Every DOM id the app touches, resolved once so a typo fails loudly. */
 function requireElement<T extends HTMLElement>(id: string): T {
@@ -238,6 +245,102 @@ function socketUrlFor(documentId: string): string {
 }
 
 /**
+ * Replace this device's document with a server baseline.
+ *
+ * ── Why this replaces rather than merges ────────────────────────────────────
+ * The transport only calls this once the outbox is empty, so everything the user
+ * typed is already on the server and present in the baseline. Applying the baseline
+ * on top of the existing document would double it.
+ *
+ * ── Why the editor is rebuilt rather than patched ───────────────────────────
+ * The whole document changes. CodeMirror's change set is built by diffing the old
+ * and new element snapshots, which is exactly the machinery in `binding.ts`, so the
+ * reset goes through the same path as any other remote change rather than growing
+ * a second one.
+ */
+async function adoptBaseline(replica: Replica, baseline: Baseline): Promise<void> {
+  try {
+    // The elements arrived as untrusted JSON. Validating them here is what lets a
+    // malformed baseline be refused rather than producing a corrupt document.
+    const snapshot = parseSnapshotElements(baseline.elements);
+
+    if (snapshot === null) {
+      reportAnomaly({
+        kind: 'unplaced-operations',
+        detail: 'server baseline was malformed; keeping the local document',
+      });
+      return;
+    }
+
+    await replica.resetTo(snapshotToOperations(snapshot));
+
+    // Anything recorded after the snapshot was taken.
+    const tail = replica.applyRemote(baseline.ops);
+
+    if (tail.length > 0) {
+      reportAnomaly({
+        kind: 'unplaced-operations',
+        detail: `${tail.length} post-baseline operation(s) could not be placed`,
+      });
+    }
+
+    syncInputs.unplacedOps = 0;
+    renderSync();
+  } catch (error) {
+    // A failed baseline must not leave the editor and the CRDT disagreeing. The
+    // binding repairs the editor from the CRDT on the next change, and the CRDT is
+    // authoritative because its operation log is durable.
+    reportAnomaly({
+      kind: 'unplaced-operations',
+      detail: `could not adopt the server baseline: ${String(error)}`,
+    });
+  }
+}
+
+/**
+ * Validate inbound snapshot elements.
+ *
+ * @returns the elements as a snapshot, or `null` if any one of them is malformed.
+ *   All-or-nothing on purpose: a partially-applied baseline is a corrupt document.
+ */
+function parseSnapshotElements(raw: readonly JsonValue[]): DocumentSnapshot | null {
+  const elements: SnapshotElement[] = [];
+
+  for (const value of raw) {
+    if (!isRecord(value)) {
+      return null;
+    }
+
+    const id = parseElementId(value['id']);
+    const text = value['value'];
+
+    if (id === null || typeof text !== 'string' || [...text].length !== 1) {
+      return null;
+    }
+
+    const origin = value['origin'];
+
+    if (origin !== null && origin !== undefined) {
+      const parsedOrigin = parseElementId(origin);
+      if (parsedOrigin === null) {
+        return null;
+      }
+
+      elements.push({ id, value: text, origin: parsedOrigin });
+      continue;
+    }
+
+    elements.push({ id, value: text, origin: null });
+  }
+
+  return { seq: 0, elements };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
  * Seed a replica from the server's text cache.
  *
  * Applied as operations under a site derived from the document id, so two clients
@@ -354,6 +457,12 @@ async function openDocument(documentId: string): Promise<void> {
           syncInputs.serverState = state;
           syncInputs.pendingOps = pendingOps;
           renderSync();
+        },
+        onBaseline: (baseline) => {
+          // The server says this device is below the compaction floor, so the
+          // operations it is missing no longer exist. Adopt the baseline and then
+          // apply whatever was recorded after it.
+          void adoptBaseline(replica, baseline);
         },
         // The site id is informational. The local site drives element IDs, because a
         // server-assigned id would change on every reconnect and break this client's

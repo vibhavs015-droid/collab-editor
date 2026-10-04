@@ -91,6 +91,14 @@ export interface PeerCursor {
   readonly seq: number;
 }
 
+/**
+ * Writes to accumulate before attempting a compaction pass.
+ *
+ * Not a round number on purpose: it should land between ordinary typing bursts
+ * rather than on a cadence a user could feel.
+ */
+const DEFAULT_WRITES_PER_COMPACTION = 40;
+
 export class DocumentStore {
   readonly #db: OperationSink;
   readonly #log: RelayLog;
@@ -114,6 +122,18 @@ export class DocumentStore {
    */
   readonly #cursors = new Map<string, Map<string, number>>();
 
+  /** Writes seen per document since the last compaction attempt. */
+  readonly #pendingWrites = new Map<string, number>();
+
+  /**
+   * One compaction pass in flight, process-wide.
+   *
+   * Serialising matters more than it looks: two concurrent passes would both
+   * snapshot the same state and the second would prune against a floor the first
+   * has already moved.
+   */
+  #compactionTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(options: DocumentStoreOptions) {
     this.#db = options.db;
     this.#log = options.log ?? defaultReadSince(options.db);
@@ -121,14 +141,23 @@ export class DocumentStore {
     if (options.compaction !== false) {
       this.#compaction =
         options.compactionPolicy === undefined
-          ? { enabled: true }
-          : { enabled: true, policy: options.compactionPolicy };
+          ? { enabled: true, writesPerRun: DEFAULT_WRITES_PER_COMPACTION }
+          : {
+              enabled: true,
+              policy: options.compactionPolicy,
+              writesPerRun: DEFAULT_WRITES_PER_COMPACTION,
+            };
     }
   }
 
   // ── Compaction ─────────────────────────────────────────────────────────────
 
-  #compaction: { enabled: boolean; policy?: CompactionPolicy } = { enabled: false };
+  #compaction: {
+    enabled: boolean;
+    policy?: CompactionPolicy;
+    /** Writes to accumulate before attempting a compaction pass. */
+    writesPerRun: number;
+  } = { enabled: false, writesPerRun: DEFAULT_WRITES_PER_COMPACTION };
 
   /**
    * Record where each connected peer has got to.
@@ -234,12 +263,6 @@ export class DocumentStore {
     });
   }
 
-  /** Read every retained operation for a document. */
-  async #readAll(documentId: string): Promise<Operation[]> {
-    const withRead = this.#db as Partial<Database>;
-    return withRead.readAllOps?.(documentId) ?? [];
-  }
-
   /**
    * Read every retained operation with the sequence it was stored at.
    *
@@ -303,7 +326,63 @@ export class DocumentStore {
     });
   }
 
-  /** Read side of the log, handed straight to the relay. */
+  /**
+   * Compact if enough has accumulated since the last time.
+   *
+   * Called after a write, off the critical path: the result of the write is
+   * returned without waiting for compaction, so a slow snapshot cannot delay a
+   * user's keystroke reaching a collaborator.
+   *
+   * The counter is per process and resets on restart, so a freshly started server
+   * compacts a little later than a warm one. That is acceptable — compaction is
+   * opportunistic, and skipping a pass costs storage for a while, never
+   * correctness.
+   */
+  maybeCompact(documentId: string): void {
+    if (!this.#compaction.enabled || this.#compactionTimer !== null) {
+      return;
+    }
+
+    const counter = this.#pendingWrites.get(documentId) ?? 0;
+    this.#pendingWrites.set(documentId, counter + 1);
+
+    if (counter + 1 < this.#compaction.writesPerRun) {
+      return;
+    }
+
+    this.#pendingWrites.set(documentId, 0);
+    this.#compactionTimer = setTimeout(() => {
+      this.#compactionTimer = null;
+
+      void this.compact(documentId).catch(() => {
+        // Compaction is best effort. Its own failure must never surface as a write
+        // failure, and the next trigger will try again.
+      });
+    }, 0);
+
+    // Do not hold the process open for a maintenance task.
+    this.#compactionTimer.unref?.();
+  }
+
+  /** Writes accumulated per document since the last compaction attempt. */
+  pendingCompactionWrites(documentId: string): number {
+    return this.#pendingWrites.get(documentId) ?? 0;
+  }
+
+  /** Read every retained operation for a document. */
+  async #readAll(documentId: string): Promise<Operation[]> {
+    const withRead = this.#db as Partial<Database>;
+    return withRead.readAllOps?.(documentId) ?? [];
+  }
+
+  /**
+   * Read side of the log, handed straight to the relay.
+   *
+   * Returns a snapshot baseline when the caller's cursor is below the compaction
+   * floor, and an ordinary delta otherwise. Choosing wrongly is not cosmetic: a
+   * delta to a client below the floor produces a document missing everything that
+   * was compacted away, and nothing reports it.
+   */
   async readSince(documentId: string, sinceSeq: number, limit?: number): Promise<RelayPage> {
     return this.#log.readSince(documentId, sinceSeq, limit);
   }
@@ -401,15 +480,36 @@ const LOAD_BATCH = 2_000;
 function defaultReadSince(db: OperationSink): RelayLog {
   const withRead = db as Partial<Database>;
 
-  if (typeof withRead.readOpsSince !== 'function') {
+  // `readForClient` is what decides between a delta and a snapshot baseline. A
+  // sink without it can only ever serve deltas, which is correct as long as
+  // nothing compacts. Once it does, this must be replaced rather than silently
+  // returning partial documents.
+  if (typeof withRead.readForClient !== 'function') {
     return {
-      readSince: () => Promise.resolve({ ops: [], seq: 0 }),
+      readSince: () => Promise.resolve({ snapshot: null, ops: [], seq: 0 }),
     };
   }
 
   return {
-    readSince: (documentId, sinceSeq, limit) =>
-      withRead.readOpsSince?.(documentId, sinceSeq, limit) ??
-      Promise.resolve({ ops: [], seq: sinceSeq }),
+    readSince: (documentId, sinceSeq, limit) => {
+      const caught = withRead.readForClient?.(documentId, sinceSeq, limit);
+
+      if (!caught) {
+        return Promise.resolve({ snapshot: null, ops: [], seq: sinceSeq });
+      }
+
+      return caught.then((page) =>
+        page.kind === 'ops'
+          ? { snapshot: null, ops: page.ops, seq: page.seq }
+          : {
+              // The elements go out as JSON, not as a string. RGA anchors an
+              // insert to the element its origin names, so a text-only baseline
+              // would leave every subsequent operation unplaceable.
+              snapshot: page.snapshot.elements as unknown as readonly JsonValue[],
+              ops: page.ops,
+              seq: page.seq,
+            },
+      );
+    },
   };
 }

@@ -30,7 +30,11 @@ import { PGlite } from '@electric-sql/pglite';
 
 import { initialOperations, seedSiteFor } from '../core/crdt/seed.js';
 import { RgaDocument, type Operation } from '../core/crdt/rga.js';
-import { snapshotToOperations, type SnapshotElement } from '../core/crdt/snapshot.js';
+import {
+  snapshotToOperations,
+  type DocumentSnapshot,
+  type SnapshotElement,
+} from '../core/crdt/snapshot.js';
 
 /** One saved document. */
 export interface DocumentRecord {
@@ -54,6 +58,29 @@ export interface SaveResult {
   /** False when the stored content already matched — saves a needless write. */
   readonly changed: boolean;
 }
+
+/**
+ * Everything a reconnecting client needs to become current.
+ *
+ * See {@link Database.readForClient} for why the two shapes exist and what goes
+ * wrong if the wrong one is chosen.
+ */
+export type ClientCatchUp =
+  | {
+      readonly kind: 'ops';
+      /** Operations strictly after the client's cursor. */
+      readonly ops: Operation[];
+      /** Cursor the client should resume from. */
+      readonly seq: number;
+    }
+  | {
+      readonly kind: 'snapshot';
+      /** State at `seq`. The client must REPLACE its document with this. */
+      readonly snapshot: DocumentSnapshot;
+      /** Operations recorded after the snapshot. */
+      readonly ops: Operation[];
+      readonly seq: number;
+    };
 
 /**
  * Schema migrations.
@@ -554,6 +581,45 @@ export class Database {
     await this.saveDocument(documentId, text);
 
     return text;
+  }
+
+  /**
+   * What a reconnecting client needs to become current.
+   *
+   * Two shapes, and choosing between them is the whole point of compaction
+   * existing:
+   *
+   *   - `ops` — a delta from the client's cursor. The ordinary case.
+   *   - `snapshot` — the client's cursor is below the newest snapshot, so the
+   *     operations it is missing have been pruned and no delta can be produced.
+   *     It is given the snapshot plus whatever came after, and must REPLACE its
+   *     document rather than add to it.
+   *
+   * The failure this avoids is subtle and silent: serving a delta to a client
+   * below the floor produces a document that is missing everything compacted
+   * away, and nothing reports an error. The client's own operations still apply,
+   * so it looks alive — it is just quietly wrong.
+   */
+  async readForClient(documentId: string, sinceSeq: number, limit = 1_000): Promise<ClientCatchUp> {
+    const snapshot = await this.readSnapshot(documentId);
+    const base = snapshot?.seq ?? 0;
+
+    // Strictly below: a client sitting exactly on the snapshot boundary has
+    // everything the snapshot holds and wants only what came after.
+    if (snapshot !== null && sinceSeq < base) {
+      const delta = await this.readOpsSince(documentId, base, limit);
+
+      return {
+        kind: 'snapshot',
+        snapshot: { seq: base, elements: snapshot.elements },
+        ops: delta.ops,
+        seq: delta.seq,
+      };
+    }
+
+    const delta = await this.readOpsSince(documentId, sinceSeq, limit);
+
+    return { kind: 'ops', ops: delta.ops, seq: delta.seq };
   }
 
   /**

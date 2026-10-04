@@ -16,20 +16,53 @@
  */
 
 import { parseOperations } from '../../shared/operation-validation.js';
-import { PROTOCOL_VERSION, type ClientMessage, type ServerMessage } from '../../shared/protocol.js';
+import {
+  PROTOCOL_VERSION,
+  type ClientMessage,
+  type ServerMessage,
+  type SnapshotMessage,
+} from '../../shared/protocol.js';
+import type { JsonValue } from '../../shared/protocol.js';
 import type { Operation } from '../../core/crdt/rga.js';
 
 export type ConnectionState = 'connecting' | 'open' | 'closed';
 
+/** A baseline the client must adopt, because it is too far behind for a delta. */
+export interface Baseline {
+  /** Live elements at the snapshot's sequence. */
+  readonly elements: readonly JsonValue[];
+  /** Operations recorded after the snapshot. */
+  readonly ops: readonly Operation[];
+  readonly seq: number;
+}
+
 export interface TransportHandlers {
   /** Inbound operations, already decoded by the server envelope. */
   onOps: (ops: readonly Operation[]) => void;
+  /**
+   * A baseline to adopt, because this client is below the compaction floor.
+   *
+   * Called only when the outbox is EMPTY. A client holding unsent operations must
+   * never be handed one: a baseline replaces the document, so applying it would
+   * discard work the user believes is saved. The transport refuses rather than
+   * relying on every caller to check, because the failure would be silent.
+   */
+  onBaseline: (baseline: Baseline) => void;
   onPresence: (cursors: Readonly<Record<string, number>>) => void;
   onSyncState: (state: 'synced' | 'pending' | 'offline' | 'error', pendingOps: number) => void;
   onWelcome: (site: string) => void;
   onError: (code: string, message: string) => void;
   onStateChange: (state: ConnectionState, attempt: number) => void;
 }
+
+/**
+ * How many times a baseline may be refused before the client gives up.
+ *
+ * A client whose operations the server keeps rejecting would otherwise resync
+ * forever. Three is enough for a transient flush failure and not enough to hide a
+ * genuine disagreement.
+ */
+const MAX_BASELINE_RETRIES = 3;
 
 export interface TransportOptions {
   readonly documentId: string;
@@ -77,6 +110,14 @@ export class SyncTransport {
   /** Set while disconnect is intentional, so no reconnect is scheduled. */
   #closedByUser = false;
   #disposed = false;
+  /**
+   * How many times a baseline has been refused because the outbox is not empty.
+   *
+   * Bounded so a client whose operations the server keeps rejecting cannot
+   * resync forever. Three is enough for a transient flush failure and not enough to
+   * hide a genuine disagreement.
+   */
+  #baselineRetries = 0;
 
   constructor(options: TransportOptions) {
     this.#url = options.url;
@@ -226,7 +267,7 @@ export class SyncTransport {
     });
   }
 
-  /** Ask the server to replay what this client is missing. */
+  /** A baseline the client must adopt, because it is too far behind for a delta. */
   requestResync(): void {
     if (this.#state !== 'open') {
       return;
@@ -260,15 +301,30 @@ export class SyncTransport {
     return this.#outbox.length === 0;
   }
 
+  /**
+   * Hand everything queued to the socket.
+   *
+   * The outbox is cleared only after the frame is actually accepted. That ordering
+   * matters: the transport's own state can say `open` while the socket underneath
+   * is already gone — a browser has not yet fired `close` on a connection the
+   * network has dropped. Clearing first would drop the user's keystrokes on the
+   * floor, silently, in exactly the window where the server is unreachable and
+   * they are most needed.
+   */
   #flushOutbox(): void {
     if (this.#outbox.length === 0 || this.#state !== 'open') {
       return;
     }
 
     const batch = this.#outbox;
-    this.#outbox = [];
 
-    this.#send({ type: 'ops', documentId: this.#documentId, ops: batch });
+    if (!this.#send({ type: 'ops', documentId: this.#documentId, ops: batch })) {
+      // Kept queued. The reconnect path flushes it, and the indicator keeps
+      // reporting them as pending.
+      return;
+    }
+
+    this.#outbox = [];
     this.#handlers.onSyncState('synced', 0);
   }
 
@@ -296,6 +352,9 @@ export class SyncTransport {
         // step; a cast here would be a lie the compiler is right to reject.
         this.#handlers.onOps(parseOperations(parsed.ops));
         return;
+      case 'snapshot':
+        this.#receiveBaseline(parsed);
+        return;
       case 'presence':
         this.#handlers.onPresence(parsed.cursors);
         return;
@@ -316,12 +375,72 @@ export class SyncTransport {
     }
   }
 
-  #send(message: ClientMessage): void {
-    if (this.#state !== 'open' || !this.#socket) {
+  /**
+   * Handle a baseline the server sent because this client is below the floor.
+   *
+   * The refusal is the important part. A baseline REPLACES the document, so
+   * applying one while holding unsent operations would discard work the user
+   * believes is saved — and nothing would report it, because the client's own log
+   * would look consistent right up until the next reload.
+   *
+   * So: flush first, then ask again. The retry is bounded, and a client that
+   * genuinely cannot empty its outbox reports an error rather than discarding
+   * anything.
+   */
+  #receiveBaseline(message: SnapshotMessage): void {
+    if (this.#outbox.length > 0) {
+      if (!this.#stateIsOpen()) {
+        // Cannot flush while disconnected. Retry once the socket is back; the
+        // reconnect path re-sends `hello`, which triggers a fresh catch-up.
+        return;
+      }
+
+      if (this.#baselineRetries >= MAX_BASELINE_RETRIES) {
+        this.#handlers.onError(
+          'BASELINE_REFUSED',
+          'Cannot adopt the server baseline while unsent operations are queued.',
+        );
+        return;
+      }
+
+      this.#baselineRetries += 1;
+      this.#flushOutbox();
+      // Deliberate: the outbox is only marked empty optimistically, so this is a
+      // second request rather than an assumption that the flush landed.
+      this.#send({ type: 'resync', documentId: this.#documentId, sinceSeq: this.#seq });
       return;
     }
 
+    this.#baselineRetries = 0;
+
+    if (typeof message.seq === 'number' && message.seq > this.#seq) {
+      this.#seq = message.seq;
+    }
+
+    this.#handlers.onBaseline({
+      elements: message.elements,
+      ops: parseOperations(message.ops),
+      seq: message.seq,
+    });
+  }
+
+  #stateIsOpen(): boolean {
+    return this.#state === 'open';
+  }
+
+  /**
+   * Write one frame.
+   *
+   * @returns false when there was no usable socket, so the caller can keep its
+   *   work queued rather than assume it was delivered.
+   */
+  #send(message: ClientMessage): boolean {
+    if (this.#state !== 'open' || !this.#socket || this.#socket.readyState !== 1) {
+      return false;
+    }
+
     this.#socket.send(JSON.stringify(message));
+    return true;
   }
 
   /**

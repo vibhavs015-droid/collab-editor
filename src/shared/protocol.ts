@@ -119,6 +119,37 @@ export interface OpsMessage {
   readonly ops: readonly Operation[];
 }
 
+/**
+ * A baseline the client must adopt, because it is too far behind for a delta.
+ *
+ * Sent when the client's cursor is below the newest compaction snapshot, so the
+ * operations it is missing no longer exist. Applying `ops` alone would produce a
+ * document missing everything that was compacted away, and nothing would report an
+ * error — the client would look alive and be quietly wrong.
+ *
+ * The client's obligation, and it is not optional:
+ *
+ *   1. Flush any unsent operations FIRST. A snapshot replaces the document, so
+ *      anything the server has not seen yet would be discarded. That is data loss
+ *      the user believes did not happen.
+ *   2. REPLACE its replica rather than adding to it.
+ *   3. Apply `ops`, which were recorded after the snapshot was taken.
+ */
+export interface SnapshotMessage {
+  readonly type: 'snapshot';
+  readonly documentId: string;
+  /**
+   * Live elements at `seq`, as JSON. An element, never a string: RGA anchors an
+   * insert to the element its origin names, so a text-only baseline would leave
+   * every subsequent operation unplaceable.
+   */
+  readonly elements: readonly JsonValue[];
+  /** Operations recorded after the snapshot. Usually empty. */
+  readonly ops: readonly Operation[];
+  /** Cursor to resume from once the snapshot and `ops` are applied. */
+  readonly seq: number;
+}
+
 export interface PresenceMessageServer {
   readonly type: 'presence';
   readonly documentId: string;
@@ -144,7 +175,12 @@ export interface ErrorMessage {
 }
 
 export type ServerMessage =
-  WelcomeMessage | OpsMessage | PresenceMessageServer | SyncStateMessage | ErrorMessage;
+  | WelcomeMessage
+  | OpsMessage
+  | SnapshotMessage
+  | PresenceMessageServer
+  | SyncStateMessage
+  | ErrorMessage;
 
 // ── Runtime validation ───────────────────────────────────────────────────
 

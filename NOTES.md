@@ -203,15 +203,77 @@ also when it costs the least.
 
 ### Known limitations
 
-- Compaction runs only when `store.compact()` is called. There is no trigger yet —
-  no timer, no threshold check on the write path. Deliberately left as an explicit
-  call so the policy is testable and so the relay can decide when.
 - Peer cursors are self-reported and unverified. A buggy client claiming to have
   applied a sequence it has not would let the server prune too far.
-- A peer below the floor must be served a snapshot, which the protocol does not yet
-  do. `readSince` still assumes a contiguous log. Until that lands, compaction
-  would break a peer that had been away long enough — so the feature is not wired
-  into the relay yet, deliberately.
+- The IndexedDB cap on the client prunes against a hard ceiling only. Pruning
+  breaks replay, so a real policy needs a snapshot-and-truncate scheme. A client
+  that prunes its own log below the server's compaction floor will be served a
+  baseline, so this converges correctly but wastes a frame.
+- `materializeContent` is O(document) and exists mainly for repair.
+
+---
+
+## Phase 5 — Baseline protocol, and enabling compaction
+
+470 tests, 23 files.
+
+Phase 5 part one built the compaction mechanism but deliberately did not wire it
+into the relay, because `readSince` still assumed a contiguous log. Part two is the
+protocol that closes that gap, which is what makes compaction safe to enable.
+
+### What was built
+
+| Module                                   | Why it exists                                                          |
+| ---------------------------------------- | ---------------------------------------------------------------------- |
+| `server/db.ts` → `readForClient`         | Chooses delta or baseline. The choice, and getting it wrong is silent. |
+| `shared/protocol.ts` → `SnapshotMessage` | The baseline frame, with the client's obligation written into it.      |
+| `server/relay.ts` → `onCursor`           | Feeds the causal-stability floor from what each client has applied.    |
+| `core/crdt/replica.ts` → `resetTo`       | Replaces a replica, keeping its site and clock.                        |
+| `server/baseline.e2e.test.ts`            | A peer below the floor converges against a real relay and database.    |
+
+### The client obligation, and why the transport enforces it
+
+A baseline **replaces** the document. Applying one to a client holding unsent
+operations would discard work the user believes is saved, and nothing would report
+it — the client's log looks consistent right up until the next reload.
+
+So the transport refuses when the outbox is non-empty, flushes, and re-requests.
+Three refusals and it gives up with `BASELINE_REFUSED` rather than spinning.
+
+Getting that test to run at all exposed a **real bug**: `#flushOutbox` cleared the
+outbox _before_ calling `#send`, and `#send` silently no-opped when the socket was
+not actually ready. So in the window where the transport believed it was open but
+the network had already dropped the connection — exactly the window where offline
+matters — **keystrokes were dropped on the floor with no error**. The outbox is now
+cleared only after a frame is genuinely accepted.
+
+I could not reach the refusal branch until I fixed that, which is a good sign: the
+branch was unreachable because the bug was unreachable.
+
+### Two test bugs worth recording
+
+- **A test that hand-derives CRDT ordering is a second, wrong implementation.**
+  My baseline e2e test computed the expected text by simulating twenty edits from
+  twenty sites. It disagreed with the CRDT, and the CRDT was right. It now reads
+  the expected text from the store, because the interleaving is exactly what RGA's
+  tie-break decides and re-deriving it proves nothing.
+- **"The peer never heard about it" was a test bug, not a bug.** `store.apply`
+  persists but does not broadcast; only the relay does. The test was calling the
+  wrong entry point, so the code was fine.
+
+### Known limitations
+
+- Peer cursors are self-reported and unverified. A buggy client claiming to have
+  applied a sequence it has not would let the server prune too far.
+- Compaction runs on a write counter (40 writes), so a document edited more slowly
+  compacts later than one edited in a burst. Correct either way; only the timing
+  differs.
+- The client's IndexedDB cap is still a hard ceiling, not a snapshot-and-truncate.
+  A client that prunes below the server's floor gets served a baseline, so it
+  converges — it just wastes a frame.
+- With no peers connected the floor is the log tip, so compaction cannot run again
+  until a peer reconnects and falls behind. That is correct (nothing to protect)
+  and means compaction mostly does its work while clients are active.
 
 ---
 

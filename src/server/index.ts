@@ -76,6 +76,19 @@ async function main(): Promise<void> {
       // recover instead of losing the gap.
       readSince: (documentId, sinceSeq, limit) => store.readSince(documentId, sinceSeq, limit),
     },
+
+    // Feeds the causal-stability floor. Compaction prunes only below the lowest
+    // cursor reported here, so a peer that has not caught up keeps the history it
+    // still needs.
+    onCursor: (documentId, site, seq) => {
+      store.reportPeerCursor(documentId, site, seq);
+    },
+
+    // A departed peer must stop holding the floor, or one closed tab would block
+    // compaction for its document indefinitely.
+    onLeave: (documentId, site) => {
+      store.forgetPeer(documentId, site);
+    },
   });
 
   // noServer: the socket is handed over by the ApiServer's upgrade handler,
@@ -91,9 +104,17 @@ async function main(): Promise<void> {
       // write delay the broadcast of a keystroke to everyone else in the room,
       // which is the opposite of what a relay is for. The write is queued and
       // ordered per document, so correctness does not depend on the await.
-      void store.apply(documentId, ops).catch((error: unknown) => {
-        process.stderr.write(`[server] could not persist ${documentId}: ${String(error)}\n`);
-      });
+      void store
+        .apply(documentId, ops)
+        .then(() => {
+          // Compaction is opportunistic and off the critical path. It runs on a
+          // write counter rather than a timer, so a quiet document costs nothing
+          // and a busy one does not wait.
+          store.maybeCompact(documentId);
+        })
+        .catch((error: unknown) => {
+          process.stderr.write(`[server] could not persist ${documentId}: ${String(error)}\n`);
+        });
     });
   });
 

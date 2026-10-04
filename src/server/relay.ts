@@ -86,7 +86,11 @@ const MAX_REPLAY_ROUNDS = 500;
  */
 export interface RelayLog {
   /**
-   * Operations strictly after `sinceSeq`, in sequence order.
+   * Everything a client at `sinceSeq` needs to become current.
+   *
+   * May be a plain delta, or a snapshot baseline when the client has fallen below
+   * the compaction floor and the operations it is missing no longer exist. See
+   * ADR-0011.
    *
    * @param limit batch cap, so a client that has been offline for a week is
    *   caught up in several frames rather than one enormous one.
@@ -95,8 +99,17 @@ export interface RelayLog {
 }
 
 export interface RelayPage {
+  /**
+   * Baseline the client must replace its document with, or null for an ordinary
+   * delta.
+   *
+   * `null` is the common case and is deliberately not an empty array: "replace
+   * your document with nothing" is a real and destructive instruction, and it must
+   * not be expressible by accident.
+   */
+  readonly snapshot: readonly JsonValue[] | null;
   readonly ops: readonly JsonValue[];
-  /** Sequence of the last operation in `ops`, or `sinceSeq` when empty. */
+  /** Sequence of the last operation in `ops`, or the snapshot's own sequence. */
   readonly seq: number;
 }
 
@@ -107,18 +120,32 @@ export interface RelayOptions {
   readonly log?: RelayLog;
   /** Operations handed to the log in one read-replay round trip. */
   readonly replayBatchSize?: number;
+  /**
+   * Called whenever a client's acknowledged position changes.
+   *
+   * This is what makes compaction safe. The floor is the minimum cursor across
+   * connected clients, and it cannot be derived from anything the relay already
+   * knows — only the client knows what it has applied.
+   */
+  readonly onCursor?: (documentId: string, site: string, seq: number) => void;
+  /** Called when a client leaves, so a departed peer stops holding the floor. */
+  readonly onLeave?: (documentId: string, site: string) => void;
 }
 
 export class Relay {
   readonly #rooms = new Map<string, Set<Client>>();
   readonly #heartbeat: ReturnType<typeof setInterval> | null;
   readonly #log: RelayLog | null;
+  readonly #onCursor: RelayOptions['onCursor'];
+  readonly #onLeave: RelayOptions['onLeave'];
   readonly #replayBatchSize: number;
   #siteCounter = 0;
 
   constructor(options: RelayOptions = {}) {
     const heartbeatMs = options.heartbeatMs ?? HEARTBEAT_INTERVAL_MS;
     this.#log = options.log ?? null;
+    this.#onCursor = options.onCursor;
+    this.#onLeave = options.onLeave;
     this.#replayBatchSize = options.replayBatchSize ?? DEFAULT_REPLAY_BATCH;
 
     this.#heartbeat =
@@ -268,6 +295,11 @@ export class Relay {
     // connected leaves a permanent phantom collaborator in everyone's UI.
     this.#presence.delete(presenceKey(client.documentId, client.site));
 
+    // And forget its acknowledged position, so a closed tab stops holding the
+    // compaction floor down. Otherwise one abandoned tab would block compaction
+    // for a document forever.
+    this.#onLeave?.(client.documentId, client.site);
+
     if (room.size === 0) {
       // Do not accumulate empty rooms: a long-lived server would otherwise leak
       // one entry per document ever opened.
@@ -352,6 +384,11 @@ export class Relay {
   /**
    * Send everything after `sinceSeq`, then acknowledge the new cursor.
    *
+   * When the client has fallen below the compaction floor, the operations it is
+   * missing no longer exist, so the first page is a snapshot baseline and the
+   * client is told to REPLACE its document. Serving it a delta instead gives it a
+   * document missing everything that was compacted away, with no error anywhere.
+   *
    * Loops until a short page comes back. Only the short page terminates the loop:
    * stopping on an empty page instead would stop early whenever a batch happened
    * to divide evenly, leaving the client silently behind while the server reported
@@ -372,10 +409,32 @@ export class Relay {
     }
 
     let cursor = sinceSeq;
+    let baselineSent = false;
 
     try {
       for (let round = 0; round < MAX_REPLAY_ROUNDS; round += 1) {
         const page = await this.#log.readSince(client.documentId, cursor, this.#replayBatchSize);
+
+        if (page.snapshot !== null && !baselineSent) {
+          // Sent alone, ahead of any delta. If a delta arrived first the client
+          // would apply it to a document it is about to discard.
+          this.#send(client, {
+            type: 'snapshot',
+            documentId: client.documentId,
+            elements: page.snapshot,
+            ops: page.ops,
+            seq: page.seq,
+          });
+
+          baselineSent = true;
+          cursor = page.seq;
+
+          if (page.ops.length < this.#replayBatchSize) {
+            break;
+          }
+
+          continue;
+        }
 
         if (page.ops.length > 0) {
           this.#send(client, {
@@ -409,6 +468,11 @@ export class Relay {
       pendingOps: 0,
       seq: cursor,
     });
+
+    // Only now is this client actually current, so this is the moment its cursor
+    // can be trusted. Reporting it earlier would let compaction prune below a
+    // position the client has not reached.
+    this.#onCursor?.(client.documentId, client.site, cursor);
   }
 
   /** Cursor offset by `${documentId}:${site}`, covering every open room. */
