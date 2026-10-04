@@ -158,15 +158,42 @@ describe('canAccess', () => {
 });
 
 describe('grantAccess', () => {
-  it('is idempotent', async () => {
+  it('distinguishes a new grant from a repeated one', async () => {
     const id = nextId();
     await db.createDocument({ id, owner: 'alice' });
 
-    await expect(db.grantAccess(id, 'bob', 'alice')).resolves.toBe(true);
-    // A repeated grant reports false, because ON CONFLICT DO NOTHING returns no
-    // row. Reporting "granted" again would hide the fact that nothing changed.
-    await expect(db.grantAccess(id, 'bob', 'alice')).resolves.toBe(false);
+    await expect(db.grantAccess(id, 'bob', 'alice')).resolves.toEqual({ outcome: 'granted' });
 
+    // A repeated grant is NOT a failure. Conflating "you may not" with "you already
+    // have" is what made the API answer 400 for a retry of a request that had already
+    // succeeded, which the benchmark harness found by re-running setup() against a warm
+    // database.
+    await expect(db.grantAccess(id, 'bob', 'alice')).resolves.toEqual({
+      outcome: 'already-granted',
+    });
+
+    await expect(db.listCollaborators(id)).resolves.toEqual(['bob']);
+  });
+
+  it('stays stable across many repeats', async () => {
+    // A client retrying on a timeout must never accumulate duplicate collaborators.
+    const id = nextId();
+    await db.createDocument({ id, owner: 'alice' });
+
+    const outcomes: string[] = [];
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const result = await db.grantAccess(id, 'bob', 'alice');
+      outcomes.push(result.outcome);
+    }
+
+    expect(outcomes).toEqual([
+      'granted',
+      'already-granted',
+      'already-granted',
+      'already-granted',
+      'already-granted',
+    ]);
     await expect(db.listCollaborators(id)).resolves.toEqual(['bob']);
   });
 
@@ -174,24 +201,51 @@ describe('grantAccess', () => {
     const id = nextId();
     await db.createDocument({ id, owner: 'alice' });
 
-    // Returns false rather than throwing, so the caller maps it to a 403 instead
-    // of a 500. Either is safe; a 500 would be a lie about what went wrong.
-    await expect(db.grantAccess(id, 'mallory', 'mallory')).resolves.toBe(false);
+    // A named outcome rather than false, so the caller maps it to a 403 instead of a
+    // 500 or a 400. A 500 would be a lie about what went wrong.
+    await expect(db.grantAccess(id, 'mallory', 'mallory')).resolves.toEqual({
+      outcome: 'not-owner',
+    });
     await expect(db.listCollaborators(id)).resolves.toEqual([]);
     await expect(db.canAccess(id, 'mallory')).resolves.toBe(false);
   });
 
   it('refuses a grant on a document that does not exist', async () => {
-    await expect(db.grantAccess('does-not-exist', 'bob', 'alice')).resolves.toBe(false);
+    await expect(db.grantAccess('does-not-exist', 'bob', 'alice')).resolves.toEqual({
+      outcome: 'no-document',
+    });
+  });
+
+  it('refuses a grant whose subject cannot be stored', async () => {
+    const id = nextId();
+    await db.createDocument({ id, owner: 'alice' });
+
+    // Distinct from `no-document`: the document is fine, the request is not. Folding
+    // these together is what made the API answer 404 for a body problem, which the
+    // HTTP test caught.
+    await expect(db.grantAccess(id, 'not a legal subject', 'alice')).resolves.toEqual({
+      outcome: 'invalid-subject',
+    });
+    await expect(db.listCollaborators(id)).resolves.toEqual([]);
+  });
+
+  it('reports an invalid subject before looking the document up', async () => {
+    // Otherwise a caller could probe which document ids exist by watching for a 404
+    // versus a 400, which is the existence oracle ADR-0012 exists to avoid.
+    await expect(db.grantAccess('does-not-exist', 'not a legal subject', 'alice')).resolves.toEqual(
+      { outcome: 'invalid-subject' },
+    );
   });
 
   it('lets an unowned document be claimed by whoever grants', async () => {
-    // An unowned document is world-writable, so anybody may also be the one to
-    // hand it to someone else. Consistent, if slightly odd.
+    // An unowned document is world-writable, so anybody may also be the one to hand it
+    // to someone else. Consistent, if slightly odd. The ownership check treats a null
+    // owner as "not owned" rather than "owned by someone", which is why this passes:
+    // `#ownershipOf` returns a record so the two cannot be confused by string equality.
     const id = nextId();
     await db.createDocument({ id });
 
-    await expect(db.grantAccess(id, 'bob', 'mallory')).resolves.toBe(true);
+    await expect(db.grantAccess(id, 'bob', 'mallory')).resolves.toEqual({ outcome: 'granted' });
     await expect(db.canAccess(id, 'bob')).resolves.toBe(true);
   });
 

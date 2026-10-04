@@ -1,10 +1,94 @@
 {
   "scenario": "divergence",
-  "ranAt": "2026-10-04T19:28:41.285Z",
+  "ranAt": "2026-10-04T21:02:35.916Z",
   "vus": "25",
   "duration": "20s",
   "authMode": "required",
-  "k6ExitCode": 0,
-  "metricsFile": "divergence-metrics.txt",
-  "serverLogTail": "{\"time\":\"2026-10-04T19:28:07.983Z\",\"level\":\"info\",\"msg\":\"starting\",\"service\":\"collab-editor\",\"auth\":\"auth: HS256 sessions\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\",\"nodeEnv\":\"production\"}\n{\"time\":\"2026-10-04T19:28:09.716Z\",\"level\":\"info\",\"msg\":\"database ready\",\"service\":\"collab-editor\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\"}\n{\"time\":\"2026-10-04T19:28:09.728Z\",\"level\":\"info\",\"msg\":\"listening\",\"service\":\"collab-editor\",\"url\":\"http://127.0.0.1:3401\",\"websocket\":\"ws://127.0.0.1:3401/ws?doc=<id>\",\"auth\":\"required\"}\n{\"time\":\"2026-10-04T19:28:09.728Z\",\"level\":\"info\",\"msg\":\"ready\",\"service\":\"collab-editor\",\"hint\":\"Ctrl+C to stop\"}\n"
+  "runs": 3,
+  "aggregate": {
+    "iterations": {
+      "median": 216,
+      "min": 175,
+      "max": 384,
+      "runs": 3
+    },
+    "handshakeP95Ms": null,
+    "catchUpP95Ms": null,
+    "opsSent": {
+      "median": 43360,
+      "min": 35200,
+      "max": 76870,
+      "runs": 3
+    },
+    "opsSentRate": {
+      "median": 1398,
+      "min": 1134.96,
+      "max": 2476.84,
+      "runs": 3
+    },
+    "opsReceived": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "runs": 3
+    },
+    "opsReceivedRate": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "runs": 3
+    },
+    "reconnects": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "runs": 3
+    },
+    "totalUnparseableFrames": 0,
+    "totalRefusals": 0,
+    "totalCheckFailures": 0
+  },
+  "rawRuns": [
+    {
+      "iterations": 384,
+      "handshakeP95": null,
+      "catchUpP95": null,
+      "opsSent": 76870,
+      "opsSentRate": 2476.837677019342,
+      "opsReceived": 0,
+      "opsReceivedRate": 0,
+      "reconnects": 0,
+      "readmittedFailures": 0,
+      "unparseableFrames": 0,
+      "checkFailures": 0
+    },
+    {
+      "iterations": 216,
+      "handshakeP95": null,
+      "catchUpP95": null,
+      "opsSent": 43360,
+      "opsSentRate": 1397.9956488868543,
+      "opsReceived": 0,
+      "opsReceivedRate": 0,
+      "reconnects": 0,
+      "readmittedFailures": 0,
+      "unparseableFrames": 0,
+      "checkFailures": 0
+    },
+    {
+      "iterations": 175,
+      "handshakeP95": null,
+      "catchUpP95": null,
+      "opsSent": 35200,
+      "opsSentRate": 1134.9612176658416,
+      "opsReceived": 0,
+      "opsReceivedRate": 0,
+      "reconnects": 0,
+      "readmittedFailures": 0,
+      "unparseableFrames": 0,
+      "checkFailures": 0
+    }
+  ],
+  "metricsFile": "divergence-run-3-metrics.txt",
+  "serverLogTail": "{\"time\":\"2026-10-04T21:01:00.774Z\",\"level\":\"info\",\"msg\":\"starting\",\"service\":\"collab-editor\",\"auth\":\"auth: HS256 sessions\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\",\"nodeEnv\":\"production\"}\n{\"time\":\"2026-10-04T21:01:01.115Z\",\"level\":\"info\",\"msg\":\"database ready\",\"service\":\"collab-editor\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\"}\n{\"time\":\"2026-10-04T21:01:01.133Z\",\"level\":\"info\",\"msg\":\"listening\",\"service\":\"collab-editor\",\"url\":\"http://127.0.0.1:3401\",\"websocket\":\"ws://127.0.0.1:3401/ws?doc=<id>\",\"auth\":\"required\"}\n{\"time\":\"2026-10-04T21:01:01.133Z\",\"level\":\"info\",\"msg\":\"ready\",\"service\":\"collab-editor\",\"hint\":\"Ctrl+C to stop\"}\n"
 }

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * HTTP API for documents.
  *
  * Node's built-in `http` server, no framework. Phase 1 routes are simple enough
@@ -539,13 +539,41 @@ export class ApiServer {
 
       const granted = await this.#db.grantAccess(id, target, caller);
 
-      if (!granted) {
-        sendError(res, 400, 'INVALID_BODY', 'That subject cannot be stored.');
-        return;
-      }
+      // Idempotent on purpose. A client that retries a grant because it never saw the
+      // response gets 200 and the same access, not an error for something that had
+      // already succeeded. The benchmark harness re-runs `setup()` against a warm
+      // database and hit exactly that, which is how the bug was found.
+      //
+      // The ownership check above already rejected a stranger, so `not-owner` here can
+      // only mean the document changed hands between the two queries. That race is
+      // narrow, but it is why this handler re-checks instead of trusting the first answer.
+      switch (granted.outcome) {
+        case 'granted':
+          sendJson(res, 200, { granted: true, subject: target, alreadyGranted: false });
+          return;
 
-      sendJson(res, 200, { granted: true, subject: target });
-      return;
+        case 'already-granted':
+          sendJson(res, 200, { granted: true, subject: target, alreadyGranted: true });
+          return;
+
+        case 'not-owner':
+          sendError(res, 403, 'FORBIDDEN', 'Only the owner may change who has access.');
+          return;
+
+        case 'no-document':
+          // Also only reachable through that race: the document existed a moment ago.
+          // 404 rather than 400 because this is the more useful answer, and the
+          // existence-oracle argument does not apply to a caller who just saw it.
+          sendError(res, 404, 'DOCUMENT_NOT_FOUND', NOT_FOUND_MESSAGE);
+          return;
+
+        case 'invalid-subject':
+          // 400, not 404, because the caller demonstrably knows this document exists:
+          // they created it or were already granted access. Reporting "not found" here
+          // would be the existence-oracle protection applied to somebody it cannot help.
+          sendError(res, 400, 'INVALID_BODY', 'That subject cannot be stored.');
+          return;
+      }
     }
 
     if (req.method === 'DELETE' && subject !== undefined) {

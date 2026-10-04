@@ -1,0 +1,8 @@
+{
+  "scenario": "divergence",
+  "attempt": 3,
+  "ranAt": "2026-10-04T21:02:35.916Z",
+  "unplacedOperations": 0,
+  "connectionsOpenedByServerTotal": 778,
+  "metricsFile": "divergence-run-3-metrics.txt"
+}

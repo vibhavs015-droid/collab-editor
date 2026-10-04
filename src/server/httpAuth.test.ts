@@ -360,6 +360,54 @@ describe('collaboration', () => {
     expect(write.status).toBe(200);
   });
 
+  it('treats a repeated grant as success, not an error', async () => {
+    // The bug the benchmark harness found: it re-runs `setup()` against a warm database,
+    // so it grants access that already exists, and the API answered 400. A client
+    // retrying a grant because it never saw the response hit exactly the same case and
+    // got told its successful request was malformed.
+    await createAs('alice', 'shared');
+
+    const grant = () =>
+      as('alice', '/api/documents/shared/collaborators', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: 'bob' }),
+      });
+
+    const first = await grant();
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ granted: true, subject: 'bob', alreadyGranted: false });
+
+    const second = await grant();
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ granted: true, subject: 'bob', alreadyGranted: true });
+
+    // Still exactly one collaborator, not a row per attempt.
+    const listed = await as('alice', '/api/documents/shared/collaborators');
+    expect(((await listed.json()) as { collaborators: string[] }).collaborators).toEqual(['bob']);
+  });
+
+  it('keeps granting idempotent across many retries', async () => {
+    // A client that retries on a timeout must converge, not accumulate.
+    await createAs('alice', 'shared');
+
+    const statuses: number[] = [];
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const res = await as('alice', '/api/documents/shared/collaborators', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: 'bob' }),
+      });
+      statuses.push(res.status);
+    }
+
+    expect(statuses).toEqual([200, 200, 200, 200, 200, 200]);
+
+    const listed = await as('alice', '/api/documents/shared/collaborators');
+    expect(((await listed.json()) as { collaborators: string[] }).collaborators).toEqual(['bob']);
+  });
+
   it('lists collaborators for the owner', async () => {
     await createAs('alice', 'shared');
     await as('alice', '/api/documents/shared/collaborators', {

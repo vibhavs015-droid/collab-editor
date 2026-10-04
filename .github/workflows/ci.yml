@@ -47,6 +47,15 @@ jobs:
       - name: Format check
         run: npm run format:check
 
+      # A separate gate from `format:check` because they catch different problems.
+      # Prettier rewrites what it can reach and ignores line endings; this reports every
+      # file whose bytes disagree with .gitattributes, including ones no formatter reads.
+      # Worth its own step because the failure mode it catches is invisible to review: git
+      # normalises the index, so a file with mixed endings still commits cleanly and only
+      # shows up later as a whole-file diff.
+      - name: Line endings and encoding
+        run: npm run check:line-endings
+
       - name: Test
         run: npm test
 

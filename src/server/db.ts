@@ -227,6 +227,26 @@ const MIGRATIONS: readonly { readonly name: string; readonly sql: string }[] = [
   },
 ];
 
+/**
+ * Outcome of a grant attempt.
+ *
+ * A union rather than a boolean, because the cases need different answers and
+ * conflating them is a real bug rather than a tidiness preference. The benchmark
+ * harness found this: re-running `setup()` against a warm database re-granted access
+ * that already existed, and the API answered 400 as though the request were malformed.
+ * A client retrying a grant got an error for something that had already succeeded.
+ */
+export type GrantResult =
+  /** Access was not previously held and is now. */
+  | { readonly outcome: 'granted' }
+  /** Access was already held. Not an error: a grant is idempotent. */
+  | { readonly outcome: 'already-granted' }
+  /** No such document, so nothing was granted and none was created. */
+  | { readonly outcome: 'no-document' }
+  /** The subject cannot be stored, so the request was never valid. */
+  | { readonly outcome: 'invalid-subject' }
+  /** The caller does not own the document. */
+  | { readonly outcome: 'not-owner' };
 export class Database {
   readonly #pg: PGlite;
 
@@ -479,31 +499,78 @@ export class Database {
   /**
    * Grant `subject` access to a document.
    *
-   * @returns false when the document does not exist, so a grant cannot create one.
-   * @throws when the caller is not the owner. The check and the insert are not in
-   *   one transaction with the caller's authorisation decision; they are one
-   *   statement, which is what stops a concurrent owner change racing the grant.
+   * Validated here, not only where tokens are verified. This arrives from a request
+   * body, and without the check arbitrary text went straight into a primary key that is
+   * also rendered in a collaborator list. See shared/subject.ts.
+   *
+   * Ownership and existence are asked separately, and in that order, because a single
+   * statement cannot tell "you may not" from "you already have". That costs one extra
+   * round trip on a path that runs once per human sharing a link, which is not where the
+   * system's time goes.
+   *
+   * A grant can never create a document: `no-document` is the answer when none exists.
    */
-  async grantAccess(documentId: string, subject: string, grantedBy: string): Promise<boolean> {
-    // Validated here, not only where tokens are verified. This arrives from a
-    // request body, and without the check arbitrary text went straight into a
-    // primary key that is also rendered in a collaborator list. See shared/subject.ts.
+  async grantAccess(documentId: string, subject: string, grantedBy: string): Promise<GrantResult> {
+    // Checked before the document is looked up on purpose. A caller with no access to a
+    // document must not learn whether that document exists by trying to grant on it, so
+    // the body-validation failure is reported even for an id that does not exist.
     if (!isValidSubject(subject)) {
-      return false;
+      return { outcome: 'invalid-subject' };
     }
 
-    const result = await this.#pg.query<{ id: string }>(
-      `INSERT INTO document_collaborators (document_id, subject)
-       SELECT id, $2 FROM documents
-        WHERE id = $1 AND (owner IS NULL OR owner = $3)
-       ON CONFLICT (document_id, subject) DO NOTHING
-       RETURNING document_id`,
-      [documentId, subject, grantedBy],
+    const ownership = await this.#ownershipOf(documentId);
+
+    if (ownership === null) {
+      return { outcome: 'no-document' };
+    }
+
+    if (ownership.owner !== null && ownership.owner !== grantedBy) {
+      return { outcome: 'not-owner' };
+    }
+
+    const existing = await this.#pg.query<{ subject: string }>(
+      'SELECT subject FROM document_collaborators WHERE document_id = $1 AND subject = $2',
+      [documentId, subject],
     );
 
-    return result.rows.length > 0;
+    if (existing.rows.length > 0) {
+      return { outcome: 'already-granted' };
+    }
+
+    const inserted = await this.#pg.query<{ document_id: string }>(
+      `INSERT INTO document_collaborators (document_id, subject)
+       VALUES ($1, $2)
+       ON CONFLICT (document_id, subject) DO NOTHING
+       RETURNING document_id`,
+      [documentId, subject],
+    );
+
+    return inserted.rows.length > 0 ? { outcome: 'granted' } : { outcome: 'already-granted' };
   }
 
+  /**
+   * Ownership of a document.
+   *
+   * A record rather than a string with a sentinel, because `'unowned'` is just another
+   * string and would collide with a subject that happens to be called `unowned`.
+   *
+   * @returns null when there is no such document, `{ owner: null }` for one nobody owns
+   *   (which anyone may grant on, matching `canAccess`), and the subject otherwise.
+   */
+  async #ownershipOf(documentId: string): Promise<{ owner: string | null } | null> {
+    const result = await this.#pg.query<{ owner: string | null }>(
+      'SELECT owner FROM documents WHERE id = $1',
+      [documentId],
+    );
+
+    const row = result.rows[0];
+
+    if (!row) {
+      return null;
+    }
+
+    return { owner: row.owner };
+  }
   /**
    * Remove a grant.
    *

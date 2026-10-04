@@ -1,0 +1,8 @@
+{
+  "scenario": "reconnect",
+  "attempt": 3,
+  "ranAt": "2026-10-04T21:01:00.066Z",
+  "unplacedOperations": 0,
+  "connectionsOpenedByServerTotal": 898,
+  "metricsFile": "reconnect-run-3-metrics.txt"
+}

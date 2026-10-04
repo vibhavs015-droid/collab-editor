@@ -1,0 +1,8 @@
+{
+  "scenario": "edit",
+  "attempt": 3,
+  "ranAt": "2026-10-04T21:00:09.671Z",
+  "unplacedOperations": 0,
+  "connectionsOpenedByServerTotal": 905,
+  "metricsFile": "edit-run-3-metrics.txt"
+}

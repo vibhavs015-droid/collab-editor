@@ -1,10 +1,99 @@
 {
   "scenario": "connect",
-  "ranAt": "2026-10-04T19:27:15.512Z",
+  "ranAt": "2026-10-04T21:10:41.065Z",
   "vus": "50",
   "duration": null,
   "authMode": "required",
-  "k6ExitCode": 0,
-  "metricsFile": "connect-metrics.txt",
-  "serverLogTail": "{\"time\":\"2026-10-04T19:26:52.726Z\",\"level\":\"info\",\"msg\":\"starting\",\"service\":\"collab-editor\",\"auth\":\"auth: HS256 sessions\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\",\"nodeEnv\":\"production\"}\n{\"time\":\"2026-10-04T19:26:54.584Z\",\"level\":\"info\",\"msg\":\"database ready\",\"service\":\"collab-editor\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\"}\n{\"time\":\"2026-10-04T19:26:54.596Z\",\"level\":\"info\",\"msg\":\"listening\",\"service\":\"collab-editor\",\"url\":\"http://127.0.0.1:3401\",\"websocket\":\"ws://127.0.0.1:3401/ws?doc=<id>\",\"auth\":\"required\"}\n{\"time\":\"2026-10-04T19:26:54.596Z\",\"level\":\"info\",\"msg\":\"ready\",\"service\":\"collab-editor\",\"hint\":\"Ctrl+C to stop\"}\n"
+  "runs": 3,
+  "aggregate": {
+    "iterations": {
+      "median": 3828,
+      "min": 3618,
+      "max": 3838,
+      "runs": 3
+    },
+    "handshakeP95Ms": {
+      "median": 240,
+      "min": 231,
+      "max": 248,
+      "runs": 3
+    },
+    "catchUpP95Ms": null,
+    "opsSent": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "runs": 3
+    },
+    "opsSentRate": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "runs": 3
+    },
+    "opsReceived": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "runs": 3
+    },
+    "opsReceivedRate": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "runs": 3
+    },
+    "reconnects": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "runs": 3
+    },
+    "totalUnparseableFrames": 0,
+    "totalRefusals": 0,
+    "totalCheckFailures": 0
+  },
+  "rawRuns": [
+    {
+      "iterations": 3618,
+      "handshakeP95": 248,
+      "catchUpP95": null,
+      "opsSent": 0,
+      "opsSentRate": 0,
+      "opsReceived": 0,
+      "opsReceivedRate": 0,
+      "reconnects": 0,
+      "readmittedFailures": 0,
+      "unparseableFrames": 0,
+      "checkFailures": 0
+    },
+    {
+      "iterations": 3828,
+      "handshakeP95": 231,
+      "catchUpP95": null,
+      "opsSent": 0,
+      "opsSentRate": 0,
+      "opsReceived": 0,
+      "opsReceivedRate": 0,
+      "reconnects": 0,
+      "readmittedFailures": 0,
+      "unparseableFrames": 0,
+      "checkFailures": 0
+    },
+    {
+      "iterations": 3838,
+      "handshakeP95": 240,
+      "catchUpP95": null,
+      "opsSent": 0,
+      "opsSentRate": 0,
+      "opsReceived": 0,
+      "opsReceivedRate": 0,
+      "reconnects": 0,
+      "readmittedFailures": 0,
+      "unparseableFrames": 0,
+      "checkFailures": 0
+    }
+  ],
+  "metricsFile": "connect-run-3-metrics.txt",
+  "serverLogTail": "{\"time\":\"2026-10-04T21:09:36.810Z\",\"level\":\"info\",\"msg\":\"starting\",\"service\":\"collab-editor\",\"auth\":\"auth: HS256 sessions\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\",\"nodeEnv\":\"production\"}\n{\"time\":\"2026-10-04T21:09:38.757Z\",\"level\":\"info\",\"msg\":\"database ready\",\"service\":\"collab-editor\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\"}\n{\"time\":\"2026-10-04T21:09:38.771Z\",\"level\":\"info\",\"msg\":\"listening\",\"service\":\"collab-editor\",\"url\":\"http://127.0.0.1:3401\",\"websocket\":\"ws://127.0.0.1:3401/ws?doc=<id>\",\"auth\":\"required\"}\n{\"time\":\"2026-10-04T21:09:38.771Z\",\"level\":\"info\",\"msg\":\"ready\",\"service\":\"collab-editor\",\"hint\":\"Ctrl+C to stop\"}\n"
 }

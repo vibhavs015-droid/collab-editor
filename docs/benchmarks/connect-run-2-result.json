@@ -1,0 +1,8 @@
+{
+  "scenario": "connect",
+  "attempt": 2,
+  "ranAt": "2026-10-04T21:10:20.365Z",
+  "unplacedOperations": 0,
+  "connectionsOpenedByServerTotal": 7446,
+  "metricsFile": "connect-run-2-metrics.txt"
+}

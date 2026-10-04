@@ -534,24 +534,25 @@ and a burst-latency trend measured around a non-blocking call, which is always ~
 ### Results
 
 Recorded, with raw output committed in `docs/benchmarks/`. i5-12500H, 16 threads,
-Windows 11, Node 24.16.0, k6 2.3.0, PGlite in-process, auth **required**.
+Windows 11, Node 24.16.0, k6 2.3.0, PGlite in-process, auth **required**. **Three
+runs per scenario** — medians, with the observed range.
 
-| Scenario     | What                                             | Result                                                                           |
-| ------------ | ------------------------------------------------ | -------------------------------------------------------------------------------- |
-| `connect`    | 50 concurrent, 20 s ramp                         | **4,086** handshakes, p95 **212 ms**, 0 refusals                                 |
-| `edit`       | 20 concurrent editors                            | **42,345** ops at **1,411/s**, fanned out to 536,602 at **17,876/s**, 0 unplaced |
-| `reconnect`  | 10 clients vanishing and returning               | **150** reconnects, **100%** readmitted, catch-up p95 **31 ms**                  |
-| `divergence` | 25 clients, 30% deletes of each other's elements | **76,870** ops at **2,478/s**, **0 unplaced**                                    |
-| convergence  | 24 real replicas, 60 rounds                      | **0** diverged, **0** invariant violations                                       |
+| Scenario     | What                                             | Result                                                                  |
+| ------------ | ------------------------------------------------ | ----------------------------------------------------------------------- |
+| `connect`    | 50 concurrent, 20 s ramp                         | **3,732** handshakes, p95 **245 ms** (237–252), 0 refusals              |
+| `edit`       | 20 concurrent editors                            | **38,465** ops at **1,282/s** (999–1,485), **0** unplaced               |
+| `reconnect`  | 10 clients vanishing and returning               | **150** reconnects, **100%** readmitted, catch-up p95 **25 ms** (22–36) |
+| `divergence` | 25 clients, 30% deletes of each other's elements | **43,360** ops at **1,398/s** (1,135–2,477), **0 unplaced**             |
+| convergence  | 24 real replicas, 60 rounds                      | **0** diverged, **0** invariant violations                              |
 
-The server's independent counters agree with the client's on every run — 4,086
-connections opened matches 4,086 handshakes. That cross-check is why the numbers are worth
-quoting: a generator that merely believed its own successes would agree with itself just
-as happily.
+The server's independent counters agree with the client's — in the final `connect` run,
+3,778 connections opened matched 3,778 client handshakes exactly. That cross-check is
+why the numbers are worth quoting: a generator that merely believed its own successes
+would agree with itself just as happily.
 
-**Under real load, compaction refused 19 times because peers had not caught up.**
-ADR-0011's causal-stability floor holding in production-shaped conditions, rather than
-only in a unit test.
+**Under real load, compaction refused 12 times because peers had not caught up.** ADR-0011's
+causal-stability floor holding in production-shaped conditions, rather than only in a unit
+test.
 
 ### The honesty section is not optional
 
@@ -563,6 +564,45 @@ horizontal scaling, network conditions, large documents, steady-state compaction
 client-side rendering.
 
 A benchmark document that skips this section is a press release.
+
+### One run is not a measurement
+
+After clearing memory I re-ran every scenario expecting better numbers, and got
+**worse** ones: `edit` dropped from 1,411 to 1,027 ops/s. That is worth recording
+because the instinct was to distrust the run.
+
+Running each scenario **three times** instead of once settled it. The spread is
+not noise around a stable value — latency percentiles are tight (`connect` p95
+within 3%, `reconnect` within 6%) while throughput is not (`edit` send rate ±20%,
+fan-out ±120%). Quoting the first run would have meant reporting which end of the
+distribution I happened to hit as if it were the number.
+
+So `run.mjs` now takes `--repeat N` and writes an aggregate with **median and
+min–max**, and the doc reports ranges. A figure with no range is a story about one
+afternoon, not a measurement.
+
+The fan-out spread turned out to be explainable rather than mysterious: fan-out is
+`ops × (clients − 1)`, and k6 starts and stops sessions as iterations complete, so
+a run that holds 20 clients concurrently broadcasts ~12× more than one whose
+clients stagger. A property of the workload, not the relay.
+
+### `--repeat` found a real bug in the product
+
+Running `setup()` against a warm database re-granted access that already existed,
+and the API answered **400**. Root cause: `grantAccess` returned a boolean, and
+`ON CONFLICT DO NOTHING` returns no row, so "you may not" and "you already have"
+were the same value. A client retrying a grant because it never saw the response
+hits the identical case and is told its successful request was malformed.
+
+Replaced with a `GrantResult` union — `granted`, `already-granted`, `no-document`,
+`invalid-subject`, `not-owner` — and made the endpoint idempotent.
+
+Writing the union is what made the _next_ mistake visible. My first version folded
+`invalid-subject` into `no-document`, on the grounds that both were "it did not
+happen". The HTTP test caught it immediately: a malformed subject on a document
+the caller demonstrably owns must be **400**, not 404. The exact conflation I was
+removing, reintroduced one level down. Splitting the cases is the whole point of
+the union; not splitting them makes it decoration.
 
 ### Known limitations
 
@@ -867,4 +907,45 @@ number | null` survived narrowing and type-aware ESLint correctly flagged
 
   - **Windows line endings.** Added `.gitattributes` forcing LF in the working
     tree except for `.bat`/`.cmd`/`.ps1`. Without it, `autocrlf=true` produces
-    whole-file diffs that look like real changes and are not.
+    whole-file diffs that look like real changes and are not. Now backed by a real
+    gate — see below — because the attribute alone did not stop it.
+
+## Line endings needed a check, not just an attribute
+
+`.gitattributes` said `* text=auto eol=lf` from Phase 0, and it was correct,
+and it was **not enough**.
+
+Editing two source files through PowerShell's `WriteAllLines` on Windows emits
+CRLF. Those files became a mix of CRLF and bare LF. Git normalised the index on
+commit, so the committed blob was fine and the commit looked clean — which is
+exactly why it went unnoticed. The damage surfaced later as a _text-match
+failure_: an edit tool could not find a string that was visibly present in the
+file, because half the file's line endings disagreed.
+
+`scripts/check-line-endings.mjs` now reports, as a CI gate:
+
+- CRLF where `.gitattributes` mandates LF, and files that are genuinely mixed
+- lone CR (very old Mac convention, or a botched edit)
+- missing final newline, which usually means a truncated write
+- UTF-8 BOM, which breaks the first line of every text tool and is invisible
+- **U+FFFD**, the replacement character, which is what mangled UTF-8 looks like
+  after a PowerShell round-trip
+
+Two things worth recording from building it:
+
+**The check failed on itself.** The detector compared against a _literal_ U+FFFD
+glyph, so its own source contained the sequence it searched for and it reported
+itself as corrupted. Fixed by comparing against `'\uFFFD'`. A detector that
+depends on readable text will eventually match its own text.
+
+**I verified the guard by breaking it, and my first sabotage was fake.** I
+replaced the metrics write with a write of different content — the file still
+existed, so the existence check correctly passed. Deleting the write entirely made
+it fire with exit 5. A guard that has only ever been observed passing has not been
+tested.
+
+`docs/benchmarks/` is prettier-ignored for a related reason: reformatting
+tool-generated artifacts on commit buries the data that actually differs between two
+runs under indentation churn.
+
+## Log

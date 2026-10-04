@@ -117,15 +117,19 @@ Three rules learned along the way, each encoded as a test:
 Recorded, with raw output committed. Full method, and what the numbers do **not** mean:
 [`docs/benchmarks.md`](docs/benchmarks.md).
 
-| Scenario     | Shape                                            | Result                                                               |
-| ------------ | ------------------------------------------------ | -------------------------------------------------------------------- |
-| `connect`    | 50 concurrent, 20 s ramp                         | **4,086** handshakes, p95 **212 ms**, 0 refusals                     |
-| `edit`       | 20 concurrent editors                            | **42,345** ops at **1,411/s**, fanned out to 536,602 at **17,876/s** |
-| `reconnect`  | 10 clients vanishing and returning               | **150** reconnects, **100%** readmitted, catch-up p95 **31 ms**      |
-| `divergence` | 25 clients, 30% deletes of each other's elements | **76,870** ops at **2,478/s**, **0 unplaced**                        |
-| convergence  | 24 real replicas contending for 60 rounds        | **0** diverged, **0** invariant violations                           |
+**Three runs per scenario**, reported as median with the observed range — a single run on a
+shared machine varies by enough to be misleading.
 
-Reproduce with `npm run load:connect` (or `load:edit`, `load:reconnect`, `load:divergence`).
+| Scenario     | Shape                                            | Result                                                          |
+| ------------ | ------------------------------------------------ | --------------------------------------------------------------- |
+| `connect`    | 50 concurrent, 20 s ramp                         | **3,732** handshakes, p95 **245 ms** (237–252), 0 refusals      |
+| `edit`       | 20 concurrent editors                            | **38,465** ops at **1,282/s** (999–1,485), **0** unplaced       |
+| `reconnect`  | 10 clients vanishing and returning               | **150** reconnects, **100%** readmitted, catch-up p95 **25 ms** |
+| `divergence` | 25 clients, 30% deletes of each other's elements | **43,360** ops at **1,398/s**, **0 unplaced**                   |
+| convergence  | 24 real replicas contending for 60 rounds        | **0** diverged, **0** invariant violations                      |
+
+Reproduce with `npm run load:connect -- --repeat 3` (or `load:edit`, `load:reconnect`,
+`load:divergence`).
 
 **These are not production throughput figures**, and the benchmark document says so at
 length: PGlite is in-process WASM with no network hop, there is one Node thread, the
@@ -157,10 +161,15 @@ with the real `Replica`, and runs in CI.
 | Types           | `npm run typecheck`            | 0 errors    |
 | Lint            | `npm run lint`                 | 0 problems  |
 | Format          | `npm run format:check`         | clean       |
-| Tests           | `npm test`                     | 397 passing |
+| Line endings    | `npm run check:line-endings`   | clean       |
+| Tests           | `npm test`                     | 711 passing |
 | Vulnerabilities | `npm audit --audit-level=high` | 0           |
 
 CI runs each as a separate gate, plus a dependency-audit job.
+
+The line-endings gate exists because `.gitattributes` alone was not enough: git normalises
+the index on commit, so a file written with CRLF still commits cleanly and only reveals
+itself later, as an edit that cannot find text which is visibly present.
 
 ---
 
