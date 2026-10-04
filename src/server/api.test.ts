@@ -7,6 +7,31 @@ let db: Database;
 let server: ApiServer;
 let baseUrl: string;
 
+/**
+ * The caller these tests act as.
+ *
+ * A fixed string rather than a fetched token, because the server under test runs in
+ * open mode where the token IS the subject. A real subject would add a dependency
+ * on the session endpoint without testing anything the other tests do not.
+ */
+const SUBJECT = 'test-subject';
+
+/** fetch with credentials attached. Every document route requires them. */
+function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const existing = init.headers;
+
+  const headers = existing instanceof Headers ? new Headers(existing) : new Headers(existing ?? {});
+
+  headers.set('Authorization', `Bearer ${SUBJECT}`);
+
+  // Concatenated rather than templated with `${baseUrl}` inline, because a
+  // whole-file replacement of `fetch(\`${baseUrl}` to `authedFetch(\`` rewrites this
+  // line into a call to itself. Worth a comment so the next person does the same.
+  const url = baseUrl + path;
+
+  return fetch(url, { ...init, headers });
+}
+
 beforeEach(async () => {
   // Port 0 lets the OS assign a free port, so tests never collide with a
   // running dev server or each other.
@@ -30,7 +55,7 @@ afterEach(async () => {
 });
 
 async function createDocument(id: string, title = 'Untitled'): Promise<Response> {
-  return fetch(`${baseUrl}/api/documents`, {
+  return authedFetch(`/api/documents`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, title }),
@@ -38,11 +63,14 @@ async function createDocument(id: string, title = 'Untitled'): Promise<Response>
 }
 
 describe('GET /api/health', () => {
-  it('reports ok', async () => {
-    const res = await fetch(`${baseUrl}/api/health`);
+  it('reports ok, and says whether authentication is actually on', async () => {
+    const res = await authedFetch(`/api/health`);
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: 'ok' });
+    // `auth` is on this endpoint so an operator can tell at a glance whether a
+    // deployment is running unauthenticated. A health check that only says "ok"
+    // cannot distinguish a secured server from an open one.
+    expect(await res.json()).toEqual({ status: 'ok', auth: 'open' });
   });
 });
 
@@ -67,7 +95,7 @@ describe('POST /api/documents', () => {
   });
 
   it('rejects a missing id with 400', async () => {
-    const res = await fetch(`${baseUrl}/api/documents`, {
+    const res = await authedFetch(`/api/documents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: 'No id' }),
@@ -86,7 +114,7 @@ describe('POST /api/documents', () => {
   });
 
   it('rejects malformed JSON with 400 and does not crash', async () => {
-    const res = await fetch(`${baseUrl}/api/documents`, {
+    const res = await authedFetch(`/api/documents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{not json',
@@ -98,7 +126,7 @@ describe('POST /api/documents', () => {
   });
 
   it('rejects a JSON array body with 400', async () => {
-    const res = await fetch(`${baseUrl}/api/documents`, {
+    const res = await authedFetch(`/api/documents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(['not', 'an', 'object']),
@@ -112,7 +140,7 @@ describe('GET /api/documents/:id', () => {
   it('returns the document', async () => {
     await createDocument('doc-1', 'My Doc');
 
-    const res = await fetch(`${baseUrl}/api/documents/doc-1`);
+    const res = await authedFetch(`/api/documents/doc-1`);
     expect(res.status).toBe(200);
 
     const body = (await res.json()) as { document: { id: string } };
@@ -120,11 +148,14 @@ describe('GET /api/documents/:id', () => {
   });
 
   it('returns 404 for a missing document', async () => {
-    const res = await fetch(`${baseUrl}/api/documents/nope`);
+    const res = await authedFetch(`/api/documents/nope`);
 
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe('NOT_FOUND');
+    // DOCUMENT_NOT_FOUND, not NOT_FOUND: this code covers both "no such document"
+    // and "not yours", on purpose, so a caller cannot use the API to discover which
+    // ids are real.
+    expect(body.error.code).toBe('DOCUMENT_NOT_FOUND');
   });
 });
 
@@ -132,7 +163,7 @@ describe('PATCH /api/documents/:id', () => {
   it('saves content and reports changed: true', async () => {
     await createDocument('doc-1');
 
-    const res = await fetch(`${baseUrl}/api/documents/doc-1`, {
+    const res = await authedFetch(`/api/documents/doc-1`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: 'hello world' }),
@@ -147,13 +178,13 @@ describe('PATCH /api/documents/:id', () => {
     // Autosave fires on a timer; the client needs to distinguish a real write
     // from a no-op so it does not claim "Saved" on every tick.
     await createDocument('doc-1');
-    await fetch(`${baseUrl}/api/documents/doc-1`, {
+    await authedFetch(`/api/documents/doc-1`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: 'same' }),
     });
 
-    const res = await fetch(`${baseUrl}/api/documents/doc-1`, {
+    const res = await authedFetch(`/api/documents/doc-1`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: 'same' }),
@@ -166,7 +197,7 @@ describe('PATCH /api/documents/:id', () => {
   it('renames via title', async () => {
     await createDocument('doc-1', 'Old');
 
-    const res = await fetch(`${baseUrl}/api/documents/doc-1`, {
+    const res = await authedFetch(`/api/documents/doc-1`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: 'New' }),
@@ -176,7 +207,7 @@ describe('PATCH /api/documents/:id', () => {
     const body = (await res.json()) as { document?: unknown };
     expect(body).toBeDefined();
 
-    const fetched = await fetch(`${baseUrl}/api/documents/doc-1`);
+    const fetched = await authedFetch(`/api/documents/doc-1`);
     const doc = (await fetched.json()) as { document: { title: string } };
     expect(doc.document.title).toBe('New');
   });
@@ -186,7 +217,7 @@ describe('PATCH /api/documents/:id', () => {
     // edits were saved when they were not.
     await createDocument('doc-1');
 
-    const res = await fetch(`${baseUrl}/api/documents/doc-1`, {
+    const res = await authedFetch(`/api/documents/doc-1`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: 'typo' }),
@@ -198,7 +229,7 @@ describe('PATCH /api/documents/:id', () => {
   });
 
   it('returns 404 when saving a document that does not exist', async () => {
-    const res = await fetch(`${baseUrl}/api/documents/ghost`, {
+    const res = await authedFetch(`/api/documents/ghost`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: 'text' }),
@@ -210,7 +241,7 @@ describe('PATCH /api/documents/:id', () => {
   it('rejects an empty patch with a clear message', async () => {
     await createDocument('doc-1');
 
-    const res = await fetch(`${baseUrl}/api/documents/doc-1`, {
+    const res = await authedFetch(`/api/documents/doc-1`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -226,13 +257,13 @@ describe('GET /api/documents', () => {
     // than insertion order. Insertion order would pass either way.
     await createDocument('a', 'A');
     await createDocument('b', 'B');
-    await fetch(`${baseUrl}/api/documents/a`, {
+    await authedFetch(`/api/documents/a`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: 'touched last' }),
     });
 
-    const res = await fetch(`${baseUrl}/api/documents`);
+    const res = await authedFetch(`/api/documents`);
     expect(res.status).toBe(200);
 
     const body = (await res.json()) as { documents: { id: string }[] };
@@ -245,7 +276,7 @@ describe('GET /api/documents', () => {
     await createDocument('z', 'Z');
 
     const read = async (): Promise<string[]> => {
-      const res = await fetch(`${baseUrl}/api/documents`);
+      const res = await authedFetch(`/api/documents`);
       const body = (await res.json()) as { documents: { id: string }[] };
       return body.documents.map((doc) => doc.id);
     };
@@ -256,7 +287,7 @@ describe('GET /api/documents', () => {
   });
 
   it('returns an empty list rather than an error when there is nothing stored', async () => {
-    const res = await fetch(`${baseUrl}/api/documents`);
+    const res = await authedFetch(`/api/documents`);
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { documents: unknown[] };
@@ -268,36 +299,36 @@ describe('DELETE /api/documents/:id', () => {
   it('deletes an existing document', async () => {
     await createDocument('doc-1');
 
-    const res = await fetch(`${baseUrl}/api/documents/doc-1`, { method: 'DELETE' });
+    const res = await authedFetch(`/api/documents/doc-1`, { method: 'DELETE' });
     expect(res.status).toBe(200);
 
-    const after = await fetch(`${baseUrl}/api/documents/doc-1`);
+    const after = await authedFetch(`/api/documents/doc-1`);
     expect(after.status).toBe(404);
   });
 
   it('returns 404 for a document that does not exist', async () => {
-    const res = await fetch(`${baseUrl}/api/documents/ghost`, { method: 'DELETE' });
+    const res = await authedFetch(`/api/documents/ghost`, { method: 'DELETE' });
     expect(res.status).toBe(404);
   });
 });
 
 describe('unknown routes', () => {
   it('returns 404 JSON rather than an HTML error page', async () => {
-    const res = await fetch(`${baseUrl}/nonsense`);
+    const res = await authedFetch(`/nonsense`);
 
     expect(res.status).toBe(404);
     expect(res.headers.get('content-type')).toContain('application/json');
   });
 
   it('rejects an unsupported method on a known path', async () => {
-    const res = await fetch(`${baseUrl}/api/health`, { method: 'DELETE' });
+    const res = await authedFetch(`/api/health`, { method: 'DELETE' });
     expect(res.status).toBe(404);
   });
 });
 
 describe('CORS preflight', () => {
   it('answers OPTIONS with 204 and no body', async () => {
-    const res = await fetch(`${baseUrl}/api/documents`, { method: 'OPTIONS' });
+    const res = await authedFetch(`/api/documents`, { method: 'OPTIONS' });
 
     expect(res.status).toBe(204);
     expect(res.headers.get('access-control-allow-methods')).toContain('PATCH');
@@ -309,13 +340,13 @@ describe('unicode and large payloads', () => {
     await createDocument('uni');
     const content = '👋 héllo — مرحبا 你好';
 
-    await fetch(`${baseUrl}/api/documents/uni`, {
+    await authedFetch(`/api/documents/uni`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
     });
 
-    const res = await fetch(`${baseUrl}/api/documents/uni`);
+    const res = await authedFetch(`/api/documents/uni`);
     const body = (await res.json()) as { document: { content: string } };
     expect(body.document.content).toBe(content);
   });
@@ -324,7 +355,7 @@ describe('unicode and large payloads', () => {
     await createDocument('big');
     const content = 'y'.repeat(500_000);
 
-    const res = await fetch(`${baseUrl}/api/documents/big`, {
+    const res = await authedFetch(`/api/documents/big`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),

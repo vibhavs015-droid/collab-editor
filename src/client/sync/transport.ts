@@ -74,6 +74,18 @@ export interface TransportOptions {
   readonly maxRetryMs?: number;
   /** Max operations buffered while disconnected before the oldest are dropped. */
   readonly maxQueuedOps?: number;
+
+  /**
+   * Produce a session token, called on every connect.
+   *
+   * A function rather than a string, so a reconnect presents a token that is valid
+   * now. A string captured at construction would expire silently and the client
+   * would reconnect forever to a server that had every reason to refuse it.
+   *
+   * @returns the token, or an empty string when none could be obtained. The server
+   *   refuses an empty token, and the resulting reconnect is the recovery path.
+   */
+  readonly resolveToken?: () => Promise<string>;
   /**
    * Log sequence this client already holds when the transport is created.
    *
@@ -89,6 +101,7 @@ export class SyncTransport {
   readonly #documentId: string;
   readonly #handlers: TransportHandlers;
   readonly #socketFactory: (url: string) => WebSocket;
+  readonly #resolveToken: () => Promise<string>;
   readonly #baseRetryMs: number;
   readonly #maxRetryMs: number;
   readonly #maxQueuedOps: number;
@@ -119,6 +132,28 @@ export class SyncTransport {
    */
   #baselineRetries = 0;
 
+  /**
+   * True once the server has answered hello with welcome.
+   *
+   * Distinct from open: a socket can be open and still unauthorised, and sending
+   * anything but hello in that window is refused. Reset on every close so a
+   * reconnect re-runs the handshake rather than assuming the old one still holds.
+   */
+  #admitted = false;
+
+  /**
+   * True once hello has actually been written.
+   *
+   * Both flags are required before anything else is sent. Requiring both rather than
+   * relying on their order means a server frame arriving before the handshake has even
+   * started cannot release the outbox.
+   *
+   * The server is what actually enforces authorisation: it refuses every frame except
+   * hello from an unauthorised socket. This flag is about not spending a reconnect on
+   * operations that would be refused.
+   */
+  #helloSent = false;
+
   constructor(options: TransportOptions) {
     this.#url = options.url;
     this.#documentId = options.documentId;
@@ -127,6 +162,10 @@ export class SyncTransport {
     this.#maxRetryMs = options.maxRetryMs ?? 15_000;
     this.#maxQueuedOps = options.maxQueuedOps ?? 5_000;
     this.#socketFactory = options.socketFactory ?? ((url) => new WebSocket(url));
+    // Default produces an empty token, which the server refuses. That is the honest
+    // failure for a transport constructed without credentials: it connects, is rejected,
+    // and retries. Silently sending something that looks valid would be worse.
+    this.#resolveToken = options.resolveToken ?? (() => Promise.resolve(''));
     this.#seq = options.initialSeq ?? 0;
   }
 
@@ -165,20 +204,15 @@ export class SyncTransport {
 
     this.#socket = socket;
 
+    // A new socket has not been authorised. Clearing here as well as in `onclose`
+    // covers the path where `connect` is called on a live transport.
+    this.#admitted = false;
+    this.#helloSent = false;
+
     socket.onopen = () => {
       this.#attempt = 0;
       this.#setState('open');
-      this.#send({
-        type: 'hello',
-        protocolVersion: PROTOCOL_VERSION,
-        token: 'phase-3-no-auth',
-        documentId: this.#documentId,
-        // `#seq` is what the SERVER has numbered, not what this client has typed. Queued
-        // local operations have no server sequence yet, so claiming them here would
-        // ask the server to skip operations this client has never seen.
-        lastAppliedSeq: this.#seq,
-      });
-      this.#flushOutbox();
+      void this.#sendHello();
     };
 
     socket.onmessage = (event: MessageEvent<string>) => {
@@ -192,6 +226,11 @@ export class SyncTransport {
 
     socket.onclose = () => {
       this.#socket = null;
+      // The handshake does not survive the socket. A reconnect must re-run it, or it
+      // would flush queued operations into a connection the server has not
+      // authorised yet.
+      this.#admitted = false;
+      this.#helloSent = false;
 
       if (this.#disposed || this.#closedByUser) {
         this.#setState('closed');
@@ -304,15 +343,26 @@ export class SyncTransport {
   /**
    * Hand everything queued to the socket.
    *
+   * Requires that the server has said `welcome`. Sending before that is the one
+   * thing this client must never do: the server refuses any frame other than
+   * `hello` from an unauthenticated socket, and its authorisation check is
+   * asynchronous, so operations sent in the gap between `hello` and `welcome` are
+   * rejected and the socket closed. Waiting for the handshake turns what would be a
+   * silent race into an ordinary wait.
+   *
    * The outbox is cleared only after the frame is actually accepted. That ordering
-   * matters: the transport's own state can say `open` while the socket underneath
-   * is already gone — a browser has not yet fired `close` on a connection the
-   * network has dropped. Clearing first would drop the user's keystrokes on the
-   * floor, silently, in exactly the window where the server is unreachable and
-   * they are most needed.
+   * matters too: the transport's own state can say `open` while the socket underneath
+   * is already gone - a browser has not yet fired `close` on a connection the network
+   * has dropped. Clearing first would drop the user's keystrokes on the floor,
+   * silently, in exactly the window where the server is unreachable and they are most
+   * needed.
    */
   #flushOutbox(): void {
     if (this.#outbox.length === 0 || this.#state !== 'open') {
+      return;
+    }
+
+    if (!this.#helloSent || !this.#admitted) {
       return;
     }
 
@@ -345,7 +395,11 @@ export class SyncTransport {
 
     switch (parsed.type) {
       case 'welcome':
+        // The handshake is complete. Anything queued while it was in flight can go
+        // now, and not before.
+        this.#admitted = true;
         this.#handlers.onWelcome(parsed.site);
+        this.#flushOutbox();
         return;
       case 'ops':
         // Operations arrive as opaque JSON. parseOperations is the real narrowing
@@ -426,6 +480,43 @@ export class SyncTransport {
 
   #stateIsOpen(): boolean {
     return this.#state === 'open';
+  }
+
+  /**
+   * Say hello, with whatever token is valid right now.
+   *
+   * A function, not a string, and that is the whole design of token expiry here. The
+   * token is only ever read at `hello`, which happens on every connect, so an expired
+   * token can never be "noticed mid-session" -- it is simply replaced before the next
+   * handshake. That makes expiry a non-event with no timer, no refresh endpoint and
+   * no re-authentication in flight, which is the cheapest correct answer.
+   */
+  async #sendHello(): Promise<void> {
+    let token = '';
+
+    try {
+      token = await this.#resolveToken();
+    } catch {
+      // No token could be obtained. Send hello with an empty one so the server closes
+      // the connection and the retry loop runs. Inventing a token here would turn a
+      // session problem into a confusing authorisation failure.
+    }
+
+    const sent = this.#send({
+      type: 'hello',
+      protocolVersion: PROTOCOL_VERSION,
+      token,
+      documentId: this.#documentId,
+      // `#seq` is what the SERVER has numbered, not what this client has typed. Queued
+      // local operations have no server sequence yet, so claiming them here would
+      // ask the server to skip operations this client has never seen.
+      lastAppliedSeq: this.#seq,
+    });
+
+    if (sent) {
+      this.#helloSent = true;
+      this.#flushOutbox();
+    }
   }
 
   /**

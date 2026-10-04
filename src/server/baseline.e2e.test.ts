@@ -217,7 +217,7 @@ function nextId(): string {
 async function createDocument(id: string): Promise<void> {
   const response = await fetch(`${httpUrl}/api/documents`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer e2e-owner' },
     body: JSON.stringify({ id, title: 'Untitled' }),
   });
 

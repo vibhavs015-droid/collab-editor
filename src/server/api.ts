@@ -15,6 +15,21 @@ import type { Duplex } from 'node:stream';
 
 import type { Database } from './db.js';
 import type { DocumentRecord } from './db.js';
+import { AuthError, OpenAuthenticator, newSubject, type Authenticator } from './auth.js';
+
+/**
+ * Said whenever a document cannot be reached.
+ *
+ * Deliberately does not distinguish "does not exist" from "not yours". A 403 would
+ * tell a caller which document ids are real, and a real document id is the first
+ * half of everything an attacker needs. The cost is that a user following a link to
+ * a document they cannot see is told it does not exist; the wording below is the
+ * compromise, and it is honest rather than merely reassuring.
+ */
+const NOT_FOUND_MESSAGE = 'Document does not exist, or you do not have access to it.';
+
+/** Outcome of identifying the caller. */
+type IdentifyResult = { ok: true; subject: string } | { ok: false; message: string };
 
 export interface ApiServerOptions {
   readonly db: Database;
@@ -22,6 +37,15 @@ export interface ApiServerOptions {
   readonly port?: number;
   /** Escape hatch for tests: called when the server is listening. */
   readonly onListen?: (address: { host: string; port: number }) => void;
+  /**
+   * Verifies session tokens on every document route.
+   *
+   * Defaults to open mode so the test suite and a fresh clone need no secret
+   * configured. Open mode is not security; see ADR-0012. A production server gets
+   * this from {@link resolveAuthenticator}, which refuses to hand back an open
+   * authenticator when NODE_ENV=production.
+   */
+  readonly auth?: Authenticator;
 }
 
 /** Documents are addressed by a URL-safe id. */
@@ -59,6 +83,7 @@ export class ApiServer {
   readonly #host: string;
   readonly #port: number;
   readonly #onListen: ((address: { host: string; port: number }) => void) | undefined;
+  readonly #auth: Authenticator;
   readonly #server: Server;
   /** Registered upgrade routes, checked before any request is handled. */
   readonly #upgrades: UpgradeHandler[] = [];
@@ -69,6 +94,7 @@ export class ApiServer {
     this.#host = options.host ?? '127.0.0.1';
     this.#port = options.port ?? 3001;
     this.#onListen = options.onListen;
+    this.#auth = options.auth ?? new OpenAuthenticator();
     this.#server = createServer((req, res) => {
       void this.#handle(req, res);
     });
@@ -152,7 +178,7 @@ export class ApiServer {
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204).end();
@@ -164,18 +190,61 @@ export class ApiServer {
 
     try {
       if (path === '/api/health' && req.method === 'GET') {
-        sendJson(res, 200, { status: 'ok' });
+        sendJson(res, 200, { status: 'ok', auth: this.#auth.isOpen ? 'open' : 'required' });
+        return;
+      }
+
+      // The one unauthenticated document-adjacent route, because it is how a client
+      // obtains the token every other route requires. It hands out a random subject
+      // and nothing else: no document is read, and no existing subject is disclosed.
+      if (path === '/api/auth/session' && req.method === 'POST') {
+        await this.#issueSession(res);
+        return;
+      }
+
+      // Everything below is about a specific document and needs a caller. Resolved
+      // once, here, so no handler can forget.
+      const identity = await this.#identify(req);
+
+      if (!identity.ok) {
+        // RFC 6750: the challenge tells a client how to authenticate rather than
+        // leaving it to guess.
+        res.setHeader('WWW-Authenticate', 'Bearer realm="collab-editor"');
+        sendError(res, 401, 'UNAUTHORIZED', identity.message);
         return;
       }
 
       if (path === '/api/documents' && req.method === 'GET') {
-        const documents = await this.#db.listDocuments(50);
+        // Scoped to the caller. The global list would disclose every title in the
+        // database to anyone who asked, which is a leak created by adding
+        // authentication rather than closed by it.
+        const documents = await this.#db.listDocumentsFor(identity.subject, 50);
         sendJson(res, 200, { documents });
         return;
       }
 
       if (path === '/api/documents' && req.method === 'POST') {
-        await this.#createDocument(req, res);
+        await this.#createDocument(req, res, identity.subject);
+        return;
+      }
+
+      const collaboratorMatch = /^\/api\/documents\/([^/]+)\/collaborators(?:\/([^/]+))?$/.exec(
+        path,
+      );
+      if (collaboratorMatch) {
+        await this.#handleCollaborators(
+          req,
+          res,
+          collaboratorMatch[1] ?? '',
+          collaboratorMatch[2],
+          identity.subject,
+        );
+        return;
+      }
+
+      const claimMatch = /^\/api\/documents\/([^/]+)\/claim$/.exec(path);
+      if (claimMatch && req.method === 'POST') {
+        await this.#handleClaim(res, claimMatch[1] ?? '', identity.subject);
         return;
       }
 
@@ -197,6 +266,15 @@ export class ApiServer {
           return;
         }
 
+        // The single authorisation gate for a document, and the same decision the
+        // WebSocket path makes. Two implementations of "may I touch this" would
+        // eventually disagree, and the disagreement nobody notices is the permissive
+        // one.
+        if (!(await this.#db.canAccess(id, identity.subject))) {
+          sendError(res, 404, 'DOCUMENT_NOT_FOUND', NOT_FOUND_MESSAGE);
+          return;
+        }
+
         if (req.method === 'GET') {
           await this.#getDocument(id, res);
           return;
@@ -208,12 +286,10 @@ export class ApiServer {
         }
 
         if (req.method === 'DELETE') {
-          const deleted = await this.#db.deleteDocument(id);
-          if (!deleted) {
-            sendError(res, 404, 'NOT_FOUND', 'Document does not exist.');
+          const deleted = await this.#deleteDocument(id, res, identity.subject);
+          if (deleted) {
             return;
           }
-          sendJson(res, 200, { deleted: true });
           return;
         }
       }
@@ -227,7 +303,172 @@ export class ApiServer {
     }
   }
 
-  async #createDocument(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  /**
+   * Mint an anonymous session.
+   *
+   * No rate limit, deliberately. Signing HS256 costs microseconds, so a limit here
+   * would be overhead pretending to be protection. The endpoints worth limiting are
+   * the ones that touch the database, and `helloTimeout` already bounds how often a
+   * socket can make the server do that.
+   */
+  async #issueSession(res: ServerResponse): Promise<void> {
+    const issued = await this.#auth.issue(newSubject());
+
+    sendJson(res, 200, {
+      token: issued.token,
+      subject: issued.subject,
+      expiresAt: issued.expiresAt,
+    });
+  }
+
+  /** Resolve the caller, or explain why it could not. */
+  async #identify(req: IncomingMessage): Promise<IdentifyResult> {
+    const header = req.headers.authorization;
+
+    if (typeof header !== 'string' || header.trim() === '') {
+      return { ok: false, message: 'Provide a session token in the Authorization header.' };
+    }
+
+    // Case-insensitive scheme, per RFC 7235. `startsWith('Bearer ')` would reject a
+    // legitimate `bearer` and is the kind of strictness that becomes a support
+    // question with no security benefit.
+    const match = /^Bearer\s+(\S+)$/i.exec(header.trim());
+
+    if (!match) {
+      return { ok: false, message: 'Authorization header must be "Bearer <token>".' };
+    }
+
+    try {
+      const identity = await this.#auth.verify(match[1] ?? '');
+      return { ok: true, subject: identity.subject };
+    } catch (error) {
+      const message =
+        error instanceof AuthError ? error.message : 'Session token could not be verified.';
+
+      return { ok: false, message };
+    }
+  }
+
+  /**
+   * Delete a document, which only its owner may do.
+   *
+   * Distinct from `canAccess`, because a collaborator may write a document but must
+   * not be able to delete it. Delete is not a write; it is disposal.
+   */
+  async #deleteDocument(id: string, res: ServerResponse, subject: string): Promise<boolean> {
+    const document = await this.#db.getDocument(id);
+
+    // Unowned documents can be deleted by anyone who can reach them, which keeps
+    // them from becoming undeletable clutter nobody owns.
+    if (document !== null && document.owner !== null && document.owner !== subject) {
+      sendError(res, 403, 'FORBIDDEN', 'Only the owner may delete a document.');
+      return true;
+    }
+
+    const deleted = await this.#db.deleteDocument(id);
+
+    if (!deleted) {
+      sendError(res, 404, 'DOCUMENT_NOT_FOUND', NOT_FOUND_MESSAGE);
+    } else {
+      sendJson(res, 200, { deleted: true });
+    }
+
+    return true;
+  }
+
+  /** Grant, revoke or list access. */
+  async #handleCollaborators(
+    req: IncomingMessage,
+    res: ServerResponse,
+    id: string,
+    subject: string | undefined,
+    caller: string,
+  ): Promise<void> {
+    if (!DOCUMENT_ID_PATTERN.test(id)) {
+      sendError(res, 400, 'INVALID_ID', 'Document id contains unsupported characters.');
+      return;
+    }
+
+    const existing = await this.#db.getDocument(id);
+
+    if (existing === null) {
+      sendError(res, 404, 'DOCUMENT_NOT_FOUND', NOT_FOUND_MESSAGE);
+      return;
+    }
+
+    // Owner-only, for both granting and revoking. A collaborator handing out access
+    // is how a document leaks past its owner without anyone noticing.
+    if (existing.owner !== null && existing.owner !== caller) {
+      sendError(res, 403, 'FORBIDDEN', 'Only the owner may change who has access.');
+      return;
+    }
+
+    if (req.method === 'GET' && subject === undefined) {
+      sendJson(res, 200, { collaborators: await this.#db.listCollaborators(id) });
+      return;
+    }
+
+    if (req.method === 'POST' && subject === undefined) {
+      const body = await readJsonBody(req);
+
+      if ('error' in body) {
+        sendError(res, 400, 'INVALID_BODY', body.error);
+        return;
+      }
+
+      const target = body.value['subject'];
+
+      if (typeof target !== 'string') {
+        sendError(res, 400, 'INVALID_BODY', 'Provide a subject to grant access to.');
+        return;
+      }
+
+      const granted = await this.#db.grantAccess(id, target, caller);
+
+      if (!granted) {
+        sendError(res, 400, 'INVALID_BODY', 'That subject cannot be stored.');
+        return;
+      }
+
+      sendJson(res, 200, { granted: true, subject: target });
+      return;
+    }
+
+    if (req.method === 'DELETE' && subject !== undefined) {
+      const revoked = await this.#db.revokeAccess(id, subject, caller);
+
+      if (!revoked) {
+        sendError(res, 403, 'FORBIDDEN', 'Only the owner may change who has access.');
+        return;
+      }
+
+      sendJson(res, 200, { revoked: true, subject });
+      return;
+    }
+
+    sendError(res, 405, 'BAD_MESSAGE', `${req.method} is not supported on collaborators.`);
+  }
+
+  /** Take ownership of an unowned document. */
+  async #handleClaim(res: ServerResponse, id: string, caller: string): Promise<void> {
+    if (!DOCUMENT_ID_PATTERN.test(id)) {
+      sendError(res, 400, 'INVALID_ID', 'Document id contains unsupported characters.');
+      return;
+    }
+
+    const claimed = await this.#db.claimOwnership(id, caller);
+
+    if (!claimed) {
+      // Either it does not exist or somebody already owns it. Saying which would
+      // tell a caller who owns a document they cannot otherwise see.
+      sendError(res, 409, 'DOCUMENT_NOT_FOUND', 'Document is missing or already owned.');
+      return;
+    }
+
+    sendJson(res, 200, { claimed: true, documentId: id });
+  }
+
+  async #createDocument(req: IncomingMessage, res: ServerResponse, subject: string): Promise<void> {
     if (!this.#allowCreate()) {
       sendError(res, 429, 'RATE_LIMITED', 'Too many documents created. Try again later.');
       return;
@@ -264,6 +505,10 @@ export class ApiServer {
     const document = await this.#db.createDocument({
       id,
       title: title ?? 'Untitled',
+      // The caller becomes the owner, so the document stops being world-writable the
+      // moment it is created. Creating it unowned would mean every document anyone
+      // ever makes is readable by anyone who learns its id.
+      owner: subject,
     });
 
     sendJson(res, 201, { document });

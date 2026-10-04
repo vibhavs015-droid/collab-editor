@@ -22,7 +22,7 @@
  * modules that can be tested without a DOM.
  */
 
-import { ApiError, api, newDocumentId } from './api.js';
+import { ApiError, api, newDocumentId, sessionStore } from './api.js';
 import { createEditor, type EditorHandle } from './editor.js';
 import { IndexedDbOperationLog } from './storage/indexedDbLog.js';
 import { EditorBinding, type BindingAnomaly } from './sync/binding.js';
@@ -434,6 +434,11 @@ async function openDocument(documentId: string): Promise<void> {
     transport = new SyncTransport({
       documentId,
       url: socketUrlFor(documentId),
+      // Resolved on every connect, not once at startup. A session token expires, and
+      // the only moment it is read is the handshake -- so re-resolving there means
+      // expiry never becomes something the transport has to notice. See
+      // #sendHello.
+      resolveToken: async () => (await sessionStore.ensure()).token,
       handlers: {
         onOps: (ops) => {
           const result = binding.applyRemote(ops);

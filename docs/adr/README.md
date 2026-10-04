@@ -37,18 +37,18 @@ infer from code.
 | [0009](./0009-operation-log-is-the-document.md)           | The operation log is the document       | Accepted |
 | [0010](./0010-lamport-clock.md)                           | The local clock absorbs observed clocks | Accepted |
 | [0011](./0011-snapshot-compaction.md)                     | Snapshot compaction on causal stability | Accepted |
+| [0012](./0012-authentication-and-ownership.md)            | Auth: anonymous sessions and ownership  | Accepted |
 
 ## Planned
 
 Roughly where decisions are expected to be needed. Each will be written when the
 decision is actually made.
 
-| Phase | Likely decision                                           |
-| ----- | --------------------------------------------------------- |
-| 5     | Auth: real tokens vs. the Phase 3 placeholder             |
-| 5     | Observability stack                                       |
-| 6     | Server fanout: single process vs. pub/sub broker          |
-| 6     | Differentiator: benchmark suite vs. end-to-end encryption |
+| Phase | Likely decision                                  |
+| ----- | ------------------------------------------------ |
+| 5     | Observability stack                              |
+| 6     | Server fanout: single process vs. pub/sub broker |
+| 6     | Differentiator: end-to-end encryption            |
 
 Two entries from the original plan were resolved without a full ADR, because the
 choice was forced rather than weighed:

@@ -8,9 +8,10 @@
 import { WebSocketServer } from 'ws';
 
 import { ApiServer } from './api.js';
+import { AuthError, resolveAuthenticator } from './auth.js';
 import { Database } from './db.js';
 import { DocumentStore } from './documentStore.js';
-import { Relay } from './relay.js';
+import { Relay, type AuthorizeResult } from './relay.js';
 
 /** Where PGlite persists. Relative to the repo root, and gitignored. */
 const DATA_DIR = process.env['PGLITE_DATA_DIR'] ?? './.data/pgdata';
@@ -62,8 +63,59 @@ async function shutdown(
 }
 
 async function main(): Promise<void> {
+  // Resolved before anything else opens, because it can throw. A misconfigured
+  // authentication setup must stop the process at startup rather than leave a server
+  // running that looks fine and serves everyone's documents to anyone who asks.
+  const { authenticator, summary } = resolveAuthenticator(process.env);
+
+  if (authenticator.isOpen) {
+    // Loud, because this is the state nobody should ship by accident.
+    process.stderr.write('[server] WARNING: authentication is OPEN. Anyone who can reach\n');
+    process.stderr.write('[server]          this port can read and write every document.\n');
+    process.stderr.write('[server]          Set JWT_SECRET before exposing it.\n');
+  }
+
+  process.stdout.write(`[server] ${summary}\n`);
+
   const db = await Database.openAt(DATA_DIR);
   process.stdout.write(`[server] database ready at ${DATA_DIR}\n`);
+
+  /**
+   * The one authorisation decision, shared by HTTP and WebSocket.
+   *
+   * Both surfaces call this. Two implementations of "may I touch this document" would
+   * eventually disagree, and the disagreement nobody notices is the permissive one.
+   */
+  const authorize = async (documentId: string, token: string): Promise<AuthorizeResult> => {
+    let subject: string;
+
+    try {
+      subject = (await authenticator.verify(token)).subject;
+    } catch (error) {
+      // The reason goes to the server log and NOT to the client: "expired" and
+      // "bad-signature" need different responses from whoever operates this, and a
+      // log line costs nothing. Telling the client which one it was tells an
+      // attacker too.
+      const reason = error instanceof AuthError ? error.reason : 'unknown';
+      process.stderr.write(`[server] rejected session for ${documentId}: ${reason}\n`);
+
+      return { ok: false, code: 'UNAUTHORIZED', message: 'Session is not valid.' };
+    }
+
+    // canAccess returns false both for a document that does not exist and one this
+    // subject may not touch, so this cannot be used to enumerate document ids.
+    const allowed = await db.canAccess(documentId, subject);
+
+    if (!allowed) {
+      return {
+        ok: false,
+        code: 'DOCUMENT_NOT_FOUND',
+        message: 'Document does not exist, or you do not have access to it.',
+      };
+    }
+
+    return { ok: true, subject };
+  };
 
   // One store per process, shared by the relay and the API. The relay writes
   // through it; the API reads the text it materialises.
@@ -76,6 +128,11 @@ async function main(): Promise<void> {
       // recover instead of losing the gap.
       readSince: (documentId, sinceSeq, limit) => store.readSince(documentId, sinceSeq, limit),
     },
+
+    // The token arrives in `hello`, not in the URL. Query strings end up in proxy
+    // logs, browser history and Referer headers, and a bearer token in any of those
+    // is a credential that has already leaked.
+    authorize,
 
     // Feeds the causal-stability floor. Compaction prunes only below the lowest
     // cursor reported here, so a peer that has not caught up keeps the history it
@@ -120,6 +177,7 @@ async function main(): Promise<void> {
 
   const server = new ApiServer({
     db,
+    auth: authenticator,
     host: process.env['HOST'] ?? '127.0.0.1',
     port: Number(process.env['PORT'] ?? 3001),
   });

@@ -65,6 +65,27 @@ class FakeSocket {
     this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent<string>);
   }
 
+  /**
+   * The handshake the real server performs: open, then welcome.
+   *
+   * `welcome` is not decoration. The server refuses every frame except `hello` from
+   * an unauthorised socket, so a client must wait for `welcome` before it sends
+   * anything else. A test that only triggers `open` is testing a connection the
+   * server would have refused.
+   */
+  admit(site = 'server-site'): void {
+    this.triggerOpen();
+
+    this.deliver({
+      type: 'welcome',
+      protocolVersion: 1,
+      site,
+      documentId: 'doc-1',
+      snapshot: [],
+      seq: 0,
+    });
+  }
+
   /** Deliver a raw, possibly malformed frame. */
   deliverRaw(data: string): void {
     this.onmessage?.({ data } as MessageEvent<string>);
@@ -94,7 +115,13 @@ interface Harness {
   readonly baselines: Baseline[];
 }
 
-function harness(options: { baseRetryMs?: number; maxRetryMs?: number } = {}): Harness {
+function harness(
+  options: {
+    baseRetryMs?: number;
+    maxRetryMs?: number;
+    resolveToken?: () => Promise<string>;
+  } = {},
+): Harness {
   const states: ConnectionState[] = [];
   const ops: Operation[] = [];
   const cursors: Record<string, number>[] = [];
@@ -134,6 +161,7 @@ function harness(options: { baseRetryMs?: number; maxRetryMs?: number } = {}): H
     socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     baseRetryMs: options.baseRetryMs ?? 100,
     maxRetryMs: options.maxRetryMs ?? 5000,
+    ...(options.resolveToken === undefined ? {} : { resolveToken: options.resolveToken }),
   });
 
   return { transport, states, ops, cursors, errors, sites, pending, baselines };
@@ -298,14 +326,139 @@ describe('SyncTransport', () => {
       expect(h.transport.state).toBe('open');
     });
 
-    it('sends hello on open with the current protocol version', () => {
+    it('sends hello on open with the current protocol version', async () => {
       const h = harness();
       h.transport.connect();
       FakeSocket.last().triggerOpen();
 
+      // `hello` is sent from an async method because the token is resolved per
+      // connect. Without a tick the frame has not been written yet, and asserting
+      // here would be asserting on the wrong moment.
+      await Promise.resolve();
+
       const hello = FakeSocket.last().parsedSent()[0];
       expect(hello?.['type']).toBe('hello');
       expect(hello?.['documentId']).toBe('doc-1');
+    });
+
+    it('resolves a token on every connect rather than reusing one', async () => {
+      // The reason `resolveToken` is a function. A token captured at construction
+      // would expire, and the client would reconnect forever to a server that had
+      // every reason to refuse it.
+      let issued = 0;
+      const h = harness({ resolveToken: () => Promise.resolve(`token-${(issued += 1)}`) });
+
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      FakeSocket.last().triggerClose();
+      // Let the retry timer fire, so a genuinely NEW socket is created.
+      vi.advanceTimersByTime(10_000);
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      expect(FakeSocket.instances).toHaveLength(2);
+
+      const hellos = FakeSocket.instances
+        .flatMap((socket) => socket.parsedSent())
+        .filter((frame) => frame['type'] === 'hello');
+
+      expect(hellos).toHaveLength(2);
+      expect(hellos[0]?.['token']).toBe('token-1');
+      expect(hellos[1]?.['token']).toBe('token-2');
+    });
+
+    it('sends hello with an empty token when none can be obtained', async () => {
+      // The server closes such a connection and the retry loop runs. Inventing a
+      // token here would turn a session problem into a confusing authorisation
+      // failure.
+      const h = harness({
+        resolveToken: () => Promise.reject(new Error('offline')),
+      });
+
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      const hello = FakeSocket.last().parsedSent()[0];
+      expect(hello).toMatchObject({ type: 'hello', token: '' });
+    });
+
+    it('withholds queued operations until the server has admitted the client', async () => {
+      // The race the handshake exists to prevent: operations sent between `hello`
+      // and `welcome` are refused, because the server's authorisation check is
+      // asynchronous and the socket is unauthorised until it completes.
+      const h = harness();
+      h.transport.connect();
+
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      h.transport.send(sampleOps);
+      expect(h.transport.queuedOperationCount).toBe(1);
+      expect(
+        FakeSocket.last()
+          .parsedSent()
+          .some((f) => f['type'] === 'ops'),
+      ).toBe(false);
+
+      FakeSocket.last().deliver({
+        type: 'welcome',
+        protocolVersion: 1,
+        site: 'server-site',
+        documentId: 'doc-1',
+        snapshot: [],
+        seq: 0,
+      });
+
+      // Now, and only now.
+      expect(h.transport.queuedOperationCount).toBe(0);
+      expect(
+        FakeSocket.last()
+          .parsedSent()
+          .some((f) => f['type'] === 'ops'),
+      ).toBe(true);
+    });
+
+    it('does not write operations before hello has gone out', async () => {
+      // `welcome` arriving early must not be enough on its own. Both the hello write
+      // and the welcome are required, so a server frame that arrives before the
+      // handshake has even started cannot release the outbox.
+      const h = harness();
+      h.transport.connect();
+
+      FakeSocket.last().deliver({
+        type: 'welcome',
+        protocolVersion: 1,
+        site: 'server-site',
+        documentId: 'doc-1',
+        snapshot: [],
+        seq: 0,
+      });
+
+      FakeSocket.last().triggerOpen();
+
+      // Synchronously, before the token resolves and hello is written.
+      h.transport.send(sampleOps);
+
+      expect(h.sites).toEqual(['server-site']);
+      expect(h.transport.queuedOperationCount).toBe(1);
+      expect(
+        FakeSocket.last()
+          .parsedSent()
+          .some((f) => f['type'] === 'ops'),
+      ).toBe(false);
+
+      // Once hello is on the wire the handshake genuinely is complete.
+      await Promise.resolve();
+
+      expect(h.transport.queuedOperationCount).toBe(0);
+      expect(
+        FakeSocket.last()
+          .parsedSent()
+          .some((f) => f['type'] === 'ops'),
+      ).toBe(true);
     });
 
     it('reports the assigned site once welcomed', () => {
@@ -350,10 +503,11 @@ describe('SyncTransport', () => {
   });
 
   describe('sending operations', () => {
-    it('sends immediately when connected', () => {
+    it('sends immediately once the server has admitted the client', async () => {
       const h = harness();
       h.transport.connect();
-      FakeSocket.last().triggerOpen();
+      FakeSocket.last().admit();
+      await Promise.resolve();
 
       h.transport.send(sampleOps);
 
@@ -364,7 +518,7 @@ describe('SyncTransport', () => {
       expect(h.transport.queuedOperationCount).toBe(0);
     });
 
-    it('queues while offline and flushes on reconnect', () => {
+    it('queues while offline and flushes once admitted', async () => {
       const h = harness();
 
       // Never connected: edits must survive.
@@ -372,7 +526,8 @@ describe('SyncTransport', () => {
       expect(h.transport.queuedOperationCount).toBe(1);
 
       h.transport.connect();
-      FakeSocket.last().triggerOpen();
+      FakeSocket.last().admit();
+      await Promise.resolve();
 
       // hello, then the queued batch.
       const frames = FakeSocket.last().parsedSent();
@@ -388,7 +543,7 @@ describe('SyncTransport', () => {
       expect(h.pending.at(-1)).toEqual({ state: 'pending', count: 1 });
     });
 
-    it('preserves order across a queue', () => {
+    it('preserves order across a queue', async () => {
       const h = harness();
       const ordered: Operation[] = [
         { type: 'insert', id: { site: 'a', clock: 1 }, origin: null, value: '1' },
@@ -398,7 +553,8 @@ describe('SyncTransport', () => {
 
       h.transport.send(ordered);
       h.transport.connect();
-      FakeSocket.last().triggerOpen();
+      FakeSocket.last().admit();
+      await Promise.resolve();
 
       const opsFrame = FakeSocket.last()
         .parsedSent()

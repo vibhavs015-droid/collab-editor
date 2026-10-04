@@ -42,6 +42,8 @@
 import { SignJWT, errors as joseErrors, jwtVerify } from 'jose';
 import { randomBytes } from 'node:crypto';
 
+import { isValidSubject, SUBJECT_RULE_MESSAGE } from '../shared/subject.js';
+
 /** How long an issued session token stays valid. */
 export const DEFAULT_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -55,13 +57,17 @@ export const MIN_SECRET_BYTES = 32;
 /**
  * Shape a subject must have to be usable as an owner or collaborator.
  *
- * Applied to every subject, including one read out of a signed token. A signed
- * token is only as trustworthy as whoever holds the signing secret, and this
- * removes any question of a subject carrying characters that were never meant to
- * reach a database key or the DOM.
+ * The rule itself lives in shared/subject.ts because it is not only a token concern:
+ * a subject also arrives as a collaborator grant in a request body, and validating
+ * it only on the token path left arbitrary text going straight into a database key.
  */
-const SUBJECT_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
+function assertUsableSubject(subject: string): string {
+  if (!isValidSubject(subject)) {
+    throw new AuthError('bad-subject', SUBJECT_RULE_MESSAGE);
+  }
 
+  return subject;
+}
 /** Why a token was rejected. Every value maps to a 401. */
 export type AuthFailure =
   'missing' | 'malformed' | 'bad-signature' | 'expired' | 'wrong-audience' | 'bad-subject';
@@ -108,17 +114,6 @@ export function newSubject(): string {
   // not need to be a UUID; it needs to be collision-free and unguessable enough
   // that guessing one is not an attack.
   return randomBytes(16).toString('base64url');
-}
-
-function assertUsableSubject(subject: string): string {
-  if (!SUBJECT_PATTERN.test(subject)) {
-    throw new AuthError(
-      'bad-subject',
-      'Subject must be 1-128 characters of A-Z, a-z, 0-9, underscore, dot, colon or hyphen.',
-    );
-  }
-
-  return subject;
 }
 
 /**

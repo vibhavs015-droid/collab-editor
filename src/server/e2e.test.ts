@@ -33,6 +33,28 @@ let db: Database;
 let server: ApiServer;
 let baseUrl: string;
 
+/**
+ * The caller these tests act as.
+ *
+ * The server runs in open mode, where the token is the subject, so a fixed string
+ * is a real subject and every document these tests create is owned by it. Fetching
+ * a genuine token would test the session endpoint here, which has its own tests.
+ */
+const SUBJECT = 'e2e-subject';
+
+/** fetch with credentials attached. Every document route requires them. */
+function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(
+    init.headers instanceof Headers ? init.headers : (init.headers ?? {}),
+  );
+
+  headers.set('Authorization', `Bearer ${SUBJECT}`);
+
+  const url = baseUrl + path;
+
+  return fetch(url, { ...init, headers });
+}
+
 /** Text that breaks under almost every encoding mistake. */
 const UNICODE_PROBE = 'Line one\nLine two — 👋 مرحبا 你好';
 
@@ -48,7 +70,7 @@ beforeAll(async () => {
   });
   await server.listen();
 
-  await fetch(`${baseUrl}/api/documents`, {
+  await authedFetch(`/api/documents`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: 'e2e-unicode' }),
@@ -65,13 +87,13 @@ describe('content-type declares utf-8', () => {
     // Without the explicit charset, a client is free to guess Latin-1 and
     // silently mangle any non-ASCII text. This is a one-line fix on the server
     // that prevents an entire category of data corruption downstream.
-    const res = await fetch(`${baseUrl}/api/health`);
+    const res = await authedFetch(`/api/health`);
 
     expect(res.headers.get('content-type')).toBe('application/json; charset=utf-8');
   });
 
   it('is present on error responses too', async () => {
-    const res = await fetch(`${baseUrl}/api/documents/does-not-exist`);
+    const res = await authedFetch(`/api/documents/does-not-exist`);
 
     expect(res.status).toBe(404);
     expect(res.headers.get('content-type')).toBe('application/json; charset=utf-8');
@@ -80,13 +102,13 @@ describe('content-type declares utf-8', () => {
 
 describe('unicode survives the full round trip', () => {
   it('is stored and returned byte-identically', async () => {
-    await fetch(`${baseUrl}/api/documents/e2e-unicode`, {
+    await authedFetch(`/api/documents/e2e-unicode`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: UNICODE_PROBE }),
     });
 
-    const res = await fetch(`${baseUrl}/api/documents/e2e-unicode`);
+    const res = await authedFetch(`/api/documents/e2e-unicode`);
     const bytes = new Uint8Array(await res.arrayBuffer());
 
     // Decode explicitly rather than trusting the harness's default. If the
@@ -111,24 +133,24 @@ describe('unicode survives the full round trip', () => {
     // Guards against someone "fixing" a future encoding issue by escaping
     // values into the query string instead of using parameters.
     const hostile = '\'; DROP TABLE documents; -- ✅ \\ " \n\t';
-    await fetch(`${baseUrl}/api/documents`, {
+    await authedFetch(`/api/documents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: 'e2e-hostile' }),
     });
-    await fetch(`${baseUrl}/api/documents/e2e-hostile`, {
+    await authedFetch(`/api/documents/e2e-hostile`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: hostile }),
     });
 
-    const res = await fetch(`${baseUrl}/api/documents/e2e-hostile`);
+    const res = await authedFetch(`/api/documents/e2e-hostile`);
     const parsed = (await res.json()) as { document: { content: string } };
 
     expect(parsed.document.content).toBe(hostile);
 
     // Table still exists, so the value stayed data.
-    const list = (await (await fetch(`${baseUrl}/api/documents`)).json()) as {
+    const list = (await (await authedFetch(`/api/documents`)).json()) as {
       documents: { id: string }[];
     };
     expect(list.documents.length).toBeGreaterThanOrEqual(2);
@@ -137,7 +159,7 @@ describe('unicode survives the full round trip', () => {
 
 describe('error responses are well-formed JSON', () => {
   it('reports a structured error, not a bare string', async () => {
-    const res = await fetch(`${baseUrl}/api/documents/bad id`);
+    const res = await authedFetch(`/api/documents/bad id`);
 
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { code: string; message: string } };

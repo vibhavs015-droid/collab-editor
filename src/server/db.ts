@@ -35,6 +35,7 @@ import {
   type DocumentSnapshot,
   type SnapshotElement,
 } from '../core/crdt/snapshot.js';
+import { isValidSubject } from '../shared/subject.js';
 
 /** One saved document. */
 export interface DocumentRecord {
@@ -484,6 +485,13 @@ export class Database {
    *   statement, which is what stops a concurrent owner change racing the grant.
    */
   async grantAccess(documentId: string, subject: string, grantedBy: string): Promise<boolean> {
+    // Validated here, not only where tokens are verified. This arrives from a
+    // request body, and without the check arbitrary text went straight into a
+    // primary key that is also rendered in a collaborator list. See shared/subject.ts.
+    if (!isValidSubject(subject)) {
+      return false;
+    }
+
     const result = await this.#pg.query<{ id: string }>(
       `INSERT INTO document_collaborators (document_id, subject)
        SELECT id, $2 FROM documents
@@ -503,6 +511,12 @@ export class Database {
    *   did nothing would leave access in place while reporting success.
    */
   async revokeAccess(documentId: string, subject: string, revokedBy: string): Promise<boolean> {
+    // Same rule as grantAccess: an unusable subject can never have been granted, so
+    // this cannot revoke anything. Refused rather than run as a pointless query.
+    if (!isValidSubject(subject)) {
+      return false;
+    }
+
     const owned = await this.#isOwner(documentId, revokedBy);
 
     if (!owned) {
@@ -529,6 +543,10 @@ export class Database {
    * @returns false when the document does not exist or is already owned.
    */
   async claimOwnership(documentId: string, subject: string): Promise<boolean> {
+    if (!isValidSubject(subject)) {
+      return false;
+    }
+
     const result = await this.#pg.query<{ id: string }>(
       `UPDATE documents SET owner = $2
         WHERE id = $1 AND owner IS NULL
@@ -556,6 +574,23 @@ export class Database {
     );
 
     return result.rows.length > 0;
+  }
+
+  /**
+   * Delete every document, and everything that cascades from it.
+   *
+   * For tests that would otherwise boot a fresh in-memory Postgres per case. Booting
+   * PGlite costs roughly two seconds, which dominates any suite with more than a
+   * handful of cases. Truncating keeps genuine isolation, because `documents`
+   * cascades to `document_ops`, `document_collaborators` and `document_snapshots`.
+   *
+   * Not exposed over HTTP. An endpoint that empties the database is the kind of thing
+   * that gets added "temporarily" and then, well, stays.
+   */
+  async truncateAll(): Promise<void> {
+    // RESTART IDENTITY too. A leftover sequence would make ids differ between runs
+    // in a way that stays invisible until something asserts on them.
+    await this.#pg.exec('TRUNCATE documents RESTART IDENTITY CASCADE');
   }
 
   /**

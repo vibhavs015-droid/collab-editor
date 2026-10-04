@@ -277,6 +277,92 @@ branch was unreachable because the bug was unreachable.
 
 ---
 
+## Phase 5 — Authentication
+
+605 tests, 27 files. This is the item that closed a real hole rather than adding
+capability, so it got the most scrutiny.
+
+### What was built
+
+| Module                           | Why it exists                                                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `server/auth.ts`                 | HS256 sessions with a pinned algorithm and required claims; an open-mode class that is refused in production |
+| `shared/subject.ts`              | One rule for what a subject is, used by both the token path and the database                                 |
+| migration `0004`                 | `documents.owner` plus a `document_collaborators` grant table                                                |
+| `db.ts` → `canAccess`            | The single authorisation decision both transports call                                                       |
+| `relay.ts` → `authorize`         | Authorise at `hello`; pending sockets live in a set of their own                                             |
+| `api.ts`                         | Bearer middleware, scoped listing, grants, claim                                                             |
+| `client/api.ts` → `SessionStore` | Token per connect, renewed an hour early, one retry on 401                                                   |
+
+### The four real findings
+
+`jwtVerify` **accepts a token with no `exp` claim at all.** Expiry is checked when
+present, not demanded. A signed token with the expiry stripped would have been a
+permanent credential and nothing would ever report it. `requiredClaims` now names
+`exp`, `sub`, `iss` and `aud`. I only found this because I wrote a test asserting
+the token is rejected, and it wasn't.
+
+`AUTH_MODE=required` outside production silently fell through to open mode. The flag
+was decorative.
+
+`grantAccess` never validated the subject shape, so arbitrary text from a request
+body went straight into a database primary key that is also rendered in a
+collaborator list. The rule now lives in `shared/subject.ts` and both paths use it.
+
+Making the hello send asynchronous **introduced a race I had not seen for three
+phases**: queued operations flushed immediately after `hello` was written, while the
+server's authorisation check was still awaiting the database. The server refused them
+and closed the socket. The fix is a real handshake — open, then hello written, then
+welcome received — and only then may anything else be sent. Both flags are required
+rather than relying on their order.
+
+### Two test bugs, same mistake twice
+
+A presence broadcast goes to everyone in the room **except the sender**, so a lone
+client observing her own presence sees nothing and I wrote the test backwards.
+
+A document id that always resolved to `'default'` turned a per-document
+authorisation test into one that only ever checked a single document — which passed
+for entirely the wrong reason. `socket.url` is not populated the way the upgrade
+request's URL is; the document id has to come from `request.url`.
+
+Both are recorded because "the test was wrong, not the code" is the conclusion that
+is easiest to skip and most expensive to get wrong.
+
+### Test suite performance
+
+`httpAuth.test.ts` took 102 seconds, almost all of it booting PGlite once per test.
+`Database.truncateAll()` truncates `documents` with `CASCADE`, which is real
+isolation — `documents` cascades to `document_ops`, `document_collaborators` and
+`document_snapshots` — for one boot per file. **102s → 1.9s.**
+
+The rule that mattered: sharing a database _without_ resetting it would have made
+exact-list assertions order-dependent, which fails confusingly rather than loudly.
+
+### Known limitations
+
+- **Anonymous subjects are not identity.** Two browser profiles are two subjects with
+  no way to prove they are the same person, and there is no recovery: clear site
+  data and the old documents are unreachable. A `POST /api/documents/:id/claim` lets
+  an unowned document stop being world-writable, but there is no way to find yours if
+  you have lost your token.
+- **Unowned documents are world-writable.** Every document created before migration
+  0004, and every document created outside the API, is readable and writable by
+  anyone who learns its id. `claim` is the exit, and it is not automatic.
+- **There is a race on claiming.** Any two subjects can race for an unowned document
+  and the first wins. That is the price of keeping pre-authentication data working;
+  the alternative is `NOT NULL` plus a backfill that assigns every existing document
+  to a sentinel owner.
+- **Collaborating means sharing a subject out of band.** The API can grant access; no
+  UI does, because a share UI is CRUD. Two people collaborating today means one
+  tells the other their subject.
+- **The token lives in memory only.** Clearing site data loses it. Persisting to
+  `localStorage` would make it readable by any script on the origin.
+- Peer cursors are still self-reported and unverified; a client claiming to have
+  applied a sequence it has not would let the server prune too far.
+
+---
+
 ## Phase 4 — Offline-first
 
 397 tests, 19 files. ~155s, still dominated by PGlite boots.

@@ -218,7 +218,7 @@ async function openPeer(
 async function createDocument(id: string): Promise<void> {
   const response = await fetch(`${baseUrl}/api/documents`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer e2e-owner' },
     body: JSON.stringify({ id, title: 'Untitled' }),
   });
 

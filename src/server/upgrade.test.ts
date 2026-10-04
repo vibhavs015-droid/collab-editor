@@ -121,7 +121,9 @@ describe('HTTP and WebSocket on one port', () => {
     const res = await fetch(`${baseUrl}/api/health`);
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: 'ok' });
+    // `auth` rides along so a probe can tell a secured server from an open one. This
+    // test server has no secret configured, so it is open.
+    expect(await res.json()).toEqual({ status: 'ok', auth: 'open' });
   });
 
   it('accepts a WebSocket upgrade on /ws', async () => {

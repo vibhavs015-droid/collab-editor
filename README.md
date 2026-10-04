@@ -197,20 +197,31 @@ Code shows what was built; only documentation shows what was rejected.
 
 Stated explicitly rather than left for a reviewer to discover.
 
-- **`document_ops` is one row per character and grows forever.** A 10,000-character
-  document is 10,000 JSONB rows. Needs compaction — tombstone squashing plus
-  periodic snapshots — before this scales past a demo.
+- **`document_ops` is one row per character, but compaction now prunes it.**
+  Snapshots preserve element IDs and compaction is gated on causal stability, so the
+  log stays bounded while clients are connected. It is not bounded for a document
+  nobody is editing.
 - **The local IndexedDB log is capped, not compacted.** Past 50,000 entries the
   oldest are dropped, which breaks replay for a log that referenced them. A real
-  policy needs snapshot-and-truncate.
-- No authentication, so document ids are the only access control. Phase 5.
+  policy needs snapshot-and-truncate. A client that prunes below the server's
+  compaction floor is served a baseline, so it converges — it just wastes a frame.
+- **Authentication is anonymous, and that has limits.** A session is a signed token
+  carrying a random subject; there are no accounts. Two browser profiles are two
+  subjects with no way to prove they are the same person, and clearing site data
+  loses access to your documents. `POST /api/documents/:id/claim` takes ownership of
+  an unowned document. See [ADR-0012](./docs/adr/0012-authentication-and-ownership.md).
+- **Documents created outside the API are world-writable.** `owner IS NULL` means
+  anyone with the id may read and write, which is what kept pre-authentication data
+  working.
+- **There is a race on claiming an unowned document.** First subject to claim wins.
 - Rate limiting is per-process and in-memory, so it resets on restart.
 - Security has **not** been independently reviewed. Input validation covers
-  protocol framing, request bodies and CRDT operations, not authorisation.
+  protocol framing, request bodies and CRDT operations; authorisation is now
+  covered by tests, but no one outside this repository has read it.
 - Client bundle is 297 kB (96 kB gzipped), mostly CodeMirror.
-- The test suite takes ~2.5 minutes, dominated by Postgres start-up per suite.
-- The WebSocket token is the Phase 3 placeholder `'phase-3-no-auth'`. There is no
-  authentication, so a document id is the only access control. Phase 5.
+- The test suite takes ~3 minutes, dominated by Postgres start-up per suite. Files
+  that need many cases share one boot and truncate between tests; see
+  `Database.truncateAll`.
 
 ---
 
