@@ -112,6 +112,44 @@ Three rules learned along the way, each encoded as a test:
 
 ---
 
+## Benchmarks
+
+Recorded, with raw output committed. Full method, and what the numbers do **not** mean:
+[`docs/benchmarks.md`](docs/benchmarks.md).
+
+| Scenario     | Shape                                            | Result                                                               |
+| ------------ | ------------------------------------------------ | -------------------------------------------------------------------- |
+| `connect`    | 50 concurrent, 20 s ramp                         | **4,086** handshakes, p95 **212 ms**, 0 refusals                     |
+| `edit`       | 20 concurrent editors                            | **42,345** ops at **1,411/s**, fanned out to 536,602 at **17,876/s** |
+| `reconnect`  | 10 clients vanishing and returning               | **150** reconnects, **100%** readmitted, catch-up p95 **31 ms**      |
+| `divergence` | 25 clients, 30% deletes of each other's elements | **76,870** ops at **2,478/s**, **0 unplaced**                        |
+| convergence  | 24 real replicas contending for 60 rounds        | **0** diverged, **0** invariant violations                           |
+
+Reproduce with `npm run load:connect` (or `load:edit`, `load:reconnect`, `load:divergence`).
+
+**These are not production throughput figures**, and the benchmark document says so at
+length: PGlite is in-process WASM with no network hop, there is one Node thread, the
+laptop is shared, and everything runs on loopback with no latency. What they are good
+for is showing the relay, the CRDT and the compaction floor behave correctly under
+concurrency, and giving a baseline to catch regressions against.
+
+Two things worth singling out, because they are the claims that matter:
+
+- **The server's own counters agree with the client's** on every run. A load generator
+  that merely believed its own successes would agree with itself just as happily.
+- **`collab_operations_unplaced_total` was zero** across every run. An operation that
+  cannot be placed is one some peer is still waiting for, and if it never arrives that
+  peer stays silently behind. A latency benchmark reports success while documents
+  quietly diverge underneath it.
+
+k6 cannot import this package's TypeScript, so `divergence.js` cannot verify convergence
+without writing a second RGA in JavaScript. It drives contention and reads the server's
+verdict instead;
+[`loadConvergence.test.ts`](src/server/loadConvergence.test.ts) does the convergence check
+with the real `Replica`, and runs in CI.
+
+---
+
 ## Verification
 
 | Gate            | Command                        | Result      |

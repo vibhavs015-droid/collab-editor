@@ -464,6 +464,125 @@ slow requests happened".
 
 ---
 
+## Phase 5 — Load testing, and the benchmarks it produced
+
+The suite exists because "it is correct" and "here is what it does" are different claims,
+and only one of them is checkable by a reviewer.
+
+### What was built
+
+| Module                                                | Why it exists                                                               |
+| ----------------------------------------------------- | --------------------------------------------------------------------------- |
+| `scripts/load/run.mjs`                                | Starts a production-mode server, runs k6, captures the server's own metrics |
+| `scripts/load/lib/auth.js`                            | Mints **real** HS256 tokens inside k6                                       |
+| `scripts/load/lib/protocol.js`                        | Handshake, frame handling, valid operation generation                       |
+| `connect.js` `edit.js` `reconnect.js` `divergence.js` | The four scenarios                                                          |
+| `src/server/loadConvergence.test.ts`                  | Convergence under load, using the **real** `Replica`                        |
+| `docs/benchmarks.md`                                  | The numbers, the method, and what they do not mean                          |
+
+### The design decision that mattered
+
+**k6 does not verify convergence, and cannot honestly.**
+
+k6 cannot import this package's TypeScript. Checking convergence inside it would mean
+writing a second RGA in JavaScript: a second, separately wrong implementation of the
+algorithm under test, disagreeing for reasons that have nothing to do with the real
+CRDT. That is the same mistake as the test that hand-derived CRDT ordering and was wrong.
+
+So the jobs are split. `divergence.js` generates maximum contention and reads the server's
+verdict — `collab_operations_unplaced_total`, which is zero. And
+`loadConvergence.test.ts` verifies convergence with the real `Replica`, over a real
+relay, with real authorisation: 24 replicas inserting and deleting simultaneously for 60
+rounds, all ending with identical documents and no invariant violations.
+
+### Every one of these produced a plausible, WRONG benchmark
+
+Not a crash. A clean exit code and a number that meant something else.
+
+| Trap                                                            | What it looked like                                                                                                                                                                |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `k6/ws` sockets have no `readyState`                            | A `readyState === 1` guard dropped **every operation**. One burst per client, no server broadcast — indistinguishable from a server that went quiet                                |
+| `WebSocket.open` is gone in k6 v2                               | The export is a bare `connect`. The old name fails with `Cannot read property 'open' of undefined`                                                                                 |
+| Timers do not fire inside a websocket callback                  | `setInterval` and `setTimeout` both silently never ran. Bursts are now driven by incoming frames, which is a better model of typing anyway                                         |
+| `sleep()` inside a websocket callback stops after one iteration | Same shape of failure: one burst, then silence                                                                                                                                     |
+| k6's `sleep` takes **seconds**                                  | `sleep(1000)` meant a thousand seconds. The teardown timed out and the whole run was reported as a script exception                                                                |
+| **`K6_*` is k6's configuration namespace**                      | A custom `K6_DURATION` silently overrode the scenario's own duration. Every knob is now `LOAD_*`                                                                                   |
+| `connect()` blocks for the socket's lifetime                    | A scenario that does not close explicitly hangs its VU, and **everything recorded after the call records nothing** — a rate reported as `0 out of 0` rather than as a number       |
+| k6 `hmac` returns a base64 _string_                             | Base64url needs that string converted, not base64-encoded again. Double-encoding yields a well-formed token that never verifies — which looks exactly like "the load test is slow" |
+
+### Two harness bugs that reported clean exits while measuring nothing
+
+Both are why `run.mjs` now checks the result rather than trusting the exit code.
+
+1. **`--quiet` hid a total failure.** Every iteration was throwing, zero samples were
+   recorded, and k6 still exited 0 — because thresholds on an absent metric are silently
+   ignored. The harness now asserts that samples were recorded.
+2. **`setup()`'s own checks satisfied that first guard.** Two setup checks were enough to
+   pass it while every scenario iteration hung. It now also asserts that iterations
+   completed.
+
+### A measurement bug worth recording
+
+The first `connect.js` reported a **74-second handshake**. k6's `connect` blocks for the
+socket's lifetime, so timing around the call measures the whole ramped session. The
+handshake is now timed inside the `welcome` handler, which is the only moment it is
+genuinely complete. The real figure is 212 ms at p95.
+
+The same class of bug appeared twice more: a clock-value trend labelled as a duration,
+and a burst-latency trend measured around a non-blocking call, which is always ~0 ms.
+
+### Results
+
+Recorded, with raw output committed in `docs/benchmarks/`. i5-12500H, 16 threads,
+Windows 11, Node 24.16.0, k6 2.3.0, PGlite in-process, auth **required**.
+
+| Scenario     | What                                             | Result                                                                           |
+| ------------ | ------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `connect`    | 50 concurrent, 20 s ramp                         | **4,086** handshakes, p95 **212 ms**, 0 refusals                                 |
+| `edit`       | 20 concurrent editors                            | **42,345** ops at **1,411/s**, fanned out to 536,602 at **17,876/s**, 0 unplaced |
+| `reconnect`  | 10 clients vanishing and returning               | **150** reconnects, **100%** readmitted, catch-up p95 **31 ms**                  |
+| `divergence` | 25 clients, 30% deletes of each other's elements | **76,870** ops at **2,478/s**, **0 unplaced**                                    |
+| convergence  | 24 real replicas, 60 rounds                      | **0** diverged, **0** invariant violations                                       |
+
+The server's independent counters agree with the client's on every run — 4,086
+connections opened matches 4,086 handshakes. That cross-check is why the numbers are worth
+quoting: a generator that merely believed its own successes would agree with itself just
+as happily.
+
+**Under real load, compaction refused 19 times because peers had not caught up.**
+ADR-0011's causal-stability floor holding in production-shaped conditions, rather than
+only in a unit test.
+
+### The honesty section is not optional
+
+`docs/benchmarks.md` opens with four reasons these are **not** production-representative:
+PGlite is in-process WASM with no network hop, one Node thread, a shared laptop that once
+had 700 MB of 16 GB free (the server could not start at all), and loopback with no
+network latency. It also lists what is not measured at all: database performance,
+horizontal scaling, network conditions, large documents, steady-state compaction, and
+client-side rendering.
+
+A benchmark document that skips this section is a press release.
+
+### Known limitations
+
+- **The load suite drives the server only.** CodeMirror's per-keystroke cost is in none
+  of these numbers.
+- **Every run starts from an empty document.** A 200,000-character document would
+  exercise the RGA's tree structure, which short documents never touch. This is the most
+  valuable next benchmark.
+- **k6 must be downloaded**, not vendored. `run.mjs` prefers `.tools/k6/` over `PATH` so
+  a result names the exact version, but a fresh clone has nothing until the binary is
+  unpacked.
+- **No load test runs in CI.** It needs roughly 2 GB of free memory and a minute of wall
+  clock, a poor trade against the rest of the gates. The correctness half
+  (`loadConvergence.test.ts`) _does_ run in CI, which is the deliberate split: CI asserts
+  convergence, and the numbers are recorded here for a human to compare against.
+- **Single-process only.** The pub/sub question in the Phase 6 planned table is
+  unanswered by any of this.
+
+---
+
 ## Phase 4 — Offline-first
 
 397 tests, 19 files. ~155s, still dominated by PGlite boots.

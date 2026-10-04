@@ -1,0 +1,10 @@
+{
+  "scenario": "connect",
+  "ranAt": "2026-10-04T19:27:15.512Z",
+  "vus": "50",
+  "duration": null,
+  "authMode": "required",
+  "k6ExitCode": 0,
+  "metricsFile": "connect-metrics.txt",
+  "serverLogTail": "{\"time\":\"2026-10-04T19:26:52.726Z\",\"level\":\"info\",\"msg\":\"starting\",\"service\":\"collab-editor\",\"auth\":\"auth: HS256 sessions\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\",\"nodeEnv\":\"production\"}\n{\"time\":\"2026-10-04T19:26:54.584Z\",\"level\":\"info\",\"msg\":\"database ready\",\"service\":\"collab-editor\",\"dataDir\":\"C:\\\\Users\\\\ASUS\\\\Documents\\\\Default Project\\\\collab-editor\\\\.data\\\\load\"}\n{\"time\":\"2026-10-04T19:26:54.596Z\",\"level\":\"info\",\"msg\":\"listening\",\"service\":\"collab-editor\",\"url\":\"http://127.0.0.1:3401\",\"websocket\":\"ws://127.0.0.1:3401/ws?doc=<id>\",\"auth\":\"required\"}\n{\"time\":\"2026-10-04T19:26:54.596Z\",\"level\":\"info\",\"msg\":\"ready\",\"service\":\"collab-editor\",\"hint\":\"Ctrl+C to stop\"}\n"
+}

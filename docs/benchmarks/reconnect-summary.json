@@ -1,0 +1,211 @@
+{
+  "metrics": {
+    "vus": {
+      "value": 10,
+      "min": 10,
+      "max": 10
+    },
+    "catchup_duration": {
+      "min": 2,
+      "med": 5,
+      "max": 53,
+      "p(90)": 25,
+      "p(95)": 31.099999999999966,
+      "avg": 9.126666666666667
+    },
+    "vus_max": {
+      "value": 10,
+      "min": 10,
+      "max": 10
+    },
+    "http_req_connecting": {
+      "avg": 0.52605,
+      "min": 0,
+      "med": 0.52605,
+      "max": 1.0521,
+      "p(90)": 0.94689,
+      "p(95)": 0.999495
+    },
+    "data_sent": {
+      "rate": 20198.77496841908,
+      "count": 318462
+    },
+    "http_req_waiting": {
+      "p(90)": 6.97089,
+      "p(95)": 7.010945,
+      "avg": 6.65045,
+      "min": 6.2499,
+      "med": 6.65045,
+      "max": 7.051
+    },
+    "iteration_duration": {
+      "p(95)": 1070.182525,
+      "avg": 1031.9808480000004,
+      "min": 1006.9786,
+      "med": 1023.88885,
+      "max": 1119.5036,
+      "p(90)": 1054.95316
+    },
+    "http_req_blocked": {
+      "min": 0,
+      "med": 0.52605,
+      "max": 1.0521,
+      "p(90)": 0.94689,
+      "p(95)": 0.999495,
+      "avg": 0.52605
+    },
+    "http_req_failed": {
+      "passes": 0,
+      "fails": 2,
+      "value": 0
+    },
+    "http_req_receiving": {
+      "med": 0.344,
+      "max": 0.688,
+      "p(90)": 0.6192,
+      "p(95)": 0.6536,
+      "avg": 0.344,
+      "min": 0
+    },
+    "http_reqs": {
+      "rate": 0.12685202610307716,
+      "count": 2
+    },
+    "http_req_duration": {
+      "p(95)": 7.045345,
+      "avg": 6.9944500000000005,
+      "min": 6.9379,
+      "med": 6.9944500000000005,
+      "max": 7.051,
+      "p(90)": 7.03969
+    },
+    "http_req_duration{expected_response:true}": {
+      "avg": 6.9944500000000005,
+      "min": 6.9379,
+      "med": 6.9944500000000005,
+      "max": 7.051,
+      "p(90)": 7.03969,
+      "p(95)": 7.045345
+    },
+    "readmitted": {
+      "passes": 150,
+      "fails": 0,
+      "thresholds": {
+        "rate>0.99": false
+      },
+      "value": 1
+    },
+    "reconnects": {
+      "count": 150,
+      "rate": 9.513901957730786,
+      "thresholds": {
+        "count>0": false
+      }
+    },
+    "ws_session_duration": {
+      "avg": 15.55583799999999,
+      "min": 2.0228,
+      "med": 13.60255,
+      "max": 66.1834,
+      "p(90)": 37.66086,
+      "p(95)": 43.48820500000002
+    },
+    "refusals": {
+      "count": 0,
+      "rate": 0,
+      "thresholds": {
+        "count==0": false
+      }
+    },
+    "ws_msgs_received": {
+      "count": 450,
+      "rate": 28.54170587319236
+    },
+    "checks": {
+      "passes": 152,
+      "fails": 0,
+      "value": 1
+    },
+    "iterations": {
+      "count": 150,
+      "rate": 9.513901957730786
+    },
+    "data_received": {
+      "count": 7304841,
+      "rate": 463316.9406054141
+    },
+    "ws_sessions": {
+      "count": 300,
+      "rate": 19.027803915461572
+    },
+    "http_req_sending": {
+      "p(90)": 0,
+      "p(95)": 0,
+      "avg": 0,
+      "min": 0,
+      "med": 0,
+      "max": 0
+    },
+    "http_req_tls_handshaking": {
+      "p(95)": 0,
+      "avg": 0,
+      "min": 0,
+      "med": 0,
+      "max": 0,
+      "p(90)": 0
+    },
+    "ws_msgs_sent": {
+      "count": 450,
+      "rate": 28.54170587319236
+    },
+    "ws_connecting": {
+      "avg": 6.273789333333333,
+      "min": 0.5103,
+      "med": 3.6292,
+      "max": 35.3613,
+      "p(90)": 16.687260000000002,
+      "p(95)": 23.220330000000004
+    }
+  },
+  "setup_data": {
+    "documentId": "load-reconnect"
+  },
+  "root_group": {
+    "checks": {
+      "readmitted after a gap": {
+        "path": "::readmitted after a gap",
+        "id": "c2c30548704b966be11a9feeda637707",
+        "passes": 150,
+        "fails": 0,
+        "name": "readmitted after a gap"
+      }
+    },
+    "name": "",
+    "path": "",
+    "id": "d41d8cd98f00b204e9800998ecf8427e",
+    "groups": {
+      "setup": {
+        "path": "::setup",
+        "id": "5c0f8025f7e0b6654089e5b00e950f1a",
+        "groups": {},
+        "checks": {
+          "document created": {
+            "name": "document created",
+            "path": "::setup::document created",
+            "id": "90019a6ebc6263a57e31e1b991e74fc9",
+            "passes": 1,
+            "fails": 0
+          },
+          "editor access granted": {
+            "path": "::setup::editor access granted",
+            "id": "2c37f070b785e2de2d3ef15f4a45ab20",
+            "passes": 1,
+            "fails": 0,
+            "name": "editor access granted"
+          }
+        },
+        "name": "setup"
+      }
+    }
+  }
+}

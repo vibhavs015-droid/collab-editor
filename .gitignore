@@ -1,4 +1,7 @@
-# `.data/` — PGlite database directory
+# `.tools/` - downloaded binaries (k6). Never committed; see scripts/load/README.md
+.tools/
+
+# `.data/` - PGlite database directory
 
 data/
 

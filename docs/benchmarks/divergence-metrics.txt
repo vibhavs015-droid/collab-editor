@@ -1,0 +1,128 @@
+# HELP collab_compaction_runs_total Compaction passes attempted, by outcome.
+# TYPE collab_compaction_runs_total counter
+collab_compaction_runs_total{outcome="declined"} 11
+# HELP collab_compaction_skipped_total Compaction passes declined, by reason.
+# TYPE collab_compaction_skipped_total counter
+collab_compaction_skipped_total{reason="log-too-small"} 11
+# HELP collab_operations_broadcast_total Operations relayed to other clients.
+# TYPE collab_operations_broadcast_total counter
+collab_operations_broadcast_total 591005
+# HELP collab_operations_received_total Operations accepted from clients, by type.
+# TYPE collab_operations_received_total counter
+collab_operations_received_total{type="accepted"} 6220
+collab_operations_received_total{type="batch"} 6220
+# HELP collab_operations_rejected_total Operations rejected as malformed.
+# TYPE collab_operations_rejected_total counter
+collab_operations_rejected_total 0
+# HELP collab_replay_duration_seconds Time to catch a client up, in seconds.
+# TYPE collab_replay_duration_seconds histogram
+collab_replay_duration_seconds_bucket{le="0.001"} 5
+collab_replay_duration_seconds_bucket{le="0.005"} 90
+collab_replay_duration_seconds_bucket{le="0.01"} 97
+collab_replay_duration_seconds_bucket{le="0.025"} 130
+collab_replay_duration_seconds_bucket{le="0.05"} 293
+collab_replay_duration_seconds_bucket{le="0.1"} 385
+collab_replay_duration_seconds_bucket{le="0.25"} 385
+collab_replay_duration_seconds_bucket{le="0.5"} 385
+collab_replay_duration_seconds_bucket{le="1"} 385
+collab_replay_duration_seconds_bucket{le="2.5"} 385
+collab_replay_duration_seconds_bucket{le="5"} 385
+collab_replay_duration_seconds_bucket{le="10"} 385
+collab_replay_duration_seconds_bucket{le="+Inf"} 385
+collab_replay_duration_seconds_sum 12.542496
+collab_replay_duration_seconds_count 385
+# HELP collab_replay_operations_total Operations replayed to catch a client up.
+# TYPE collab_replay_operations_total counter
+collab_replay_operations_total 591005
+# HELP http_request_duration_seconds HTTP request duration in seconds.
+# TYPE http_request_duration_seconds histogram
+http_request_duration_seconds_bucket{route="/api/documents",le="0.001"} 0
+http_request_duration_seconds_bucket{route="/api/documents",le="0.005"} 0
+http_request_duration_seconds_bucket{route="/api/documents",le="0.01"} 1
+http_request_duration_seconds_bucket{route="/api/documents",le="0.025"} 1
+http_request_duration_seconds_bucket{route="/api/documents",le="0.05"} 1
+http_request_duration_seconds_bucket{route="/api/documents",le="0.1"} 1
+http_request_duration_seconds_bucket{route="/api/documents",le="0.25"} 1
+http_request_duration_seconds_bucket{route="/api/documents",le="0.5"} 1
+http_request_duration_seconds_bucket{route="/api/documents",le="1"} 1
+http_request_duration_seconds_bucket{route="/api/documents",le="2.5"} 1
+http_request_duration_seconds_bucket{route="/api/documents",le="5"} 1
+http_request_duration_seconds_bucket{route="/api/documents",le="10"} 1
+http_request_duration_seconds_bucket{route="/api/documents"} 1
+http_request_duration_seconds_sum{route="/api/documents"} 0.006370
+http_request_duration_seconds_count{route="/api/documents"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="0.001"} 0
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="0.005"} 0
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="0.01"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="0.025"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="0.05"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="0.1"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="0.25"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="0.5"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="1"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="2.5"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="5"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators",le="10"} 1
+http_request_duration_seconds_bucket{route="/api/documents/:id/collaborators"} 1
+http_request_duration_seconds_sum{route="/api/documents/:id/collaborators"} 0.006020
+http_request_duration_seconds_count{route="/api/documents/:id/collaborators"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="0.001"} 0
+http_request_duration_seconds_bucket{route="/api/health",le="0.005"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="0.01"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="0.025"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="0.05"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="0.1"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="0.25"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="0.5"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="1"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="2.5"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="5"} 1
+http_request_duration_seconds_bucket{route="/api/health",le="10"} 1
+http_request_duration_seconds_bucket{route="/api/health"} 1
+http_request_duration_seconds_sum{route="/api/health"} 0.001933
+http_request_duration_seconds_count{route="/api/health"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="0.001"} 0
+http_request_duration_seconds_bucket{route="/api/metrics",le="0.005"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="0.01"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="0.025"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="0.05"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="0.1"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="0.25"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="0.5"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="1"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="2.5"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="5"} 1
+http_request_duration_seconds_bucket{route="/api/metrics",le="10"} 1
+http_request_duration_seconds_bucket{route="/api/metrics"} 1
+http_request_duration_seconds_sum{route="/api/metrics"} 0.001717
+http_request_duration_seconds_count{route="/api/metrics"} 1
+# HELP http_requests_in_flight HTTP requests currently being handled.
+# TYPE http_requests_in_flight gauge
+http_requests_in_flight 1
+# HELP http_requests_total HTTP requests handled, by route template and status class.
+# TYPE http_requests_total counter
+http_requests_total{route="/api/documents",status="2xx"} 1
+http_requests_total{route="/api/documents/:id/collaborators",status="2xx"} 1
+http_requests_total{route="/api/health",status="2xx"} 1
+http_requests_total{route="/api/metrics",status="2xx"} 1
+# HELP process_resident_memory_bytes Resident set size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 442781696
+# HELP ws_connections_active Authorised WebSocket clients connected.
+# TYPE ws_connections_active gauge
+ws_connections_active 0
+# HELP ws_connections_closed_total WebSocket connections closed.
+# TYPE ws_connections_closed_total counter
+ws_connections_closed_total{reason="left"} 385
+# HELP ws_connections_opened_total WebSocket connections accepted.
+# TYPE ws_connections_opened_total counter
+ws_connections_opened_total 385
+# HELP ws_frames_sent_total Frames written to clients, by type.
+# TYPE ws_frames_sent_total counter
+ws_frames_sent_total{type="ops"} 10984
+ws_frames_sent_total{type="presence"} 739
+ws_frames_sent_total{type="syncState"} 385
+ws_frames_sent_total{type="welcome"} 385
+# HELP ws_pending_unauthenticated Sockets connected but not yet authorised. A number that only goes up is an attack.
+# TYPE ws_pending_unauthenticated gauge
+ws_pending_unauthenticated 0

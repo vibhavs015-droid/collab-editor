@@ -3,7 +3,7 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['dist', 'node_modules', 'coverage', '.data'],
+    ignores: ['dist', 'node_modules', 'coverage', '.data', '.tools'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
@@ -29,6 +29,62 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/no-non-null-assertion': 'error',
       eqeqeq: ['error', 'smart'],
+    },
+  },
+
+  {
+    // The orchestrator, scripts/load/run.mjs.
+    //
+    // Plain Node ESM. Separate from the k6 config below because the two need
+    // different globals and pretending otherwise produces 30 phantom errors.
+    files: ['scripts/**/*.mjs'],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: {
+        process: 'readonly',
+        fetch: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        console: 'readonly',
+        URL: 'readonly',
+      },
+    },
+  },
+  {
+    // k6 load scripts.
+    //
+    // These run on k6's own Go-based JavaScript runtime, not Node and not the browser.
+    // They import 'k6/*' modules that no npm package provides, and they use k6's
+    // injected globals (__ENV, __VU, __ITER). None of that exists for TypeScript or for
+    // the type-aware lint rules, so including them would mean a wall of phantom errors.
+    //
+    // They are still linted as plain JavaScript, so the rules that matter - unused
+    // variables, undefined references - still apply. What is skipped is type-aware
+    // checking, which could not be meaningful here even if it ran.
+    files: ['scripts/load/**/*.js'],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: {
+        __ENV: 'readonly',
+        __VU: 'readonly',
+        __ITER: 'readonly',
+        __TEST: 'readonly',
+        console: 'readonly',
+        setTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        clearTimeout: 'readonly',
+        Math: 'readonly',
+        JSON: 'readonly',
+        Date: 'readonly',
+        Number: 'readonly',
+        String: 'readonly',
+        Buffer: 'readonly',
+      },
     },
   },
 
