@@ -1481,4 +1481,108 @@ checkout HEAD --` restored it. Long file edits in PowerShell are a trap; the edi
 - A scripted replacement matched twice and inserted a duplicate CI step. The diff showed 109
   lines removed, which is what revealed the truncation.
 
+## Four bugs that only a browser could find
+
+`docs/TESTING.md` claimed every step in it had been run. It had not. I had verified the API,
+the WebSocket protocol, the metrics and the build by script, and had never opened the
+application. When I finally did, four defects were visible immediately. All four were invisible
+to 901 passing tests, and all four made the product not work.
+
+The common thread is worth more than any individual bug: **a green suite here has now failed to
+mean "this works" three separate times.** Testing source through `tsx` under Node cannot tell
+you whether a browser can run it, and cannot tell you whether two halves of the application are
+connected to each other.
+
+### 1. The browser never sent a typed character to the server
+
+The worst one, and the reason any of this was found.
+
+`EditorBinding.exportLocalChanges` RETURNED the operations and left broadcasting to the caller.
+Every other mutation path - undo, redo, start-up - goes through `#dispatchLocal`, which does
+broadcast. So the class looked consistent, and the one path that matters, the one every keystroke
+takes, was the exception.
+
+`main.ts` called it and discarded the result. Operations were computed, applied to the replica,
+written to IndexedDB, and thrown away.
+
+It looked perfect from the outside: the editor worked, offline-first worked, the local log was
+correct, and the sync indicator said **"Synced"** - because the outbox was genuinely empty. The
+server had never heard of the document.
+
+The tell was a question nobody had asked: _has the server received anything yet?_
+`collab_operations_received_total` was **absent from the scrape entirely**, which for a counter
+means it had never been incremented by anything. My hand-written WebSocket probe was the only
+thing in the entire investigation that ever reached the store.
+
+Why 901 tests missed it: the binding's test harness **manually forwarded** the returned
+operations, so every test exercised a wiring the application does not have. The tests were
+green and the application sent nothing. Fixed by broadcasting inside `exportLocalChanges`, and
+by changing the harness to do what `main.ts` does. Reverting the fix fails 4 tests.
+
+### 2. A reload lost your identity, permanently
+
+`POST /api/auth/session` always minted a new random subject, and the client kept the token in
+memory only. The comment justified it as "the cost of that is a user having to obtain a new
+session after a reload."
+
+That is the right trade for accounts and badly wrong here, because **there are no accounts**. A
+new session is not a re-login; it is a NEW PERSON. After one reload the browser lost server-side
+access to every document it had opened, with no way back.
+
+It presented as a flaky network, because IndexedDB still rendered the text. The server logged
+`rejected websocket client ... DOCUMENT_NOT_FOUND` about twice a second, forever.
+
+The subject is now the durable thing and the token is disposable: one random 128-bit subject in
+`localStorage`, presented on every load, with a short-lived token minted from it.
+
+### 3. Two tabs of one browser could not collaborate
+
+The CRDT site id was in `localStorage`, which every tab shares. Two tabs were therefore two
+replicas claiming one identity: they minted identical element ids, the server's
+`ON CONFLICT DO NOTHING` discarded one tab's operations as duplicates, and the tabs diverged
+silently.
+
+Worth noting for the honesty of it: `docs/TESTING.md` documented a `&nope=1` workaround for
+this instead of fixing it. A workaround in a test guide is a bug you have written down.
+
+### 4. Presence was never sent
+
+`SyncTransport.sendPresence` existed, was tested, and the UI had a collaborator count wired to
+`onPresence`. Nothing ever called it, because `createEditor` had no way to report a selection
+change at all - its update listener returned early on `!update.docChanged`, and a selection
+change produces no `docChanged`.
+
+So remote cursors never moved and the collaborator count was permanently blank. `EditorBinding`
+was well covered; `createEditor` had no test file; and `createEditor` was the thing that was
+broken.
+
+Not changed: `Relay.#cursorsFor` deliberately drops null cursors, so the list shows people with
+their cursor in the document rather than everyone holding a socket open. I tried announcing
+presence on `welcome` to include passive readers; it had no effect, which turned out to be
+correct - counting them would mean reporting a fabricated cursor position, drawn in the wrong
+place.
+
+### The silent catch that hid the whole thing
+
+`newSubject` - the function the durable identity depends on - was built on `randomBytes` from
+`node:crypto`. Correct on the server. In the browser, Vite replaces `node:crypto` with an empty
+stub, so the built code read `t.randomBytes(...)` where `t` was `{ exports: {} }`, and it threw
+`TypeError: randomBytes is not a function`.
+
+The caller caught the TypeError and returned "storage unavailable", so **durable identity was
+quietly off in the only environment it exists for**, and nothing said so. Fixed by using
+`globalThis.crypto.getRandomValues`, which exists in both. The catch was also narrowed so a
+broken generator can no longer masquerade as a storage failure.
+
+New guard: `src/shared/browserSafety.test.ts` scans shared and client code for any Node builtin
+a bundler stubs out. Reintroducing the original line fails it by name.
+
+### What I would do differently
+
+Open the application on day one, not at the end. Every one of these four was a **wiring** fault
+
+- two correct halves not connected to each other - and wiring is only observable from above the
+  unit under test. The lesson generalises past this project: a component with excellent tests can
+  still be dead on arrival if nothing ever calls it.
+
 ## Log
