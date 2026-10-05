@@ -53,9 +53,12 @@ let dataDir = '';
 let child = null;
 let port = 0;
 let failures = 0;
+let total = 0;
 
 /** Record a check, printing on success as well as failure so a CI log is complete. */
 function check(name, ok, detail = '') {
+  total += 1;
+
   if (ok) {
     process.stdout.write(`  ok    ${name}\n`);
   } else {
@@ -522,14 +525,20 @@ async function main() {
     await rm(dataDir, { recursive: true, force: true });
   }
 
+  // The total is reported rather than written down in prose.
+  //
+  // `docs/deploy.md` used to say "21 checks" and was wrong twice - the docs claimed 21
+  // while the script ran 22, and a CI log was miscounted as 23. A hardcoded count in
+  // documentation is a claim that goes stale the moment a check is added, and this
+  // project has already spent a session deleting claims like that. So the script is the
+  // source of truth and the docs point here.
+  process.stdout.write(`\n${total} checks, ${failures} failed\n`);
+
   if (failures > 0) {
-    process.stdout.write(`\n${failures} check(s) failed\n`);
     process.exitCode = 1;
 
     return;
   }
-
-  process.stdout.write('\nall checks passed\n');
 }
 
 await main();

@@ -64,7 +64,7 @@ of finding something, but a much smaller one.
 
 ### The production smoke test, which is now a CI gate
 
-`scripts/smoke.mjs` (21 checks) starts `node dist/server/index.js` with `NODE_ENV=production`
+`scripts/smoke.mjs` starts `node dist/server/index.js` with `NODE_ENV=production`
 and drives the artefact a user actually gets: the app shell, a hashed asset, the API,
 authorisation on an unauthenticated read, Prometheus metrics, a real WebSocket peer pair,
 cold replay from the durable log, and an encrypted document including that its frame arrives
@@ -195,9 +195,13 @@ npm run verify:built   # build, then run the production smoke test against it
 ```
 
 That is the closest thing to a container test available without a Docker daemon: the same
-built artefact, the same `NODE_ENV=production`, a temporary data directory, and 21 checks
+built artefact, the same `NODE_ENV=production` and a temporary data directory,
 across the page, the API, authorisation, two live WebSocket peers, cold replay and an
 encrypted document.
+
+The script reports its own total on the last line (`N checks, 0 failed`), so there is no
+number to keep in step here - it was "21" in an earlier draft of this file while the script
+actually ran 22.
 
 ---
 
