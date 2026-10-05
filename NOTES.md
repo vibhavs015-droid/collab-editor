@@ -1182,4 +1182,103 @@ to 6, which confirms the new tests bite. The first sabotage attempt replaced a w
 _content_ rather than deleting the write, so the existence guard correctly passed and
 proved nothing - the same mistake as with the load harness, and the second time.
 
+Verified by sabotage too: inverting `truncateBefore`'s key range took the failures from 4
+to 6, which confirms the new tests bite. The first sabotage attempt replaced a write's
+_content_ rather than deleting the write, so the existence guard correctly passed and
+proved nothing - the same mistake as with the load harness, and the second time.
+
+## Phase 6 - End-to-end encryption
+
+The relay never needed to understand an operation to route one (ADR-0007). That is the
+property this phase rests on, and it is why the work turned out to be mostly about
+_removing_ server capabilities rather than adding a crypto layer.
+
+### The key is in the URL fragment, and that is the whole point
+
+`#k=<base64url, 32 random bytes>`. Browsers do not send the fragment, so the server is not
+trusted with the key - it has never been given it. Every alternative is something the
+server sees, and "the operator does not read your document" is a materially weaker claim
+than "the operator cannot read your document".
+
+The costs are real and were written down before any code: a shared link IS the credential,
+there is no recovery, and the key must be exchanged out of band - the same friction
+ADR-0012 already records for anonymous subjects.
+
+### What it gives up, stated before building it
+
+Compaction walks the live element set. The text cache replays the log. Both need
+plaintext, so **encrypted documents get neither**. Their log grows for the life of the
+document, and a cold device replays the whole history.
+
+Before deciding the server could not keep its dedupe, I checked whether correctness
+actually depends on it: `#applyInsert` is idempotent
+(`if (this.#byKey.has(key)) return`), so a duplicate costs _storage_, not correctness.
+That is what makes sending the element key in cleartext acceptable - it leaks per-site
+operation counts, which is the same class of metadata the server already had.
+
+### Tests that pass while proving nothing, twice more
+
+The pattern that keeps paying: **break the code, check the test count goes up.**
+
+1. The duplicate-flush guard test called `requestResync()`, which does not flush at all.
+   Removing the guard left all 18 tests green. Replaced with a genuine overlap.
+2. The `.env.example` drift test would have passed with an empty scanner. It now asserts
+   it found something.
+
+Three E2EE design bugs, all found by tests written alongside the code:
+
+- **`site` was not in the AAD.** It is redundant with the element key, and a field present
+  in a frame but absent from the AAD is a field an attacker can substitute. A test that
+  altered the site caught it. Every cleartext field is bound now.
+- **`const batch = this.#outbox` aliased the array.** An operation queued during the
+  encryption `await` appeared in `batch` too, so the first batch encrypted and sent it.
+  Harmless by luck - both went out in one frame - but timing-dependent rather than
+  designed, and `disconnect()` replaces the outbox outright, which would leave `batch`
+  pointing at an array nothing else can see.
+- **`parseEncryptedFrame` compared the key prefix against `'insert:'`** when the prefix is
+  the single letter `i`, so _every_ frame was rejected. The failures looked like a bad
+  test fixture rather than a bad comparison.
+
+And a guard that was pointed the wrong way: `appendEncryptedOps` threw when the document
+was _already_ encrypted - which is the ordinary case, since every keystroke after the
+first one does it. The guard belongs on the plaintext path, which is the one that would
+actually mix the two modes.
+
+### The server's one check, described accurately
+
+`parseEncryptedFrame` confirms a frame is SHAPED like a frame. It cannot confirm the
+ciphertext decrypts, or that it decrypts to an operation matching the claimed element
+key. Those checks belong to the clients holding the key, and `applyEncrypted` therefore
+**cannot report `unplaced`** - it has no replica. So an encrypted document's convergence
+claim rests entirely on the clients. That is the honest consequence of withholding the
+key, and it is written down rather than glossed.
+
+## A 955 MB temp leak that was making the suite flaky
+
+I recorded a flake in a commit message instead of chasing it, which turned out to be the
+right call: investigating found a real leak, not a ghost.
+
+The suite left ~38 MB of PGlite data in `%TEMP%` per full run. By the time it was noticed:
+25 `pg-*` directories, 25 `collab-static-*` directories, **955 MB**, on a disk that had
+drifted to 8.5 GB free. A disk that full is a credible cause of PGlite failing to boot -
+which is exactly what the flake looked like: `fetch failed`, five baseline tests failing,
+and nothing in the output connecting it to storage.
+
+Three leaks, all the same mistake:
+
+- the PGlite directory was created as a **sibling** of the temp root
+  (`join(root, '..', 'pg-<timestamp>')`), so the cleanup that removed the root never
+  touched it
+- the symlink test's "file outside the root" directory was never removed at all
+- its PGlite database lived inside that unremoved directory
+
+The durable fix was the **cleanup**, not the paths. `removeQuietly` swallowed every error
+with `.catch(() => undefined)`, which is exactly why a Windows `rm` failing on an open
+handle was invisible. `removeTree` now retries, and throws with the path and cause if it
+still cannot remove the tree, so a test that cannot clean up after itself fails loudly
+instead of accumulating.
+
+Verified: three consecutive runs leave 0 directories in TEMP, where every run previously
+left 3. 1.8 GB reclaimed.
+
 ## Log
