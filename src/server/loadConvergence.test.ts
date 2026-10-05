@@ -178,6 +178,75 @@ interface Editor {
   mine: { site: string; clock: number }[];
   /** Everything received off the wire, for a post-hoc check. */
   received: Operation[];
+  /**
+   * Everything this editor SENT, including the operations it applied locally.
+   *
+   * Recorded so the assertion can build an independent reference document from the
+   * operations that were actually issued, rather than only comparing replicas to each
+   * other. See the note on the convergence assertion for why that distinction is the whole
+   * point.
+   */
+  sent: Operation[];
+}
+
+/**
+ * Wait until every editor has received every operation it did not send itself.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY "THEY AGREE" IS NOT A SUFFICIENT CONDITION
+ * ---------------------------------------------------------------------------
+ * The obvious wait is "until all replicas hold the same text". That is wrong, and it fails
+ * in the most dangerous direction: once editors apply their own operations locally, they all
+ * hold their own 22 characters and NOTHING from anyone else, so they agree immediately. A
+ * helper that waited for agreement returned at once with 22 characters, and the assertion
+ * then reported a CRDT bug that was really the helper returning before any broadcast had
+ * been delivered.
+ *
+ * Agreement is not completeness. Two peers can agree perfectly about a document neither of
+ * them has fully received.
+ *
+ * So the condition is delivery, which is computable and independent of the CRDT: each editor
+ * sent a known number of operations, the relay does not echo to the sender, and therefore
+ * each must receive exactly `totalSent - itsOwnSent`. Verified against instrumentation on the
+ * failing build: 24 editors x 60 operations is 1,440 sent, and every editor had received
+ * exactly 1,380.
+ *
+ * Once delivery is established, convergence becomes a meaningful claim: the replicas agree,
+ * and they agree on the right thing.
+ */
+async function awaitFullDelivery(
+  editors: readonly Editor[],
+  totalSent: number,
+  timeoutMs = 60_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    const complete = editors.every(
+      (editor) => editor.received.length >= totalSent - editor.sent.length,
+    );
+
+    if (complete) {
+      return;
+    }
+
+    if (Date.now() > deadline) {
+      const short = editors
+        .map((editor, index) => {
+          const want = totalSent - editor.sent.length;
+
+          return `${index}:${editor.received.length}/${want}`;
+        })
+        .join(' ');
+
+      throw new Error(
+        `Editors had not received every operation within ${timeoutMs}ms. ` +
+          `received/expected per editor: ${short}`,
+      );
+    }
+
+    await settle(4);
+  }
 }
 
 async function tokenFor(subject: string): Promise<string> {
@@ -227,7 +296,7 @@ async function openEditor(documentId: string, index: number, token: string): Pro
 
   await settle(4);
 
-  return { site, replica, socket, clock: 0, mine: [], received };
+  return { site, replica, socket, clock: 0, mine: [], received, sent: [] };
 }
 
 describe('convergence under contention', () => {
@@ -279,18 +348,28 @@ describe('convergence under contention', () => {
           const victim = editor.mine.shift();
 
           if (victim) {
-            editor.socket.send(
-              JSON.stringify({
-                type: 'ops',
-                documentId,
-                ops: [{ type: 'delete', target: { site: victim.site, clock: victim.clock } }],
-              }),
-            );
+            const op: Operation = {
+              type: 'delete',
+              target: { site: victim.site, clock: victim.clock },
+            };
+
+            // Applied locally FIRST, then sent. This is what the real client does: the edit
+            // lands in the document the user is looking at, and only then goes to the wire.
+            //
+            // The relay deliberately does not echo a message back to its sender, so an
+            // editor that only SENDS never receives its own work and its replica is short
+            // by exactly the operations it produced. Every editor was short by the same
+            // amount here, so they still agreed with each other and the test passed - while
+            // proving nothing about completeness. See the assertion below.
+            editor.replica.applyRemote([op]);
+            editor.sent.push(op);
+
+            editor.socket.send(JSON.stringify({ type: 'ops', documentId, ops: [op] }));
             continue;
           }
         }
 
-        const op = {
+        const op: Operation = {
           type: 'insert',
           id: { site: editor.site, clock: editor.clock },
           origin: null,
@@ -298,28 +377,73 @@ describe('convergence under contention', () => {
         };
 
         editor.mine.push({ site: editor.site, clock: editor.clock });
+        editor.replica.applyRemote([op]);
+        editor.sent.push(op);
+
         editor.socket.send(JSON.stringify({ type: 'ops', documentId, ops: [op] }));
       }
     }
 
-    // Long enough for every broadcast to land. Not a guess about correctness, just
-    // enough time for the last frame to arrive.
-    await settle(30);
+    // ---------------------------------------------------------------------------
+    // WAIT FOR CONVERGENCE, DO NOT SLEEP A GUESSED INTERVAL
+    // ---------------------------------------------------------------------------
+    // `settle(30)` is about 120ms. With 24 editors sending 1,440 operations that has to be
+    // broadcast, stored, and fanned back out to 23 peers each, it is usually enough and on a
+    // loaded CI runner it is not. The failure it produces is `editor 17 diverged: expected
+    // 438 characters to be 391` - which reads as a CRDT losing edits and is in fact one
+    // replica lagging behind.
+    //
+    // That is the worst kind of failure: it accuses the algorithm when the test's timing is
+    // at fault, and nothing in the output distinguishes the two. Convergence is not "they
+    // agree within 120ms", it is "they agree", so the assertion waits for that and reports
+    // the disagreement if it never arrives.
+    // Every operation issued, and therefore how many each editor must receive.
+    const totalSent = editors.reduce((sum, editor) => sum + editor.sent.length, 0);
 
+    await awaitFullDelivery(editors, totalSent);
+
+    // With delivery established, agreement is now a real claim.
     const texts = editors.map((editor) => editor.replica.text);
-    const reference = texts[0];
+    const reference = texts[0] ?? '';
 
-    expect(reference).toBeDefined();
-
-    for (let index = 0; index < editors.length; index += 1) {
-      // The whole claim. If any two of these disagree, the CRDT is not converging
-      // under real load and every latency number above is meaningless.
-      expect(texts[index], `editor ${index} diverged`).toBe(reference);
-    }
+    // ---------------------------------------------------------------------------
+    // AND COMPARE AGAINST AN INDEPENDENT REFERENCE, NOT JUST EACH OTHER
+    // ---------------------------------------------------------------------------
+    // Comparing 24 replicas to `texts[0]` proves they agree. It does NOT prove any of them
+    // is right: a relay that dropped every third operation on every socket would produce 24
+    // replicas that agree perfectly and are all wrong.
+    //
+    // That is not hypothetical here. Every editor was missing its own 60 operations - the
+    // relay does not echo to the sender - so all 24 were short by the same amount and
+    // agreed with each other. The test passed on a document that no replica actually held in
+    // full.
+    //
+    // So this builds the document a THIRD time, from the operations the editors issued,
+    // with no relay, no socket and no network involved. Every replica must match that. Now a
+    // dropped operation fails, because the reference contains it and the replica does not.
+    const rebuilt = new RgaDocument('reference');
 
     for (const editor of editors) {
-      expect(editor.replica.checkInvariants()).toEqual([]);
+      for (const op of editor.sent) {
+        rebuilt.apply(op);
+      }
     }
+
+    const expected = rebuilt.toText();
+
+    expect(expected.length).toBeGreaterThan(100);
+
+    for (const [index, editor] of editors.entries()) {
+      // The whole claim, in two halves. Agreement with each other, and agreement with an
+      // independently built document.
+      expect(editor.replica.text, `editor ${index} diverged from its peers`).toBe(reference);
+      expect(editor.replica.text, `editor ${index} diverged from the reference`).toBe(expected);
+      expect(editor.replica.checkInvariants(), `editor ${index} broke an invariant`).toEqual([]);
+    }
+
+    // Nothing was invented or dropped.
+    expect(totalSent).toBe(EDITORS_COUNT * OPS_PER_EDITOR);
+    expect(expected).toHaveLength(reference.length);
 
     // The document is genuinely non-trivial. A test that converged on an empty string
     // would pass every assertion above and prove nothing.
