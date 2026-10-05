@@ -14,6 +14,7 @@
     "build": "tsc && vite build",
     "start": "tsx src/server/index.ts",
     "serve": "node dist/server/index.js",
+    "smoke": "node scripts/smoke.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "load": "node scripts/load/run.mjs",
@@ -29,7 +30,8 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
     "check:line-endings": "node scripts/check-line-endings.mjs",
-    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run check:line-endings && npm test"
+    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run check:line-endings && npm test",
+    "verify:built": "npm run build && npm run smoke"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -68,6 +68,16 @@ jobs:
       - name: Toolchain self-check
         run: node dist/index.js
 
+      # The gate that would have caught `ae27a82`, where the production build served
+      # nothing and `/` returned 401 while every source-level test passed. It starts the
+      # BUILT server as a container would and drives the page, the API, a real WebSocket
+      # peer pair, cold replay from the durable log, and an encrypted document.
+      #
+      # A separate step rather than part of `npm test`, because it needs `dist/` and
+      # folding a build into the unit suite would make the fast suite slow.
+      - name: Production smoke test
+        run: npm run smoke
+
   security:
     name: Dependency audit
     runs-on: ubuntu-latest

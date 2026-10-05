@@ -32,32 +32,103 @@ a real `npm ci --omit=dev` into a clean directory, `dist/` copied in, nothing el
 | `dist/index.js` is the Phase 0 self-check, not the server              | Ran it: prints a summary, exits 0, serves nothing                                                                                             |
 | The Dockerfile's `COPY` list is enough to build the image              | Built from exactly that file set in a clean directory; `dist/server/index.js`, `dist/client/index.html` and `dist/client/assets` all produced |
 
-**Not verified, and not verifiable without Docker:**
+**Not verifiable without Docker, so now asserted at build time instead:**
 
-- The image builds at all, on Linux, on `bookworm-slim`.
-- PGlite runs under musl-free Debian as a non-root user.
-- The `/data` volume inherits the right ownership.
-- `tini` is installed at `/usr/bin/tini` and receives signals.
-- The Linux-only `HEALTHCHECK` JSON array form parses.
-- `.dockerignore` excludes what it should — verified by reading, not by building.
+Each item below was an unverified guess. Rather than leave them as comments hoping someone
+reads them, the Dockerfile now checks each one _during the build_, so a wrong guess fails
+loudly at the step that caused it instead of at runtime with a misleading symptom.
+
+| Claim                                              | Now checked by                                                            | Failure it replaces                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| The build emits the files the container runs       | `test -f dist/server/index.js`, `dist/index.js`, `dist/client/index.html` | A container that starts no server and logs a cheerful summary    |
+| `tini` is at `/usr/bin/tini`                       | `test -x /usr/bin/tini`                                                   | `exec /usr/bin/tini: no such file or directory` at every restart |
+| The unprivileged user can write the data directory | `su node -c 'touch /data/...'`                                            | Healthy container, then EACCES on every write minutes later      |
+| `.dockerignore` excludes what it should            | Still read, not built. See below.                                         | -                                                                |
+
+What remains genuinely unverifiable without a Docker daemon:
+
+- **The image builds at all on Linux/bookworm-slim.** No assertion can run before the
+  daemon exists.
+- **PGlite runs on Debian as a non-root user.** The write probe proves the _directory_ is
+  writable; it does not prove the WASM module loads, which is the part that could differ.
+- **`tini` receives signals.** `test -x` proves the file exists, not that it is wired as
+  PID 1 correctly. That is only observable by sending SIGTERM to a running container.
+- **The Linux-only `HEALTHCHECK` JSON array form parses.** The command itself is verified
+  (it is what `scripts/smoke.mjs` runs), but whether the daemon accepts the exec form is a
+  daemon question.
 
 So: the build inputs, the dependency tree, the runtime contract and the health check are
-verified by running them. The image packaging is not. Treat the first
-`docker compose up --build` as a test with a real chance of finding something.
+verified by running them, and the four remaining guesses now fail the build instead of
+failing silently. Treat the first `docker compose up --build` as a test with a real chance
+of finding something, but a much smaller one.
 
-Two things from that verification worth recording, because both probes were wrong before
-the third one passed:
+### The production smoke test, which is now a CI gate
+
+`scripts/smoke.mjs` (21 checks) starts `node dist/server/index.js` with `NODE_ENV=production`
+and drives the artefact a user actually gets: the app shell, a hashed asset, the API,
+authorisation on an unauthenticated read, Prometheus metrics, a real WebSocket peer pair,
+cold replay from the durable log, and an encrypted document including that its frame arrives
+byte-for-byte and holds no readable text.
+
+It exists because of `ae27a82`: the production build served nothing, `/` returned 401, and
+every source-level test passed, because they all reached the API directly and never asked the
+server for a page. A routing table with no static branch looks perfectly correct right up
+until a browser asks for a document.
+
+Run it with `npm run smoke` (needs `npm run build` first) or `npm run verify:built`. It is a
+separate CI step rather than part of `npm test`, because it needs `dist/` and a build in the
+unit suite would make the fast suite slow.
+
+Two things it caught while being written, both of which had been passing:
+
+- The port was read with `/listening[^0-9]*(\d+)/`, which captures `127` out of `127.0.0.1`.
+  It now parses the JSON log line the server already emits and reads its own reported `url`.
+- It used a single socket and asserted an echo. The relay deliberately does not echo to the
+  sender, so a single socket receives nothing and the check fails against a _correct_ server.
+  Two peers now, and the same mistake was made in the convergence harness hours earlier.
+
+### Two probes that were wrong before the third passed
+
+Worth recording, because both looked exactly like a broken deployment:
 
 - The first end-to-end probe reported an empty title and empty content. The API nests its
-  responses under `document`, and the probe read `body.id` and `body.content`. The probe
-  was wrong, not the server. Check the response shape before believing a failure.
+  responses under `document`, and the probe read `body.id` and `body.content`. The probe was
+  wrong, not the server. Check the response shape before believing a failure.
 - The second probe reused a document id from the first run, got `ALREADY_EXISTS`, then
-  `DOCUMENT_NOT_FOUND` — which looks exactly like a broken deployment and was in fact the
+  `DOCUMENT_NOT_FOUND` - which looks exactly like a broken deployment and was in fact the
   existence-oracle protection working: a _different_ anonymous subject could not see the
-  first run's document, which is the intended behaviour. Two probes, two wrong
-  assumptions, and only the third produced a clean pass.
+  first run's document, which is the intended behaviour.
+
+`scripts/smoke.mjs` reads `body.document.id` and asserts on it, so the first mistake is
+compiled out of the gate rather than remembered by whoever runs it next.
 
 ---
+
+## Before you install Docker: check the disk
+
+**Docker was not installed on the machine this was written on**, and WSL was present but not
+enabled. That combination is worth spelling out because the failure lands after the reboot,
+not before it:
+
+1. `wsl --install` needs Administrator, and **a reboot**.
+2. WSL2 itself takes a few GB. The Docker Desktop WSL2 backend takes several more.
+3. Building this image needs room for the build stages, the dependency trees for both stages,
+   and the final layer.
+
+Realistically that wants **15-20 GB free before you start**. Installing Docker with less and
+then hitting the wall at `docker compose up --build` reads as a Dockerfile problem - a full
+disk during `npm ci` produces output about space that has nothing to do with packaging.
+
+Also note what enabling WSL2 implies, independent of disk: virtualisation must be available
+in firmware. On a machine where it is not, the WSL install succeeds and the kernel never
+boots, which is a harder problem than a full disk.
+
+Check first, with no changes:
+
+```powershell
+Get-PSDrive C | Select-Object @{n='freeGB';e={[math]::Round($_.Free/1GB,1)}}
+wsl --status          # "not installed" means the reboot-and-enable path
+```
 
 ## Locally, with Docker
 
@@ -116,6 +187,17 @@ NODE_ENV=production HOST=0.0.0.0 PORT=3001 \
 ```
 
 `npm run serve` is the same command without the environment.
+
+And to check that path automatically, without starting anything by hand:
+
+```bash
+npm run verify:built   # build, then run the production smoke test against it
+```
+
+That is the closest thing to a container test available without a Docker daemon: the same
+built artefact, the same `NODE_ENV=production`, a temporary data directory, and 21 checks
+across the page, the API, authorisation, two live WebSocket peers, cold replay and an
+encrypted document.
 
 ---
 

@@ -51,7 +51,15 @@ COPY src ./src
 # `--ignore-scripts` above is safe precisely because this project's dependencies
 # have no install scripts. If one ever needs a native build, that layer has to
 # change too - noted here so the next person does not have to rediscover it.
-RUN npm run build
+RUN npm run build \
+ && test -f /app/dist/server/index.js \
+ && test -f /app/dist/client/index.html \
+ && test -f /app/dist/index.js
+
+# The CMD below is `node dist/server/index.js`, and the "Toolchain self-check" step in CI
+# runs `node dist/index.js`. Both files exist and they do different things, so both are
+# asserted here: a tsconfig change that stops emitting one of them should fail the build
+# rather than produce a container that starts no server and logs a cheerful summary.
 
 # ---------------------------------------------------------------------------
 # Stage 2 - runtime dependencies
@@ -79,7 +87,22 @@ FROM node:${NODE_VERSION}-bookworm-slim AS runtime
 # reaps the children PGlite leaves behind.
 RUN apt-get update \
  && apt-get install --yes --no-install-recommends tini ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && test -x /usr/bin/tini
+
+# ---------------------------------------------------------------------------
+# WHY `test -x /usr/bin/tini` IS IN THE BUILD AND NOT A COMMENT
+# ---------------------------------------------------------------------------
+# The ENTRYPOINT names that exact path, and Docker was never available to verify it on
+# this machine. `docs/deploy.md` lists "tini lives at /usr/bin/tini" as unverified.
+#
+# Rather than leave a guess, assert it where a guess can be checked cheaply. If a future
+# base image moves the binary, this line fails the BUILD with a clear cause - instead of
+# the container dying at startup with `exec /usr/bin/tini: no such file or directory`,
+# which reads like a corrupted image and is actually a renamed package file.
+#
+# This converts an unverifiable claim into a verified one the first time anybody builds
+# the image, and costs nothing.
 
 ENV NODE_ENV=production \
     # 0.0.0.0, not 127.0.0.1. This is the single most common container mistake:
@@ -104,6 +127,31 @@ COPY package.json ./
 # request. Creating it as root and never chowning is why "permission denied" in a
 # container usually appears minutes after start rather than at build time.
 RUN mkdir -p /data && chown node:node /data
+
+# ---------------------------------------------------------------------------
+# PROVING THE WRITE AS THE USER THAT WILL ACTUALLY DO IT
+# ---------------------------------------------------------------------------
+# `chown` succeeding only proves root could change the owner. What matters is that the
+# unprivileged `node` user can write, which is what PGlite does on its first request.
+#
+# `su node -c` runs as that user. If this fails the BUILD, instead of the container
+# starting cleanly, passing its health check, and then failing every write with EACCES
+# minutes later - which is the failure mode this whole arrangement exists to prevent.
+#
+# The probe is removed in the same layer, so no stray file ships in the volume.
+RUN su node -s /bin/sh -c 'touch /data/.write-probe && rm /data/.write-probe'
+
+# ---------------------------------------------------------------------------
+# THE BIND-MOUNT CASE, WHICH THE NAMED VOLUME DOES NOT COVER
+# ---------------------------------------------------------------------------
+# docker-compose.yml mounts a NAMED volume, and Docker seeds a named volume from the
+# image's directory, so it inherits this ownership and everything above works. A BIND
+# mount (`-v ./data:/data` or a host path) does not: the host directory's ownership wins,
+# and unless the host directory happens to be owned by uid 1000 the process cannot write.
+#
+# There is no fix from inside the image - the image never sees the host path's owner. So
+# it is documented where someone will hit it rather than left to be discovered. See
+# docs/deploy.md, "Bind mounts need a matching uid".
 
 # Drop root. The process needs to write /data and read /app and nothing else.
 USER node
