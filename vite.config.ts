@@ -26,6 +26,17 @@ export default defineConfig({
     outDir: 'dist/client',
     emptyOutDir: true,
     target: 'es2022',
-    sourcemap: true,
+    // Off by default; opt in with SOURCE_MAPS=true.
+    //
+    // `true` emits a 1.6 MB `.js.map` next to a 300 kB bundle AND writes a
+    // `//# sourceMappingURL=` comment into the bundle, so every visitor's browser fetches
+    // five times the payload it needs to run the app. A real cost, paid by every user, for a
+    // debugging aid most deployments never use.
+    //
+    // `hidden` would generate the map without the reference comment, which avoids the fetch
+    // but still ships the file. The image is built once and served many times, so not
+    // generating it is the better default - and keeping the switch means debugging a
+    // production-only failure is still one environment variable away.
+    sourcemap: process.env['SOURCE_MAPS'] === 'true',
   },
 });

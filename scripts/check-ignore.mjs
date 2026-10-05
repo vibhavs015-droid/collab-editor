@@ -33,18 +33,29 @@ const ROOT = resolve(import.meta.dirname, '..');
 /**
  * Paths that must never be committed, and why each one matters.
  *
- * `null` as the path means "this directory does not need to exist for the check to be
- * meaningful" - `git check-ignore` works on hypothetical paths, which is what makes this
- * testable before anything has been created.
+ * QUERIED WITH A TRAILING SLASH, and that is load-bearing.
+ *
+ * `.gitignore` writes directory patterns as `dist/`. Git only applies such a pattern when the
+ * queried path is known to be a directory, and it infers that from the filesystem. So
+ * `git check-ignore dist` on a fresh checkout - where `dist` does not exist yet - does NOT
+ * match the rule `dist/`, and this gate reported "dist is NOT ignored" on CI while passing
+ * locally, because locally `dist` existed from the previous build.
+ *
+ * That is the worst kind of gate: order-dependent, and green only on the machine that wrote
+ * it. Querying `dist/` states the intent explicitly and removes the filesystem from the
+ * question. `.data/pgdata` passed even unfixed, because its interior slash already tells git
+ * it is a directory.
+ *
+ * Found by CI on the gate's first run, which is precisely what a gate is for.
  */
 const MUST_BE_IGNORED = [
-  ['.data/pgdata', 'PGlite database. 38 MB of live data, and it is per-machine state.'],
-  ['.data', 'PGlite database directory.'],
-  ['node_modules', "192 packages, built for this machine's platform and Node ABI."],
-  ['dist', 'Build output, rebuilt from source.'],
-  ['coverage', 'Coverage output.'],
+  ['.data/', 'PGlite database. 38 MB of live data, and it is per-machine state.'],
+  ['.data/pgdata/', 'PGlite database files.'],
+  ['node_modules/', "192 packages, built for this machine's platform and Node ABI."],
+  ['dist/', 'Build output, rebuilt from source.'],
+  ['coverage/', 'Coverage output.'],
   ['.env', 'Real secrets. Unrecoverable once pushed, even to a private repo.'],
-  ['.tools', 'k6 binary, ~100 MB, downloaded.'],
+  ['.tools/', 'k6 binary, ~100 MB, downloaded.'],
 ];
 
 /**

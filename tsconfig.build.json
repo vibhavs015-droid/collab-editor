@@ -1,0 +1,24 @@
+{
+  // Build-time compiler options.
+  //
+  // WHY A SEPARATE CONFIG EXISTS
+  //
+  // `npm run build` runs `tsc`, and `tsc` compiles every file under `src` - including the 34
+  // test files. That put the entire test suite into `dist/`, which means the production image
+  // shipped test code, and a test file could in principle be imported by something in the
+  // runtime graph.
+  //
+  // Excluding tests from `tsconfig.json` itself would be the wrong fix: that config is also
+  // what `npm run typecheck` uses, and typechecking the tests is most of the value. Losing
+  // that to save 400 kB in an image would be a bad trade.
+  //
+  // So this extends the main config and narrows only the file set. Everything else - strict
+  // flags, `exactOptionalPropertyTypes`, the lot - is inherited unchanged, which means the
+  // build cannot silently compile under different rules than the typecheck.
+  //
+  // Deliberately narrow: only `*.test.ts` is excluded. Fuzzers, benchmarks and helper files
+  // that live outside the test naming convention stay in, because they are not what bloats the
+  // image and removing them by pattern is how a real file goes missing.
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
+}

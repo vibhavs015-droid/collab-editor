@@ -41,7 +41,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 
-COPY tsconfig.json vite.config.ts vitest.config.ts index.html ./
+COPY tsconfig.json tsconfig.build.json vite.config.ts vitest.config.ts index.html ./
 COPY src ./src
 
 # `tsc && vite build`, matching `npm run build` exactly. Reusing the npm script

@@ -18,7 +18,12 @@ permissions:
 jobs:
   verify:
     name: Typecheck, lint, format, test, build
-    runs-on: ubuntu-latest
+    # Pinned, not `latest`. GitHub migrates the `ubuntu-latest` label to Ubuntu 26 on
+    # 19 October 2026, and an unpinned label means a Node or filesystem change lands on this
+    # project with no commit to explain it. `ubuntu-24.04` is the current LTS and is what the
+    # `node:24-bookworm-slim` image approximates, so pinning also makes local and CI closer
+    # rather than further apart.
+    runs-on: ubuntu-24.04
 
     steps:
       # Pinned to v7, not v4. The v4 line targets Node 20, which GitHub has
@@ -88,7 +93,12 @@ jobs:
 
   security:
     name: Dependency audit
-    runs-on: ubuntu-latest
+    # Pinned, not `latest`. GitHub migrates the `ubuntu-latest` label to Ubuntu 26 on
+    # 19 October 2026, and an unpinned label means a Node or filesystem change lands on this
+    # project with no commit to explain it. `ubuntu-24.04` is the current LTS and is what the
+    # `node:24-bookworm-slim` image approximates, so pinning also makes local and CI closer
+    # rather than further apart.
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v7

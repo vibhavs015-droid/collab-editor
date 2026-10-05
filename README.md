@@ -78,6 +78,16 @@ npm start        # API only
 
 Requires Node 22+ (24 pinned in `.nvmrc`).
 
+### Trying it on your own machine
+
+**See [docs/TESTING.md](docs/TESTING.md)** for a step-by-step checklist: the editor,
+two-window realtime sync, the offline-first claim, encryption, and restart persistence — each
+with what "pass" looks like, and an explicit list of what the checklist does _not_ cover.
+
+```bash
+npm run start:local      # build once with `npm run build` first
+```
+
 ---
 
 ## How correctness is proven
@@ -169,7 +179,7 @@ with the real `Replica`, and runs in CI.
 | Lint            | `npm run lint`                 | 0 problems  |
 | Format          | `npm run format:check`         | clean       |
 | Line endings    | `npm run check:line-endings`   | clean       |
-| Tests           | `npm test`                     | 900 passing |
+| Tests           | `npm test`                     | 901 passing |
 | Vulnerabilities | `npm audit --audit-level=high` | 0           |
 
 CI runs each as a separate gate, plus a dependency-audit job.
@@ -413,7 +423,9 @@ Stated explicitly rather than left for a reviewer to discover.
 - Security has **not** been independently reviewed. Input validation covers
   protocol framing, request bodies and CRDT operations; authorisation is now
   covered by tests, but no one outside this repository has read it.
-- Client bundle is 297 kB (96 kB gzipped), mostly CodeMirror.
+- Client bundle is 302 kB (100 kB gzipped), mostly CodeMirror. No sourcemap is emitted
+  unless `SOURCE_MAPS=true`, since a 1.6 MB map referenced from the bundle is five times the
+  payload every visitor would download for a debugging aid most deployments never use.
 - The test suite takes ~5 minutes, dominated by Postgres start-up per suite. Files
   that need many cases share one boot and truncate between tests; see
   `Database.truncateAll`.

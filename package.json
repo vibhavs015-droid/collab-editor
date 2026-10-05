@@ -11,7 +11,7 @@
     "dev": "npm run build && concurrently -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch src/server/index.ts",
     "dev:client": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc -p tsconfig.build.json && vite build",
     "start": "tsx src/server/index.ts",
     "serve": "node dist/server/index.js",
     "smoke": "node scripts/smoke.mjs",
