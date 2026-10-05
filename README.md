@@ -16,8 +16,8 @@ implementation correct rather than merely claiming it.
 | 1     | Single-user editor (CodeMirror + Postgres)        | ✅ Complete |
 | 2     | **RGA CRDT + convergence fuzz test**              | ✅ Complete |
 | 3     | Real-time sync (WebSocket relay, presence)        | ✅ Complete |
-| 4     | **Offline-first** (operation log, replay)         | ✅ Complete |
-| 5     | Production hardening (auth, k6, Docker, deploy)   | Next        |
+| 5     | Production hardening (auth, k6, Docker, deploy)   | Complete    |
+| 6     | **End-to-end encryption**                         | Complete    |
 | 6     | Differentiator + public launch                    | Not started |
 
 ---
@@ -49,7 +49,8 @@ against a real relay and a real database.
 Rationale and rejected alternatives:
 [ADR-0001](docs/adr/0001-local-first-architecture.md),
 [ADR-0007](docs/adr/0007-server-is-a-relay-not-a-merge-authority.md),
-[ADR-0009](docs/adr/0009-operation-log-is-the-document.md).
+[ADR-0009](docs/adr/0009-operation-log-is-the-document.md),
+[ADR-0014](docs/adr/0014-end-to-end-encryption.md).
 
 ---
 
@@ -162,7 +163,7 @@ with the real `Replica`, and runs in CI.
 | Lint            | `npm run lint`                 | 0 problems  |
 | Format          | `npm run format:check`         | clean       |
 | Line endings    | `npm run check:line-endings`   | clean       |
-| Tests           | `npm test`                     | 785 passing |
+| Tests           | `npm test`                     | 875 passing |
 | Vulnerabilities | `npm audit --audit-level=high` | 0           |
 
 CI runs each as a separate gate, plus a dependency-audit job.
@@ -214,6 +215,63 @@ With `npm run dev` running and two tabs open on the same `?doc=`:
 
 `window.collabEditor` exposes `text()`, `state()`, `invariants()` and `resync()` in
 the console. A CRDT project should make the CRDT inspectable.
+
+---
+
+---
+
+## End-to-end encryption
+
+**The server cannot read your document.** Not "we encrypt at rest", not "TLS in transit" —
+the relay holds ciphertext it has no key for, and it never sees the key.
+
+A link with a key in its fragment opens an encrypted document:
+
+```
+http://localhost:3001/?doc=notes#k=<base64url, 32 random bytes>
+```
+
+### Why the fragment
+
+Browsers do not send `#...` in an HTTP request. So the server is not trusted with the
+key — it has never been given it. Every other option (a header, a query parameter, a key
+stored server-side) is something the server sees, and "the server is trusted not to read
+it" is a weaker claim than "the server cannot read it".
+
+A shared link **is** the credential. Whoever has the URL can read and edit the document.
+There is no escrow and no recovery: lose the link, lose the document.
+
+### What the server can and cannot see
+
+| Sees                                               | Cannot see    |
+| -------------------------------------------------- | ------------- |
+| Operation counts, timing, which site sent them     | Any character |
+| The element key of each operation, `i:alice@7`     | Any anchor    |
+| Which operations are inserts and which are deletes | Any text      |
+| Document ids, participant count                    | Titles        |
+
+That metadata is real leakage and nothing here addresses it. But it is the same class the
+server already had before encryption, and it is strictly less than the content.
+
+### What it costs
+
+Encrypted documents **cannot be compacted server-side** and get **no text cache**, because
+both need plaintext. So their operation log grows for the life of the document, and a cold
+device replays the whole history rather than fetching a string.
+
+This is a real trade, made deliberately. `docs/adr/0014-end-to-end-encryption.md` records
+it along with the alternative — client-produced snapshots, which would restore compaction
+by moving trust to a peer.
+
+### Trying it
+
+1. Open `http://localhost:3001/?doc=secret#k=<any 32 bytes, base64url>` — type in the
+   second browser window with the same URL.
+2. `curl localhost:3001/api/documents/secret` as the document's owner: `content` is empty.
+   The server holds ciphertext and cannot replay it.
+
+Both windows must use the **same** fragment. Without it, a client gets
+`ENCRYPTED_NO_KEY` rather than a document missing what the other person typed.
 
 ---
 

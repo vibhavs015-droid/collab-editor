@@ -317,6 +317,27 @@ body {
   color: var(--fg-muted);
 }
 
+/*
+ * The underlying cause, below the headline.
+ *
+ * Monospace and dimmer than the message, because it is read rather than acted on: a
+ * crypto failure's detail is a byte count and a parameter name, and setting it in the
+ * same face as the message makes it look like the second half of an instruction.
+ */
+.state__detail {
+  margin: 0.5rem 0 0;
+  max-width: 62ch;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  /* Muted rather than a new token: this is the same class of text as the message above
+     it, one level less prominent. A dedicated token for one selector is a token nobody
+     will remember to theme. */
+  color: var(--fg-muted);
+  opacity: 0.8;
+  overflow-wrap: anywhere;
+}
+
 .state__actions {
   display: flex;
   gap: 10px;

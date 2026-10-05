@@ -54,6 +54,15 @@
         <div id="error" class="state state--error" role="alert" hidden>
           <p class="state__title">Something went wrong</p>
           <p id="error-message" class="state__body"></p>
+          <!--
+            The underlying cause, when there is one worth showing.
+
+            Separate from the headline because the headline is written for someone who
+            just wants to know what to do, and the detail is written for whoever is going
+            to act on it. A crypto failure like "the link's key is 8 bytes, expected 32"
+            is useless as the headline and exactly right as the detail.
+          -->
+          <p id="error-detail" class="state__detail"></p>
           <div class="state__actions">
             <button id="retry" class="button button--primary" type="button">Try again</button>
             <button id="new-doc" class="button" type="button">Start a new document</button>

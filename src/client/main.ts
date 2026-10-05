@@ -33,6 +33,7 @@ import { parseElementId } from '../shared/operation-validation.js';
 import type { JsonValue } from '../shared/protocol.js';
 import { Replica } from '../core/crdt/replica.js';
 import { initialOperations } from '../core/crdt/seed.js';
+import { keyFragment, readKeyFromFragment, type DocumentKey } from '../core/crypto/documentKey.js';
 import {
   snapshotToOperations,
   type DocumentSnapshot,
@@ -54,6 +55,7 @@ const els = {
   loading: requireElement<HTMLDivElement>('loading'),
   error: requireElement<HTMLDivElement>('error'),
   errorMessage: requireElement<HTMLParagraphElement>('error-message'),
+  errorDetail: requireElement<HTMLParagraphElement>('error-detail'),
   retry: requireElement<HTMLButtonElement>('retry'),
   newDoc: requireElement<HTMLButtonElement>('new-doc'),
   sync: requireElement<HTMLDivElement>('sync-status'),
@@ -186,6 +188,78 @@ function resolveDocumentId(): string {
   }
 
   return newDocumentId();
+}
+
+/**
+ * The key for the document currently open, or null when it is unencrypted.
+ *
+ * Module level because it has to survive the navigation that opens a new document: the
+ * key lives in the URL fragment, and `replaceState` replaces the whole URL, so a key held
+ * only in a local would be gone by the time anything needed it again.
+ */
+let documentKey: DocumentKey | null = null;
+
+/**
+ * The document key, from the URL fragment, or null for an unencrypted document.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE FRAGMENT, AND WHY IT IS THE WHOLE POINT
+ * ---------------------------------------------------------------------------
+ * `#k=<base64url>` is not sent to the server. Browsers keep it out of the request line,
+ * out of every header, and out of `Referer`. So the server is not trusted with the key -
+ * it has never been given it. A header or a query parameter would both be something the
+ * server sees. See ADR-0014.
+ *
+ * Null is a mode, not a failure: a link with no fragment opens an unencrypted document,
+ * which is how every document created before this feature is still opened.
+ *
+ * A malformed fragment is a hard error rather than a fallback to plaintext. "This link is
+ * broken" and "open it unencrypted instead" are different things, and guessing the second
+ * when the first is true would put the user's edits into a document whose other
+ * participants chose to encrypt.
+ */
+async function resolveDocumentKey(): Promise<DocumentKey | null> {
+  const fragment = window.location.hash;
+
+  if (fragment === '') {
+    return null;
+  }
+
+  try {
+    return await readKeyFromFragment(fragment);
+  } catch (error) {
+    showFatal(
+      'This link carries an encryption key that could not be read, so the document cannot be opened.',
+      error instanceof Error ? error.message : undefined,
+    );
+    throw error;
+  }
+}
+
+/**
+ * Build the shareable link for a document.
+ *
+ * The key goes in the fragment, so the link is the credential: whoever has it can read
+ * and edit the document. That is the same friction ADR-0012 already records for
+ * anonymous subjects, and it is worth stating rather than burying.
+ */
+export async function shareLinkFor(documentId: string, key: DocumentKey | null): Promise<string> {
+  const base = `${window.location.origin}/?doc=${encodeURIComponent(documentId)}`;
+
+  return key === null ? base : `${base}${await keyFragment(key)}`;
+}
+
+function showFatal(message: string, detail?: string): void {
+  // A failure that leaves the application unusable, as opposed to one it can retry past.
+  // Both lines shown because the second is where the actual cause usually is, and a
+  // message with no detail sends the user somewhere else to look.
+  els.loading.hidden = true;
+  els.error.hidden = false;
+  els.errorMessage.textContent = message;
+
+  if (detail !== undefined) {
+    els.errorDetail.textContent = detail;
+  }
 }
 
 function showLoading(): void {
@@ -394,7 +468,7 @@ async function adoptServerContent(replica: Replica, documentId: string): Promise
   }
 }
 
-async function openDocument(documentId: string): Promise<void> {
+async function openDocument(documentId: string, key: DocumentKey | null): Promise<void> {
   teardown();
   showLoading();
 
@@ -454,6 +528,10 @@ async function openDocument(documentId: string): Promise<void> {
     transport = new SyncTransport({
       documentId,
       url: socketUrlFor(documentId),
+      // The key is passed in rather than read from `window` here, so this function's
+      // behaviour depends only on its arguments and a test can drive it. The fragment is
+      // read once, at startup.
+      ...(key === null ? {} : { key }),
       // Resolved on every connect, not once at startup. A session token expires, and
       // the only moment it is read is the handshake -- so re-resolving there means
       // expiry never becomes something the transport has to notice. See
@@ -607,8 +685,24 @@ async function openDocument(documentId: string): Promise<void> {
 
 async function startNewDocument(): Promise<void> {
   const id = newDocumentId();
-  window.history.replaceState({}, '', `?doc=${id}`);
-  await openDocument(id);
+
+  // A new document inside an encrypted session stays encrypted, and keeps the key.
+  //
+  // The key is reused rather than regenerated because the fragment is the only place the
+  // key lives: regenerating would write a URL whose key nobody else has, and the previous
+  // link would open a document this one can no longer read.
+  const key = documentKey;
+
+  // `replaceState` replaces the WHOLE url, so writing `?doc=<id>` alone would strip the
+  // key and reopen the same page unencrypted - which the server would then refuse, with a
+  // message about an encrypted document, for a document this tab created moments ago.
+  window.history.replaceState(
+    {},
+    '',
+    key === null ? `?doc=${id}` : `?doc=${id}${await keyFragment(key)}`,
+  );
+
+  await openDocument(id, key);
 }
 
 /**
@@ -637,7 +731,9 @@ function attachUnloadGuard(transport: SyncTransport): () => void {
 function wireEvents(): void {
   els.retry.addEventListener('click', () => {
     const id = els.retry.dataset['documentId'] ?? resolveDocumentId();
-    void openDocument(id);
+    // Re-read the fragment rather than caching it, because the retry is exactly when the
+    // URL is most likely to have been edited by hand to add a key.
+    void resolveDocumentKey().then((key) => openDocument(id, key));
   });
 
   els.newDoc.addEventListener('click', () => {
@@ -701,5 +797,13 @@ window.collabEditor = {
 wireEvents();
 
 const initialId = resolveDocumentId();
-window.history.replaceState({}, '', `?doc=${initialId}`);
-void openDocument(initialId);
+
+// Read the fragment BEFORE the first replaceState. Rewriting the URL first would drop the
+// key, and the key is the only thing that says this document is encrypted.
+void resolveDocumentKey().then((key) => {
+  documentKey = key;
+  // The fragment is preserved verbatim rather than re-encoded: it round-trips exactly,
+  // and re-encoding a value that already parsed is a chance to change it.
+  window.history.replaceState({}, '', `?doc=${initialId}${window.location.hash}`);
+  void openDocument(initialId, key);
+});
