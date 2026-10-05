@@ -108,16 +108,26 @@ build once served nothing at all (`/` returned 401) while every other test passe
 
 ## Part 2: By hand
 
-Open **two browser windows** side by side. Two tabs of the same browser work too: they share
+Open **two browser windows** side by side. Two tabs of the same browser work too: opening the
+bare URL in a second tab rejoins the document the first tab had open, so the two tabs share
 one identity, which is what you want, and each gets its own CRDT replica identity
 automatically.
 
-An earlier version of this file told you to add `&nope=1` to the second tab's URL to force a
-different replica id. That workaround is gone, and it existed because the replica id was kept
-in `localStorage`, which every tab shares. Two tabs were then two replicas claiming the same
-identity, so the server deduplicated one tab's operations away and the tabs silently diverged.
-The replica id now lives in `sessionStorage` — unique per tab, and it survives a reload of
-that tab — while the user identity stays in `localStorage`.
+Two earlier bugs made this step fail. Both presented as "it does not sync", and the causes
+were unrelated:
+
+1. **Two tabs at the bare URL were two different documents.** With no `?doc=` in the address,
+   each tab minted its own document id. Both tabs reported "Synced" and one collaborator,
+   because each was correctly synchronising with a server that had never heard of the other
+   tab. A bare URL now means "the document this browser was last on".
+2. **Two tabs shared one CRDT replica identity**, because the replica id was kept in
+   `localStorage`, which every tab shares. They minted identical element ids, so the server
+   deduplicated one tab's operations away and the tabs diverged silently. That version of this
+   file told you to add `&nope=1` to the second tab's URL to work around it.
+
+The replica id now lives in `sessionStorage` - unique per tab, and it survives a reload of that
+tab - while the user identity and the last-opened document stay in `localStorage`, because both
+of those are shared between tabs by design.
 
 ### 2.1 The editor works
 

@@ -27,6 +27,7 @@ import { createEditor, type EditorHandle } from './editor.js';
 import { IndexedDbOperationLog } from './storage/indexedDbLog.js';
 import { EditorBinding, type BindingAnomaly } from './sync/binding.js';
 import { describePeers, resolveSync, type SyncState } from './sync/status.js';
+import { rememberDocument, resolveDocumentId as resolveTargetDocument } from './documentTarget.js';
 import { SyncTransport, type Baseline, type ConnectionState } from './sync/transport.js';
 import type { SiteId } from '../core/clock.js';
 import { parseElementId } from '../shared/operation-validation.js';
@@ -216,19 +217,12 @@ function renderCounts(text: string): void {
 /**
  * Which document to open.
  *
- * `?doc=<id>` opens an existing one; otherwise a fresh id is minted. Explicit
- * routing rather than a router dependency: one query parameter does not need one,
- * and Phase 5 introduces routes only when there are several.
+ * The logic, and the reasoning behind it, live in `documentTarget.ts` so it can be tested
+ * without a DOM or a server. All this needs to supply is the two things that module cannot have:
+ * the current query string, and a mint function.
  */
 function resolveDocumentId(): string {
-  const params = new URLSearchParams(window.location.search);
-  const fromQuery = params.get('doc');
-
-  if (fromQuery && /^[A-Za-z0-9_-]{1,64}$/.test(fromQuery)) {
-    return fromQuery;
-  }
-
-  return newDocumentId();
+  return resolveTargetDocument(window.location.search, window.localStorage, newDocumentId);
 }
 
 /**
@@ -583,6 +577,8 @@ async function adoptServerContent(replica: Replica, documentId: string): Promise
 }
 
 async function openDocument(documentId: string, key: DocumentKey | null): Promise<void> {
+  rememberDocument(window.localStorage, documentId, key !== null);
+
   teardown();
   showLoading();
 
