@@ -26,7 +26,7 @@
 import { RgaDocument, type Operation } from '../core/crdt/rga.js';
 import { parseOperations } from '../shared/operation-validation.js';
 import { decideCompaction, type CompactionPolicy } from './compaction.js';
-import type { JsonValue } from '../shared/protocol.js';
+import type { EncryptedOperationFrame, JsonValue } from '../shared/protocol.js';
 import type { Database } from './db.js';
 import type { RelayLog, RelayPage } from './relay.js';
 import { Logger } from './observability/logger.js';
@@ -45,6 +45,17 @@ export interface OperationSink {
     documentId: string,
     ops: readonly Operation[],
     options?: { readonly materializedText?: string },
+  ): Promise<number>;
+  /**
+   * Store encrypted frames. Optional so an existing stub keeps working.
+   *
+   * Optional means the store cannot rely on it, and it checks before calling rather than
+   * assuming: a store given a sink without it must refuse encrypted operations loudly,
+   * not quietly drop them and report success.
+   */
+  appendEncryptedOps?(
+    documentId: string,
+    frames: readonly EncryptedOperationFrame[],
   ): Promise<number>;
 }
 
@@ -138,6 +149,23 @@ export class DocumentStore {
 
   /** Writes seen per document since the last compaction attempt. */
   readonly #pendingWrites = new Map<string, number>();
+
+  /**
+   * Documents known to hold ciphertext.
+   *
+   * An in-memory latch rather than a column read on every call, because it is consulted
+   * from `maybeCompact`, which runs after every write. A query per keystroke to learn
+   * something that cannot change is a cost paid forever for a fact established once.
+   *
+   * Set from the first encrypted frame and never cleared. A document's mode is decided
+   * once (ADR-0014), and the latch mirrors that: a document cannot go back.
+   *
+   * Not persisted, so it is empty after a restart. That is safe rather than lossy: the
+   * column in the database is the authority, `readForClient` asks it, and the latch only
+   * spares the compaction hot path. After a restart the first write repopulates it, and
+   * a document nobody writes is not compacting anything anyway.
+   */
+  readonly #encrypted = new Set<string>();
 
   /**
    * One compaction pass in flight, process-wide.
@@ -368,6 +396,61 @@ export class DocumentStore {
   }
 
   /**
+   * Store a batch of encrypted frames, without reading them.
+   *
+   * ---------------------------------------------------------------------------
+   * NO REPLICA, NO VALIDATION, NO TEXT
+   * ---------------------------------------------------------------------------
+   * Every step {@link apply} takes is skipped, and each omission is forced:
+   *
+   *   - No replica, so no `applyInAnyOrder` and therefore no `unplaced` count. The
+   *     server cannot place a frame it cannot read. So it cannot detect divergence, which
+   *     means an encrypted document's convergence claim rests entirely on the clients -
+   *     which is the honest consequence of withholding the key.
+   *   - No `parseOperations`, because there is nothing to parse that this process can
+   *     check. `parseEncryptedFrame` already validated the shape at the relay.
+   *   - No `materializedText`, because there is no text. `documents.content` stays empty
+   *     for the life of the document.
+   *
+   * `accepted` counts FRAMES STORED, not operations applied. Saying "accepted: 3" for a
+   * batch the server never understood would be a lie with a number on it.
+   */
+  async applyEncrypted(
+    documentId: string,
+    frames: readonly EncryptedOperationFrame[],
+  ): Promise<StoreResult> {
+    // Captured in a local because the optional-ness does not survive into the closure
+    // below, and the check must happen before the enqueue rather than inside it: an
+    // unsatisfiable store should fail before it takes the write lock.
+    const sink = this.#db.appendEncryptedOps?.bind(this.#db);
+
+    if (sink === undefined) {
+      // Refuse rather than drop. A client told "accepted: 0, rejected: 0" for its edit
+      // would believe it was saved.
+      throw new Error(
+        'This store cannot persist encrypted operations; its sink has no appendEncryptedOps.',
+      );
+    }
+
+    return this.#enqueue(documentId, async () => {
+      await sink(documentId, frames);
+
+      // One-way latch. Set from the first frame, never cleared, matching the column's own
+      // one-way semantics. See ADR-0014.
+      this.#encrypted.add(documentId);
+
+      this.#metrics.increment(M.opsReceived, { type: 'accepted-encrypted' }, frames.length);
+
+      return { accepted: frames.length, rejected: 0, unplaced: [] };
+    });
+  }
+
+  /** Whether this document's operations are ciphertext, as far as this store knows. */
+  isEncrypted(documentId: string): boolean {
+    return this.#encrypted.has(documentId);
+  }
+
+  /**
    * Compact if enough has accumulated since the last time.
    *
    * Called after a write, off the critical path: the result of the write is
@@ -381,6 +464,21 @@ export class DocumentStore {
    */
   maybeCompact(documentId: string): void {
     if (!this.#compaction.enabled || this.#compactionTimer !== null) {
+      return;
+    }
+
+    // Declined BEFORE the counter, not after.
+    //
+    // Compaction needs the live element set, and an encrypted document's operations are
+    // ciphertext this process cannot read. Attempting it would either throw or - worse -
+    // produce a snapshot of an empty document, and a client that adopts an empty baseline
+    // loses everything.
+    //
+    // Checking before incrementing also means the write counter for an encrypted document
+    // stays at zero rather than filling with writes that will never trigger anything,
+    // which keeps `pendingCompactionWrites` meaning "writes since the last attempt" for
+    // every document rather than only the plaintext ones.
+    if (this.#encrypted.has(documentId)) {
       return;
     }
 
@@ -539,18 +637,34 @@ function defaultReadSince(db: OperationSink): RelayLog {
         return Promise.resolve({ snapshot: null, ops: [], seq: sinceSeq });
       }
 
-      return caught.then((page) =>
-        page.kind === 'ops'
-          ? { snapshot: null, ops: page.ops, seq: page.seq }
-          : {
-              // The elements go out as JSON, not as a string. RGA anchors an
-              // insert to the element its origin names, so a text-only baseline
-              // would leave every subsequent operation unplaceable.
-              snapshot: page.snapshot.elements as unknown as readonly JsonValue[],
-              ops: page.ops,
-              seq: page.seq,
-            },
-      );
+      return caught.then((page) => {
+        if (page.kind === 'ops-enc') {
+          // Frames go out untouched, alongside an EMPTY `ops`. Both fields are always
+          // present so a consumer reading `ops` gets an empty list rather than
+          // `undefined`, and `frames: null` rather than a missing key means "not an
+          // encrypted document" as distinct from "an encrypted batch that was empty".
+          return {
+            snapshot: null,
+            ops: [] as readonly JsonValue[],
+            frames: page.frames,
+            seq: page.seq,
+          };
+        }
+
+        if (page.kind === 'ops') {
+          return { snapshot: null, ops: page.ops, frames: null, seq: page.seq };
+        }
+
+        return {
+          // The elements go out as JSON, not as a string. RGA anchors an
+          // insert to the element its origin names, so a text-only baseline
+          // would leave every subsequent operation unplaceable.
+          snapshot: page.snapshot.elements as unknown as readonly JsonValue[],
+          ops: page.ops,
+          frames: null,
+          seq: page.seq,
+        };
+      });
     },
   };
 }

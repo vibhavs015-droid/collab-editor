@@ -68,6 +68,56 @@ export interface SubmitOpsMessage {
   readonly ops: readonly Operation[];
 }
 
+/**
+ * An encrypted operation, exactly as it appears on the wire and at rest.
+ *
+ * Declared here rather than imported from `src/core/crypto` on purpose, and for the same
+ * reason {@link Operation} is declared locally: the transport must not depend on the
+ * CRDT or its crypto layer (ADR-0004). The server's entire job on a frame like this is to
+ * check its SHAPE. It cannot check its contents, and pretending otherwise would be the
+ * mistake.
+ *
+ * Duplication risk, stated rather than hidden: `EncryptedOperation` in
+ * `src/core/crypto/envelope.ts` has the same fields. Two definitions of a wire shape is
+ * a real cost, paid deliberately because sharing the type would make it look like the
+ * server validated something it does not. `encryptedFrames.test.ts` asserts the two
+ * shapes stay assignable to each other in both directions.
+ */
+export interface EncryptedOperationFrame {
+  /** Envelope version. Must equal the client's; anything else is refused. */
+  readonly v: number;
+  /**
+   * Cleartext element key, `i:<site>@<clock>` or `d:<site>@<clock>`.
+   *
+   * Cleartext so the server can dedupe without decrypting. The type is the first
+   * character, which is why an insert and a delete of the same element need different
+   * keys - otherwise the delete would look like a redelivered insert and the character
+   * would survive its own deletion.
+   */
+  readonly key: string;
+  readonly type: 'insert' | 'delete';
+  /** Cleartext, so the causal-stability floor can be computed without decrypting. */
+  readonly site: string;
+  /** 12 bytes, base64url, never reused under one key. */
+  readonly iv: string;
+  /** AES-GCM ciphertext with its tag, base64url. */
+  readonly ct: string;
+}
+
+/**
+ * Encrypted operations on their way in.
+ *
+ * A separate message type rather than a flag on {@link SubmitOpsMessage}, so no code
+ * path can handle `ops` and forget to handle `frames`. A message carrying either would
+ * need every handler to branch, and one forgotten branch is a document that silently
+ * stops syncing.
+ */
+export interface SubmitEncryptedOpsMessage {
+  readonly type: 'ops-enc';
+  readonly documentId: string;
+  readonly frames: readonly EncryptedOperationFrame[];
+}
+
 export interface PresenceMessage {
   readonly type: 'presence';
   readonly documentId: string;
@@ -91,7 +141,11 @@ export interface ResyncRequestMessage {
 }
 
 export type ClientMessage =
-  HelloMessage | SubmitOpsMessage | PresenceMessage | ResyncRequestMessage;
+  | HelloMessage
+  | SubmitOpsMessage
+  | SubmitEncryptedOpsMessage
+  | PresenceMessage
+  | ResyncRequestMessage;
 
 // ── Server → Client ──────────────────────────────────────────────────────
 
@@ -150,6 +204,18 @@ export interface SnapshotMessage {
   readonly seq: number;
 }
 
+/**
+ * Encrypted operations on their way out.
+ *
+ * The mirror of {@link SubmitEncryptedOpsMessage}, and separate for the same reason: a
+ * client handling `ops` must not be handed `frames` by a union it silently ignores.
+ */
+export interface EncryptedOpsMessage {
+  readonly type: 'ops-enc';
+  readonly documentId: string;
+  readonly frames: readonly EncryptedOperationFrame[];
+}
+
 export interface PresenceMessageServer {
   readonly type: 'presence';
   readonly documentId: string;
@@ -187,6 +253,7 @@ export interface ErrorMessage {
 export type ServerMessage =
   | WelcomeMessage
   | OpsMessage
+  | EncryptedOpsMessage
   | SnapshotMessage
   | PresenceMessageServer
   | SyncStateMessage
@@ -194,11 +261,132 @@ export type ServerMessage =
 
 // ── Runtime validation ───────────────────────────────────────────────────
 
-const CLIENT_MESSAGE_TYPES = new Set(['hello', 'ops', 'presence', 'resync']);
+const CLIENT_MESSAGE_TYPES = new Set(['hello', 'ops', 'ops-enc', 'presence', 'resync']);
+
+/**
+ * Envelope version the server speaks.
+ *
+ * Duplicated from `src/core/crypto/envelope.ts` for the same reason as
+ * {@link EncryptedOperationFrame}: the transport does not depend on the crypto layer.
+ * Checked here so a frame from a newer client is refused at the edge with a clear reason
+ * instead of being stored and failing to decrypt months later.
+ */
+const SUPPORTED_ENVELOPE_VERSION = 1;
+
+/** base64url, unpadded. */
+const BASE64URL = /^[A-Za-z0-9_-]+$/u;
+
+/**
+ * Largest ciphertext accepted, in base64url characters.
+ *
+ * 1 MiB of base64url is roughly 750 KiB of plaintext, which is far larger than any single
+ * operation this application produces - a keystroke, or one paste. It exists because this
+ * string becomes a database row and a metric label, and an unbounded one from a hostile
+ * client is a very cheap way to fill a disk.
+ *
+ * Not a defence against a determined attacker on its own: a thousand legal-looking 1 MiB
+ * frames is still a gigabyte. It is one bound among several, and the honest description
+ * is "silly values are refused", not "the server is protected from large messages".
+ */
+const MAX_CIPHERTEXT_CHARS = 1_048_576;
+
+/**
+ * Element key shape, `i:<site>@<clock>` or `d:<site>@<clock>`.
+ *
+ * Bounded because this string becomes a database primary-key component and is echoed in
+ * metrics. An unbounded site name from a hostile client would be a very cheap way to
+ * store megabytes per operation.
+ */
+const ELEMENT_KEY_PATTERN = /^[id]:[A-Za-z0-9_-]{1,64}@[0-9]{1,19}$/u;
 
 /** Narrows an unknown value to an index-signature object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate one encrypted frame's shape.
+ *
+ * This is the server's ONLY check on an encrypted frame, and it is worth being precise
+ * about what that means: the server can confirm the frame is shaped like a frame and
+ * nothing more. It cannot confirm the ciphertext decrypts, that it decrypts to an
+ * operation belonging to the claimed element key, or that two clients will agree on what
+ * it says.
+ *
+ * Those checks belong to the clients that hold the key, and they are real: a client that
+ * receives a frame it cannot decrypt reports it rather than applying it. What the server
+ * owes is that such a frame does not corrupt storage or impersonate a different element.
+ *
+ * @returns the frame, or null if it is not shaped like one.
+ */
+export function parseEncryptedFrame(raw: unknown): EncryptedOperationFrame | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+
+  const version = raw['v'];
+  const key = raw['key'];
+  const type = raw['type'];
+  const site = raw['site'];
+  const iv = raw['iv'];
+  const ct = raw['ct'];
+
+  if (typeof version !== 'number' || version !== SUPPORTED_ENVELOPE_VERSION) {
+    return null;
+  }
+
+  if (typeof key !== 'string' || !ELEMENT_KEY_PATTERN.test(key)) {
+    return null;
+  }
+
+  if (type !== 'insert' && type !== 'delete') {
+    return null;
+  }
+
+  // The key's prefix IS the type: `i` for insert, `d` for delete. A frame whose two
+  // disagree would be deduplicated against the wrong row, so it is refused here rather
+  // than trusted.
+  //
+  // The prefix is the single letter, NOT the word. An earlier version compared against
+  // `'insert:'`, which never matches a key that begins `i:` - so every frame was
+  // rejected, and the tests that exercised this function all failed in a way that looked
+  // like a bad fixture rather than a bad comparison.
+  const prefix = type === 'insert' ? 'i' : 'd';
+
+  if (!key.startsWith(`${prefix}:`)) {
+    return null;
+  }
+
+  if (typeof site !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/u.test(site)) {
+    return null;
+  }
+
+  // The site must match the one inside the key, or the causal-stability floor would be
+  // computed against a different participant than the one that wrote the operation.
+  if (!key.startsWith(`${prefix}:${site}@`)) {
+    return null;
+  }
+
+  // Exactly 12 bytes is 16 base64url characters, which is what AES-GCM requires. Checked
+  // as a length because the server cannot decode and re-measure the nonce meaningfully,
+  // and a wrong-length nonce would fail on every client instead of here.
+  if (typeof iv !== 'string' || !BASE64URL.test(iv) || iv.length !== 16) {
+    return null;
+  }
+
+  // Ciphertext: base64url, and long enough to hold a GCM tag. The floor is deliberately
+  // low - an empty insert is a legal operation - but a frame below a tag's worth of bytes
+  // cannot be valid ciphertext at all. The ceiling bounds what one frame can cost.
+  if (
+    typeof ct !== 'string' ||
+    !BASE64URL.test(ct) ||
+    ct.length < 22 ||
+    ct.length > MAX_CIPHERTEXT_CHARS
+  ) {
+    return null;
+  }
+
+  return { v: version, key, type, site, iv, ct };
 }
 
 /**
@@ -269,6 +457,32 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       }
 
       return { type, documentId, ops: ops as Operation[] };
+    }
+
+    case 'ops-enc': {
+      const frames = parsed['frames'];
+
+      if (typeof documentId !== 'string' || !Array.isArray(frames)) {
+        return null;
+      }
+
+      const validated: EncryptedOperationFrame[] = [];
+
+      for (const raw of frames) {
+        const frame = parseEncryptedFrame(raw);
+
+        // All-or-nothing. Dropping only the bad frames would apply half a keystroke
+        // batch and leave the document in a state nobody typed, with no record that
+        // anything was rejected. A frame this client cannot use makes the whole message
+        // unusable, so the whole message goes.
+        if (frame === null) {
+          return null;
+        }
+
+        validated.push(frame);
+      }
+
+      return { type, documentId, frames: validated };
     }
 
     case 'presence': {

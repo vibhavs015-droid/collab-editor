@@ -36,6 +36,7 @@ import {
   type SnapshotElement,
 } from '../core/crdt/snapshot.js';
 import { isValidSubject } from '../shared/subject.js';
+import type { EncryptedOperationFrame } from '../shared/protocol.js';
 
 /** One saved document. */
 export interface DocumentRecord {
@@ -53,6 +54,14 @@ export interface DocumentRecord {
    * {@link Database.claimOwnership}.
    */
   readonly owner: string | null;
+  /**
+   * Whether this document's operations are ciphertext. See ADR-0014.
+   *
+   * One-way: set by the first encrypted frame, never cleared. A document whose log mixes
+   * plaintext and ciphertext has no defined replay, so flipping the flag back would
+   * produce documents missing their first half rather than restoring anything.
+   */
+  readonly encrypted: boolean;
 }
 
 export interface CreateDocumentInput {
@@ -85,6 +94,19 @@ export type ClientCatchUp =
       /** Operations strictly after the client's cursor. */
       readonly ops: Operation[];
       /** Cursor the client should resume from. */
+      readonly seq: number;
+    }
+  | {
+      /**
+       * Encrypted frames strictly after the client's cursor. See ADR-0014.
+       *
+       * A third kind rather than an optional `frames` on the first, for the same reason
+       * the inbound message types are separate: a caller that handles `ops` cannot
+       * accidentally handle `frames` too, and a document that is encrypted can never be
+       * served by a path that does not know it.
+       */
+      readonly kind: 'ops-enc';
+      readonly frames: EncryptedOperationFrame[];
       readonly seq: number;
     }
   | {
@@ -223,6 +245,38 @@ const MIGRATIONS: readonly { readonly name: string; readonly sql: string }[] = [
         'Subject that created this document. NULL means unowned and world-writable.';
       COMMENT ON TABLE document_collaborators IS
         'Explicit access grants. Owner is not repeated here; see canAccess.';
+    `,
+  },
+  {
+    name: '0005_document_encryption',
+    sql: `
+      -- Whether this document's operations are ciphertext. See ADR-0014.
+      --
+      -- The server stores and relays encrypted operations without ever decrypting them,
+      -- which costs it two capabilities it otherwise has:
+      --
+      --   - compaction, because createSnapshot walks the live ELEMENT SET (ADR-0011)
+      --   - the documents.content cache, because materialising it means replaying the
+      --     log, and the log is ciphertext
+      --
+      -- So this flag is not decoration. It is how those two paths know to decline
+      -- rather than produce garbage.
+      --
+      -- ONE-WAY ON PURPOSE. Set true by the first encrypted frame and never cleared,
+      -- so a document cannot be flipped back and forth between modes. Two reasons:
+      --
+      --   - Flipping back would let anyone the server grants write access silently
+      --     re-enable plaintext storage on a document its authors believed was private.
+      --   - A document with a mixed log has no defined replay: the plaintext prefix and
+      --     the ciphertext suffix do not combine into anything, and serving one to a
+      --     client expecting the other produces a document missing its first half.
+      --
+      -- Once a document is encrypted it stays encrypted, and losing the key loses the
+      -- document. That is the feature working, not a failure mode.
+      ALTER TABLE documents ADD COLUMN IF NOT EXISTS encrypted BOOLEAN NOT NULL DEFAULT false;
+
+      COMMENT ON COLUMN documents.encrypted IS
+        'True once an encrypted frame has been stored. One-way; never reset to false.';
     `,
   },
 ];
@@ -364,7 +418,7 @@ export class Database {
     const result = await this.#pg.query<DocumentRow>(
       `INSERT INTO documents (id, title, content, owner)
        VALUES ($1, $2, $3, $4)
-       RETURNING id, title, content, clock, updated_at, owner`,
+       RETURNING id, title, content, clock, updated_at, owner, encrypted`,
       // Explicit fallbacks rather than relying on column DEFAULT. Postgres
       // applies a DEFAULT only when the column is *omitted* from the INSERT;
       // binding NULL passes a real NULL through, which violates NOT NULL.
@@ -391,7 +445,7 @@ export class Database {
 
   async getDocument(id: string): Promise<DocumentRecord | null> {
     const result = await this.#pg.query<DocumentRow>(
-      'SELECT id, title, content, clock, updated_at, owner FROM documents WHERE id = $1',
+      'SELECT id, title, content, clock, updated_at, owner, encrypted FROM documents WHERE id = $1',
       [id],
     );
 
@@ -423,7 +477,7 @@ export class Database {
     // identical calls, which makes it impossible to paginate against. This cost
     // two failed CI runs before it was understood; see db.test.ts.
     const result = await this.#pg.query<DocumentRow>(
-      `SELECT id, title, content, clock, updated_at, owner
+      `SELECT id, title, content, clock, updated_at, owner, encrypted
        FROM documents
        ORDER BY updated_at DESC, id DESC
        LIMIT $1`,
@@ -772,6 +826,86 @@ export class Database {
     return this.#serialise(() => this.#appendOpsLocked(documentId, ops, options));
   }
 
+  /**
+   * Append encrypted operations, ignoring any already present.
+   *
+   * ---------------------------------------------------------------------------
+   * WHAT IS DIFFERENT FROM THE PLAINTEXT PATH, AND WHY
+   * ---------------------------------------------------------------------------
+   * Only two things, and both are forced rather than chosen:
+   *
+   *   - `element_key` and `site` come from the client, because the server cannot derive
+   *     them from ciphertext. They are cleartext in the frame for exactly this reason,
+   *     and `parseEncryptedFrame` has already checked that each agrees with the other.
+   *   - No `materializedText`, because there is no text to materialise. The server cannot
+   *     replay a log it cannot read.
+   *
+   * Everything else is deliberately identical: the same lock, the same per-document
+   * sequence, the same `ON CONFLICT DO NOTHING`. Two implementations of "append and
+   * dedupe" would be two places for seq to go wrong, and seq is the cursor every
+   * reconnecting client resumes from.
+   *
+   * Mixing is refused rather than tolerated. A document with a plaintext prefix and a
+   * ciphertext suffix has no defined replay, and serving either half to a client
+   * expecting the other produces a document missing its first half with no error. So the
+   * mode is decided by the first frame and never changes.
+   *
+   * @returns the highest sequence actually stored.
+   */
+  async appendEncryptedOps(
+    documentId: string,
+    frames: readonly EncryptedOperationFrame[],
+  ): Promise<number> {
+    if (frames.length === 0) {
+      return this.#latestSeq(documentId);
+    }
+
+    return this.#serialise(() => this.#appendEncryptedOpsLocked(documentId, frames));
+  }
+
+  async #appendEncryptedOpsLocked(
+    documentId: string,
+    frames: readonly EncryptedOperationFrame[],
+  ): Promise<number> {
+    const existing = await this.getDocument(documentId);
+
+    if (existing === null) {
+      throw new Error(`appendEncryptedOps on a document that does not exist: ${documentId}`);
+    }
+
+    // NO encryption check here, deliberately. Appending encrypted frames to a document
+    // that already holds encrypted frames is the ordinary case - every keystroke after
+    // the first one does it. The guard belongs on the plaintext path, which is the one
+    // that would actually mix the two.
+
+    let seq = await this.#latestSeq(documentId);
+
+    for (const frame of frames) {
+      const result = await this.#pg.query<{ seq: string | number }>(
+        `INSERT INTO document_ops (document_id, seq, site, op, element_key)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (document_id, element_key) DO NOTHING
+         RETURNING seq`,
+        // The frame is stored whole, exactly as it arrived. Re-serialising it would be a
+        // chance to alter a frame that clients have already authenticated, and a client
+        // would then fail to decrypt its own history.
+        [documentId, seq + 1, frame.site, JSON.stringify(frame), frame.key],
+      );
+
+      const stored = result.rows[0];
+
+      if (stored) {
+        seq = toClock(stored.seq);
+      }
+    }
+
+    // One-way. Once true, every later code path skips compaction and the text cache,
+    // because both need a plaintext this process does not have.
+    await this.#pg.query('UPDATE documents SET encrypted = true WHERE id = $1', [documentId]);
+
+    return seq;
+  }
+
   /** Tail of the in-process write queue. See {@link Database.appendOps}. */
   #writeQueue: Promise<unknown> = Promise.resolve();
 
@@ -796,6 +930,23 @@ export class Database {
     ops: readonly Operation[],
     options: { readonly materializedText?: string },
   ): Promise<number> {
+    // Refuse plaintext on an encrypted document. The reverse of the guard in
+    // #appendEncryptedOpsLocked, and for the same reason: a mixed log has no replay.
+    //
+    // This is not a hypothetical. A client that opens a shared link without its key has
+    // no encrypted frame to send, and the natural-looking fallback is to send plaintext
+    // anyway. That would put readable text into a document its other participants chose
+    // to encrypt, which is precisely the harm the feature exists to prevent.
+    const existing = await this.getDocument(documentId);
+
+    if (existing === null) {
+      throw new Error(`appendOps on a document that does not exist: ${documentId}`);
+    }
+
+    if (existing.encrypted) {
+      throw new EncryptedDocumentError(documentId, 'plaintext-on-encrypted-document');
+    }
+
     await this.#pg.exec('BEGIN');
     try {
       let seq = await this.#latestSeq(documentId);
@@ -914,6 +1065,25 @@ export class Database {
    * so it looks alive — it is just quietly wrong.
    */
   async readForClient(documentId: string, sinceSeq: number, limit = 1_000): Promise<ClientCatchUp> {
+    // An encrypted document NEVER takes the snapshot branch, and cannot: the server
+    // holds no elements, because it cannot read the log it stored.
+    //
+    // That is fine rather than broken. Snapshots only exist because compaction creates a
+    // hole in the log, and compaction is skipped for encrypted documents (see
+    // `maybeCompact`). With no hole, every sequence from 1 exists, so a delta from any
+    // cursor is complete and the snapshot path is unreachable.
+    //
+    // If that ever stops being true - a compaction path that works on ciphertext, say -
+    // this branch has to grow a fourth case, and the test that asserts an encrypted
+    // document never returns `kind: 'snapshot'` is what will notice.
+    const document = await this.getDocument(documentId);
+
+    if (document?.encrypted === true) {
+      const delta = await this.readEncryptedOpsSince(documentId, sinceSeq, limit);
+
+      return { kind: 'ops-enc', frames: delta.frames, seq: delta.seq };
+    }
+
     const snapshot = await this.readSnapshot(documentId);
     const base = snapshot?.seq ?? 0;
 
@@ -970,6 +1140,30 @@ export class Database {
     );
 
     return result.rows.map((row) => row.op as Operation);
+  }
+
+  /**
+   * Encrypted frames strictly after `sinceSeq`, in sequence order.
+   *
+   * @returns frames exactly as they were stored. They are not re-serialised, not
+   *   re-ordered internally, and not validated beyond what arrived: this process cannot
+   *   check them, and rewriting them would invalidate the tag a client authenticates.
+   *   The stored value is returned as parsed JSON, so the bytes are preserved.
+   */
+  async readEncryptedOpsSince(
+    documentId: string,
+    sinceSeq: number,
+    limit = 1_000,
+  ): Promise<{ frames: EncryptedOperationFrame[]; seq: number }> {
+    const result = await this.#pg.query<{ seq: string | number; op: unknown }>(
+      'SELECT seq, op FROM document_ops WHERE document_id = $1 AND seq > $2 ORDER BY seq LIMIT $3',
+      [documentId, sinceSeq, limit],
+    );
+
+    const frames = result.rows.map((row) => row.op as EncryptedOperationFrame);
+    const last = result.rows.at(-1);
+
+    return { frames, seq: last === undefined ? sinceSeq : toClock(last.seq) };
   }
 
   /** Highest sequence stored for a document, or 0 when it has no operations. */
@@ -1084,6 +1278,34 @@ interface DocumentRow {
   clock: string | number;
   updated_at: Date;
   owner: string | null;
+  encrypted: boolean;
+}
+
+/**
+ * Raised when an operation would cross a document's encryption boundary.
+ *
+ * A named error rather than a generic one so the relay can answer with something
+ * actionable. "Cannot append: mixed modes" is not something a client can fix;
+ * "this document is encrypted, so this operation must be encrypted too" is.
+ *
+ * Deliberately thrown rather than silently ignored. Ignoring a plaintext operation on an
+ * encrypted document would look like success to the client while dropping their edit,
+ * which is worse than refusing it.
+ */
+export class EncryptedDocumentError extends Error {
+  readonly documentId: string;
+  /** Why. One case today; a union so adding one does not change this signature. */
+  readonly reason: 'plaintext-on-encrypted-document';
+
+  constructor(documentId: string, reason: EncryptedDocumentError['reason']) {
+    super(
+      `Document ${documentId} is encrypted; plaintext operations cannot be appended to it. ` +
+        'The client is probably missing the key from the link, and must not fall back to plaintext.',
+    );
+    this.name = 'EncryptedDocumentError';
+    this.documentId = documentId;
+    this.reason = reason;
+  }
 }
 
 /**
@@ -1131,5 +1353,6 @@ function toRecord(row: DocumentRow): DocumentRecord {
     clock: toClock(row.clock),
     updatedAt: toIso(row.updated_at),
     owner: row.owner,
+    encrypted: row.encrypted,
   };
 }

@@ -222,23 +222,42 @@ async function main(): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const documentId = url.searchParams.get('doc') ?? 'default';
 
-    relay.attach(socket, documentId, (ops) => {
-      // Fire and forget on purpose. Awaiting here would make one slow database
-      // write delay the broadcast of a keystroke to everyone else in the room,
-      // which is the opposite of what a relay is for. The write is queued and
-      // ordered per document, so correctness does not depend on the await.
-      void store
-        .apply(documentId, ops)
-        .then(() => {
-          // Compaction is opportunistic and off the critical path. It runs on a
-          // write counter rather than a timer, so a quiet document costs nothing
-          // and a busy one does not wait.
-          store.maybeCompact(documentId);
-        })
-        .catch((error: unknown) => {
-          logger.error('could not persist', { document: documentId, error });
+    relay.attach(
+      socket,
+      documentId,
+      (ops) => {
+        // Fire and forget on purpose. Awaiting here would make one slow database
+        // write delay the broadcast of a keystroke to everyone else in the room,
+        // which is the opposite of what a relay is for. The write is queued and
+        // ordered per document, so correctness does not depend on the await.
+        void store
+          .apply(documentId, ops)
+          .then(() => {
+            // Compaction is opportunistic and off the critical path. It runs on a
+            // write counter rather than a timer, so a quiet document costs nothing
+            // and a busy one does not wait.
+            store.maybeCompact(documentId);
+          })
+          .catch((error: unknown) => {
+            logger.error('could not persist', { document: documentId, error });
+          });
+      },
+      // Encrypted frames. Separate callback rather than a branch inside the one above,
+      // because the two paths differ in a way that matters: this one stores frames it
+      // cannot read, applies no replica, and produces no text. Folding it into the
+      // plaintext callback would put that difference somewhere invisible.
+      (frameDocumentId, frames) => {
+        void store.applyEncrypted(frameDocumentId, frames).catch((error: unknown) => {
+          // Named explicitly, because "could not persist" on an encrypted document almost
+          // always means the mode guard fired, and the log line should say so.
+          logger.error('could not persist encrypted frames', {
+            document: frameDocumentId,
+            frames: frames.length,
+            error,
+          });
         });
-    });
+      },
+    );
   });
 
   // Resolve the client bundle before opening the port, for the same reason the database

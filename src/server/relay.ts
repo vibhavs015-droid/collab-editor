@@ -24,6 +24,7 @@ import type { WebSocket } from 'ws';
 import {
   PROTOCOL_VERSION,
   type ClientMessage,
+  type EncryptedOperationFrame,
   type ErrorCode,
   type JsonValue,
   type ServerMessage,
@@ -150,7 +151,19 @@ export interface RelayPage {
    */
   readonly snapshot: readonly JsonValue[] | null;
   readonly ops: readonly JsonValue[];
-  /** Sequence of the last operation in `ops`, or the snapshot's own sequence. */
+  /**
+   * Encrypted frames, when the document is encrypted. See ADR-0014.
+   *
+   * `null` rather than an empty array for the same reason `snapshot` is: "this document
+   * has no ciphertext" and "this document is not encrypted" must not be the same value,
+   * because the second is a statement about the document and the first is a statement
+   * about one batch.
+   *
+   * A page is never both `ops` and `frames`. One document is in exactly one mode, decided
+   * by its first frame, and the store refuses to mix them.
+   */
+  readonly frames?: readonly EncryptedOperationFrame[] | null;
+  /** Sequence of the last operation in `ops` or `frames`, or the snapshot's own sequence. */
   readonly seq: number;
 }
 
@@ -317,8 +330,17 @@ export class Relay {
    *   casting to a shape it has not checked would be a lie that TypeScript
    *   correctly refuses. Validation belongs to the CRDT (ADR-0004); a caller
    *   that needs real operations validates them there.
+   * @param onEncryptedOps receives each batch of inbound ENCRYPTED frames after it
+   *   has been broadcast, so a caller can store them without reading them. See
+   *   ADR-0014. Separate from `onOps` because a handler that accepts plaintext must not
+   *   silently start accepting ciphertext, or the reverse.
    */
-  attach(socket: WebSocket, documentId: string, onOps?: (ops: readonly JsonValue[]) => void): void {
+  attach(
+    socket: WebSocket,
+    documentId: string,
+    onOps?: (ops: readonly JsonValue[]) => void,
+    onEncryptedOps?: (documentId: string, frames: readonly EncryptedOperationFrame[]) => void,
+  ): void {
     const requiresAuth = this.#authorize !== undefined;
 
     const client: Client = {
@@ -364,7 +386,7 @@ export class Relay {
         return;
       }
 
-      this.#handle(client, parsed, onOps);
+      this.#handle(client, parsed, onOps, onEncryptedOps);
     });
 
     socket.on('close', () => {
@@ -612,6 +634,7 @@ export class Relay {
     client: Client,
     message: ClientMessage,
     onOps?: (ops: readonly JsonValue[]) => void,
+    onEncryptedOps?: (documentId: string, frames: readonly EncryptedOperationFrame[]) => void,
   ): void {
     // Nothing but `hello` is accepted from a client that has not been authorised.
     //
@@ -662,6 +685,29 @@ export class Relay {
         // cast, justified by that boundary: the relay genuinely has no opinion
         // about what an operation contains.
         onOps?.(message.ops);
+        return;
+      }
+
+      case 'ops-enc': {
+        // The same relay, the same broadcast, one hop further from comprehension.
+        //
+        // The relay forwards frames verbatim and cannot read them, which is the entire
+        // point: it validates the frame's SHAPE (in `parseEncryptedFrame`) and has no
+        // opinion about its contents. `onEncryptedOps` hands them to the store, which
+        // stores them without replaying them.
+        //
+        // Separate metrics label, because "accepted" here means stored rather than
+        // applied. Counting them in the same series as plaintext operations would let a
+        // green `ops_received` stand in for a count of things nobody verified.
+        this.#metrics.increment(M.opsReceived, { type: 'batch-encrypted' }, message.frames.length);
+
+        this.#broadcast(client.documentId, client.site, {
+          type: 'ops-enc',
+          documentId: message.documentId,
+          frames: message.frames,
+        });
+
+        onEncryptedOps?.(message.documentId, message.frames);
         return;
       }
 
@@ -726,6 +772,33 @@ export class Relay {
     try {
       for (let round = 0; round < MAX_REPLAY_ROUNDS; round += 1) {
         const page = await this.#log.readSince(client.documentId, cursor, this.#replayBatchSize);
+
+        // Encrypted replay, BEFORE the snapshot branch. An encrypted document never has
+        // a snapshot to send - the server holds no elements for it - so reaching that
+        // branch would mean something has gone wrong that would silently lose history.
+        // Handling it first means the frames go out as frames.
+        if (page.frames !== null && page.frames !== undefined) {
+          const frames = page.frames;
+
+          if (frames.length > 0) {
+            replayed += frames.length;
+            this.#metrics.increment(M.opsBroadcast, {}, frames.length);
+
+            this.#send(client, {
+              type: 'ops-enc',
+              documentId: client.documentId,
+              frames,
+            });
+          }
+
+          cursor = page.seq;
+
+          if (frames.length < this.#replayBatchSize) {
+            break;
+          }
+
+          continue;
+        }
 
         if (page.snapshot !== null && !baselineSent) {
           // A baseline carries a whole document in one frame, which is exactly the case
