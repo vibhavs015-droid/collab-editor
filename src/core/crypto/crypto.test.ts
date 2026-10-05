@@ -43,6 +43,71 @@ import {
 
 const DOC = 'doc-1';
 
+/**
+ * Decode base64url to a byte string, for comparing before and after a mutation.
+ *
+ * Written with the same `atob`/`btoa` primitives the envelope module uses rather than
+ * imported from it, because those helpers are private to that module. Duplicating four lines
+ * is cheaper than widening a module's public surface to serve a test, and using the same
+ * primitives means the two sides cannot disagree about what the encoding means.
+ */
+function decodeBase64Url(text: string): string {
+  const padded = text.replaceAll('-', '+').replaceAll('_', '/');
+  const withPadding = padded.padEnd(padded.length + ((4 - (padded.length % 4)) % 4), '=');
+
+  return atob(withPadding);
+}
+
+function encodeBase64Url(bytes: string): string {
+  return btoa(bytes).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+/**
+ * Flip the high bit of one BYTE of a base64url string.
+ *
+ * @param byteIndex which decoded byte to alter, counted from the start. Must address a real
+ *   byte: positions in the padding-only tail have no byte to flip.
+ *
+ * @returns the same string with that byte changed, guaranteed to decode differently.
+ *
+ * Byte-indexed rather than character-indexed on purpose. Flipping a base64 CHARACTER is not
+ * guaranteed to change the decoded bytes, because a trailing group carries fewer significant
+ * bits than it has characters: a 2-character tail has 4 significant bits and 2 ignored, a
+ * 3-character tail has 2 significant bits and 4 ignored. A mutation touching only an ignored
+ * bit decodes to the identical bytes, and AES-GCM then legitimately succeeds.
+ *
+ * That is not hypothetical. The previous version of the tampering test flipped the
+ * second-to-last character, and on CI it produced
+ * `promise resolved "{ type: 'insert', ... }" instead of rejecting` - a security test
+ * reporting that tampering had been accepted when nothing had actually been tampered with. It
+ * also means that test could have passed while proving nothing about most positions.
+ *
+ * Working in bytes removes the possibility rather than hoping about it.
+ */
+function tamper(base64url: string, byteIndex: number): string {
+  const decoded = decodeBase64Url(base64url);
+
+  if (byteIndex < 0 || byteIndex >= decoded.length) {
+    throw new Error(
+      `byteIndex ${byteIndex} is outside a ${decoded.length}-byte ciphertext. ` +
+        'Positions in the padding-only tail have no byte to flip.',
+    );
+  }
+
+  const original = decoded.charCodeAt(byteIndex);
+  const mutated =
+    decoded.slice(0, byteIndex) +
+    String.fromCharCode(original ^ 0b1000_0000) +
+    decoded.slice(byteIndex + 1);
+
+  // Assert the invariant where it is used rather than trusting the arithmetic.
+  if (mutated === decoded) {
+    throw new Error(`tamper(${byteIndex}) did not change the decoded bytes`);
+  }
+
+  return encodeBase64Url(mutated);
+}
+
 function insert(
   site: string,
   clock: number,
@@ -309,13 +374,55 @@ describe('what must NOT decrypt', () => {
     const key = await testDocumentKey();
     const frame = await encryptOperation(key, DOC, insert('alice', 1, 'x'));
 
-    // Flip one character of the base64url. GCM's tag must catch it.
-    const flipped =
-      frame.ct.slice(0, -2) + (frame.ct.endsWith('A') ? 'B' : 'A') + frame.ct.slice(-1);
-
-    await expect(decryptOperation(key, DOC, { ...frame, ct: flipped })).rejects.toThrow(
+    await expect(decryptOperation(key, DOC, { ...frame, ct: tamper(frame.ct, 0) })).rejects.toThrow(
       DecryptionError,
     );
+  });
+
+  it('rejects tampering anywhere in the ciphertext, not only at the start', async () => {
+    // ---------------------------------------------------------------------------
+    // WHY THIS TEST EXISTS: A MUTATION THAT SOMETIMES CHANGES NOTHING
+    // ---------------------------------------------------------------------------
+    // The original version flipped the second-to-last base64url character. That is not
+    // guaranteed to alter the decoded bytes:
+    //
+    //   - base64 encodes 3 bytes as 4 characters, and a trailing group of 2 characters
+    //     carries 4 significant bits with 2 ignored
+    //   - a trailing group of 3 characters carries 2 significant bits with 4 ignored
+    //
+    // So 'A' (000000) -> 'B' (000001) alters only an IGNORED bit, the decode yields the
+    // identical bytes, and AES-GCM legitimately succeeds. The test then failed on CI with
+    // `promise resolved "{ type: 'insert', ... }" instead of rejecting` - a security test
+    // reporting that tampering was accepted, when in truth nothing had been tampered with.
+    //
+    // The lesson is the uncomfortable one: the mutation was wrong, not the crypto, and the
+    // failure looked exactly like a security defect. It also means this test could have
+    // passed while proving nothing about most positions in the string.
+    //
+    // `tamper` now flips the high bit of a specific BYTE, so the decoded bytes are
+    // guaranteed to differ, and this test checks the first, last and middle to prove the
+    // guarantee holds at every position class rather than only where it happened to work.
+    const key = await testDocumentKey();
+    const frame = await encryptOperation(key, DOC, insert('alice', 1, 'x'));
+
+    // 3 bytes per 4 base64url characters, rounded down: never the padding-only tail.
+    const byteCount = Math.floor((frame.ct.length * 3) / 4);
+    const positions = [0, 1, Math.floor(byteCount / 2), byteCount - 2, byteCount - 1];
+
+    for (const byteIndex of [...new Set(positions)].filter((index) => index >= 0)) {
+      const flipped = tamper(frame.ct, byteIndex);
+
+      // The precondition matters: if the mutation did not change the bytes, the assertion
+      // below would be testing nothing while appearing to pass.
+      expect(decodeBase64Url(flipped), `byte ${byteIndex} did not change`).not.toBe(
+        decodeBase64Url(frame.ct),
+      );
+
+      await expect(
+        decryptOperation(key, DOC, { ...frame, ct: flipped }),
+        `tampering at byte ${byteIndex} was accepted`,
+      ).rejects.toThrow(DecryptionError);
+    }
   });
 
   it('rejects a truncated ciphertext', async () => {
