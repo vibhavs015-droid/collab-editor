@@ -1281,4 +1281,47 @@ instead of accumulating.
 Verified: three consecutive runs leave 0 directories in TEMP, where every run previously
 left 3. 1.8 GB reclaimed.
 
+## A feature that existed and could not be used
+
+With all twelve phases green I went looking for what was still _unreachable_, and found
+it immediately: `generateDocumentKey` was never called from the client.
+
+The encryption work was complete at every layer - crypto, protocol, server, transport -
+and a user still could not make an encrypted document. They would have had to generate 32
+random bytes, base64url encode them, and hand-append `#k=` to the address bar. A headline
+feature that requires console access is a library, not a feature.
+
+Two toolbar buttons and a badge. The lesson worth recording is not "add the buttons" but
+**the check that found it**: grepping for an exported function and finding zero call sites.
+`generateDocumentKey` was exported, tested, and documented, and nothing in the repository
+ever invoked it. Nothing else would have surfaced that.
+
+### One function, because `replaceState` is unforgiving
+
+`history.replaceState` replaces the WHOLE url. Any navigation that writes `?doc=<id>` and
+forgets the fragment silently reopens the document UNENCRYPTED - and the server then
+refuses it with a message about an encrypted document, for a document the tab created
+moments ago.
+
+So "a url for a document always carries its key" is stated in exactly one place,
+`documentUrl()`, and every navigation goes through it. The tests use
+`readKeyFromFragment` as the oracle rather than asserting on string shape, because the
+property that matters is that the url yields the SAME KEY - not that it contains some
+particular characters.
+
+That logic was in `main.ts` first, which runs side effects on import, so it could only be
+tested by loading the whole application into a DOM. Moving it out also deleted a dead
+exported `shareLinkFor` that nothing called.
+
+Both guards verified by sabotage: dropping the fragment from `documentUrl` fails 5 tests,
+and stripping the fragment from the copy-link path fails 1.
+
+### Deliberately not a toggle
+
+"Make this encrypted" is irreversible - a document whose log holds ciphertext cannot be
+read by anyone without the key, including us - and "make this unencrypted" does not exist
+at all. A toggle would imply a round trip that is not there, so the button is hidden once a
+document is encrypted rather than disabled. Removing the question is better than greying
+it out.
+
 ## Log

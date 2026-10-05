@@ -265,13 +265,17 @@ by moving trust to a peer.
 
 ### Trying it
 
-1. Open `http://localhost:3001/?doc=secret#k=<any 32 bytes, base64url>` — type in the
-   second browser window with the same URL.
-2. `curl localhost:3001/api/documents/secret` as the document's owner: `content` is empty.
-   The server holds ciphertext and cannot replay it.
+1. Click **New encrypted** in the toolbar. A key is generated in your browser and written
+   into the address bar — it is never transmitted.
+2. Click **Copy link** and paste it into a second window. Both windows now share a document
+   the server cannot read.
+3. `curl localhost:3001/api/documents/<id>` as the owner: `content` is empty. The server
+   holds ciphertext and cannot replay it.
 
-Both windows must use the **same** fragment. Without it, a client gets
-`ENCRYPTED_NO_KEY` rather than a document missing what the other person typed.
+To open someone else's encrypted document you need the whole link. Without the fragment
+you get `ENCRYPTED_NO_KEY` rather than a document silently missing what the other person
+typed — and the server refuses to accept plaintext for a document that has ever been
+encrypted.
 
 ---
 

@@ -33,7 +33,12 @@ import { parseElementId } from '../shared/operation-validation.js';
 import type { JsonValue } from '../shared/protocol.js';
 import { Replica } from '../core/crdt/replica.js';
 import { initialOperations } from '../core/crdt/seed.js';
-import { keyFragment, readKeyFromFragment, type DocumentKey } from '../core/crypto/documentKey.js';
+import {
+  generateDocumentKey,
+  readKeyFromFragment,
+  type DocumentKey,
+} from '../core/crypto/documentKey.js';
+import { currentShareLink, documentUrl } from './shareLink.js';
 import {
   snapshotToOperations,
   type DocumentSnapshot,
@@ -58,6 +63,9 @@ const els = {
   errorDetail: requireElement<HTMLParagraphElement>('error-detail'),
   retry: requireElement<HTMLButtonElement>('retry'),
   newDoc: requireElement<HTMLButtonElement>('new-doc'),
+  newEncryptedDoc: requireElement<HTMLButtonElement>('new-encrypted-doc'),
+  copyShareLink: requireElement<HTMLButtonElement>('copy-share-link'),
+  cryptoBadge: requireElement<HTMLSpanElement>('crypto-badge'),
   sync: requireElement<HTMLDivElement>('sync-status'),
   syncText: requireElement<HTMLSpanElement>('sync-status-text'),
   syncDetail: requireElement<HTMLSpanElement>('sync-detail'),
@@ -236,19 +244,6 @@ async function resolveDocumentKey(): Promise<DocumentKey | null> {
   }
 }
 
-/**
- * Build the shareable link for a document.
- *
- * The key goes in the fragment, so the link is the credential: whoever has it can read
- * and edit the document. That is the same friction ADR-0012 already records for
- * anonymous subjects, and it is worth stating rather than burying.
- */
-export async function shareLinkFor(documentId: string, key: DocumentKey | null): Promise<string> {
-  const base = `${window.location.origin}/?doc=${encodeURIComponent(documentId)}`;
-
-  return key === null ? base : `${base}${await keyFragment(key)}`;
-}
-
 function showFatal(message: string, detail?: string): void {
   // A failure that leaves the application unusable, as opposed to one it can retry past.
   // Both lines shown because the second is where the actual cause usually is, and a
@@ -260,6 +255,92 @@ function showFatal(message: string, detail?: string): void {
   if (detail !== undefined) {
     els.errorDetail.textContent = detail;
   }
+}
+
+/**
+ * Create a new document with a freshly generated key.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS BUTTON IS THE POINT OF THE FEATURE
+ * ---------------------------------------------------------------------------
+ * A document is encrypted only when its URL carries `#k=`. Without this, using the
+ * encryption in this application required generating 32 random bytes, base64url encoding
+ * them, and hand-appending the fragment - which makes the cryptography a library rather
+ * than a feature.
+ *
+ * The key is generated here and never transmitted. That is the whole design: it goes into
+ * the address bar and nowhere else.
+ *
+ * The document is NOT sent anywhere by this function. Creating it happens the same way as
+ * any other document, on the first operation the editor produces - so abandoning this tab
+ * before typing anything leaves nothing behind, which is the behaviour a user expects from
+ * "new document".
+ */
+async function startNewEncryptedDocument(): Promise<void> {
+  const id = newDocumentId();
+  const key = await generateDocumentKey();
+
+  documentKey = key;
+
+  // The fragment is the credential, so it goes into the URL before anything else can
+  // touch the document. `replaceState` replaces the whole URL, so it must carry both
+  // halves.
+  window.history.replaceState({}, '', await documentUrl(id, key));
+
+  await openDocument(id, key);
+}
+
+/**
+ * Put the current document's link on the clipboard.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE LINK IS WHAT GETS SHARED
+ * ---------------------------------------------------------------------------
+ * For an encrypted document the link IS the credential - it contains the key, and whoever
+ * holds it can read and edit the document. There is no separate share dialog and no
+ * permission list, because there is nothing to manage: possession of the link is the
+ * entire access model. That is stated in the button's title so it is not a surprise.
+ *
+ * Falls back to showing the URL when the clipboard is unavailable, which happens on a
+ * non-secure origin: `navigator.clipboard` is undefined there, and a button that silently
+ * does nothing is worse than one that shows what you asked for.
+ */
+async function copyShareLink(): Promise<void> {
+  const link = currentShareLink(window.location);
+  const label = els.copyShareLink;
+
+  try {
+    await navigator.clipboard.writeText(link);
+    label.textContent = 'Copied';
+    label.classList.add('share-copied');
+
+    // Reverted on a timer so the control returns to its resting state without a click.
+    setTimeout(() => {
+      label.textContent = 'Copy link';
+      label.classList.remove('share-copied');
+    }, 1_600);
+  } catch {
+    // `navigator.clipboard` is undefined on an insecure origin. Selecting the text is
+    // enough for the user to copy it themselves, and saying so beats nothing happening.
+    window.prompt('Copy this link. It contains the key:', link);
+  }
+}
+
+/**
+ * Reflect whether this document is encrypted.
+ *
+ * Called after every document open, so it is driven by the key rather than by the URL:
+ * the two agree by construction, and the key is what the transport actually uses.
+ */
+function renderEncryptionState(): void {
+  const encrypted = documentKey !== null;
+
+  els.cryptoBadge.hidden = !encrypted;
+  els.copyShareLink.hidden = !encrypted;
+  els.newEncryptedDoc.hidden = encrypted;
+
+  // The button is replaced rather than disabled while already encrypted, because "make
+  // this document encrypted" has no meaning once it is. Hiding it removes the question.
 }
 
 function showLoading(): void {
@@ -670,6 +751,7 @@ async function openDocument(documentId: string, key: DocumentKey | null): Promis
 
     renderCounts(replica.text);
     renderSync();
+    renderEncryptionState();
     hideAllStates();
 
     detachUnloadGuard = attachUnloadGuard(transport);
@@ -696,11 +778,7 @@ async function startNewDocument(): Promise<void> {
   // `replaceState` replaces the WHOLE url, so writing `?doc=<id>` alone would strip the
   // key and reopen the same page unencrypted - which the server would then refuse, with a
   // message about an encrypted document, for a document this tab created moments ago.
-  window.history.replaceState(
-    {},
-    '',
-    key === null ? `?doc=${id}` : `?doc=${id}${await keyFragment(key)}`,
-  );
+  window.history.replaceState({}, '', await documentUrl(id, key));
 
   await openDocument(id, key);
 }
@@ -738,6 +816,14 @@ function wireEvents(): void {
 
   els.newDoc.addEventListener('click', () => {
     void startNewDocument();
+  });
+
+  els.newEncryptedDoc.addEventListener('click', () => {
+    void startNewEncryptedDocument();
+  });
+
+  els.copyShareLink.addEventListener('click', () => {
+    void copyShareLink();
   });
 
   els.title.addEventListener('change', () => {
@@ -800,10 +886,12 @@ const initialId = resolveDocumentId();
 
 // Read the fragment BEFORE the first replaceState. Rewriting the URL first would drop the
 // key, and the key is the only thing that says this document is encrypted.
-void resolveDocumentKey().then((key) => {
+void resolveDocumentKey().then(async (key) => {
   documentKey = key;
   // The fragment is preserved verbatim rather than re-encoded: it round-trips exactly,
   // and re-encoding a value that already parsed is a chance to change it.
-  window.history.replaceState({}, '', `?doc=${initialId}${window.location.hash}`);
+  // The fragment is preserved verbatim rather than re-encoded: it already parsed, and
+  // re-encoding a value that round-tripped correctly is a chance to change it.
+  window.history.replaceState({}, '', await documentUrl(initialId, key));
   void openDocument(initialId, key);
 });

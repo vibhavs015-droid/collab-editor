@@ -37,6 +37,47 @@
           </div>
 
           <span id="peer-count" class="peers" title="Collaborators connected"></span>
+
+          <!--
+            Encryption controls.
+
+            Present because the feature is otherwise unreachable: a document is encrypted
+            only when its URL carries `#k=`, and a user cannot hand-write that. Without
+            these two buttons the cryptography exists and no one can use it.
+
+            Deliberately two actions rather than one toggle. "Make this encrypted" is
+            irreversible - a document whose log holds ciphertext cannot be read by anyone
+            without the key, including us - and "make this unencrypted" is not available at
+            all. A toggle would imply a round trip that does not exist.
+          -->
+          <div class="toolbar__crypto">
+            <span
+              id="crypto-badge"
+              class="crypto-badge"
+              hidden
+              title="This document is end-to-end encrypted. The server cannot read it."
+              >Encrypted</span
+            >
+
+            <button
+              id="new-encrypted-doc"
+              class="button button--quiet"
+              type="button"
+              title="Create a new document the server cannot read. The key lives in the link."
+            >
+              New encrypted
+            </button>
+
+            <button
+              id="copy-share-link"
+              class="button button--quiet"
+              type="button"
+              hidden
+              title="Copy this link. Whoever has it can read and edit the document."
+            >
+              Copy link
+            </button>
+          </div>
         </div>
       </header>
 

@@ -318,6 +318,53 @@ body {
 }
 
 /*
+ * Encryption controls, in the toolbar's right-hand group.
+ *
+ * The badge is a status, so it is quiet: green, small, and out of the way when the
+ * document is unencrypted (it is hidden rather than greyed, because "not encrypted" is the
+ * default and does not need announcing).
+ */
+.toolbar__crypto {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-left: 0.6rem;
+  margin-left: 0.2rem;
+  border-left: 1px solid var(--border);
+}
+
+.crypto-badge {
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--ok);
+  border-radius: var(--radius);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  color: var(--ok);
+  white-space: nowrap;
+}
+
+.button--quiet {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.78rem;
+  color: var(--fg-muted);
+}
+
+.button--quiet:hover {
+  color: var(--fg);
+  border-color: var(--fg-muted);
+}
+
+/*
+ * Brief confirmation after copying a link.
+ *
+ * Not a modal and not an alert. Copying succeeded, there is nothing to act on, and
+ * interrupting someone mid-sentence to say so would be worse than the silence.
+ */
+.share-copied {
+  color: var(--ok);
+}
+
+/*
  * The underlying cause, below the headline.
  *
  * Monospace and dimmer than the message, because it is read rather than acted on: a
