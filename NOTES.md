@@ -1405,4 +1405,80 @@ Also corrected while there: a "known limitation" claiming the client log is capp
 than compacted, which stopped being true in `12cbea8`. Stale limitations are worse than
 none, because they describe a problem a reader may have already solved.
 
+## Three defects that only existed because nothing looked
+
+All three were found in the last stretch of work, and none of them would have been found by
+reading the code. Two were found by CI failing. One was found by reading `git status`.
+
+### A .gitignore typo committed 38 MB of live database
+
+`.gitignore` had `data/` where it meant `.data/`. Git reads that as "a directory named
+`data`", so the PGlite database was never ignored, and `git add -A` committed 997 files in
+cda7007.
+
+Nothing warned. The commit succeeded, the build passed, 900 tests passed, CI was green. It
+surfaced by reading `git status` after a commit and finding a dozen modified files under
+`.data/pgdata/`, including a `postmaster.pid`.
+
+**A wrong ignore rule is silent.** Git does not error on adding a file it was supposed to
+exclude; it just adds it. So `scripts/check-ignore.mjs` now asks `git check-ignore` directly,
+for paths that must be ignored, paths that must stay tracked, and whether anything already
+tracked matches a rule.
+
+The gate's first version was wrong in the same way the original typo was: it reported
+`docs/benchmarks/*.json` as must-be-ignored, when those 32 files are the evidence behind
+every benchmark claim in the README. Deleting them to satisfy a check would have removed the
+proof.
+
+### A gate that only passed on the machine that wrote it
+
+The fixed gate then failed on CI and passed locally, on the same rules. `.gitignore` writes
+directory patterns with a trailing slash, and git only applies such a pattern when the queried
+path is known to be a directory - which it infers from the filesystem. On a fresh checkout
+`dist` does not exist yet, so `git check-ignore dist` does not match `dist/`. Locally `dist`
+existed from the previous build, so it matched.
+
+That is the worst shape a check can have: order-dependent, and green only where it was
+written. Querying `dist/` fixes it. Verified against a scratch repository with a clean tree
+and none of those directories present, with the original typo deliberately reintroduced - the
+CI condition, reproduced on purpose.
+
+### 34 test files were shipping in the production image
+
+`npm run build` runs `tsc`, which compiled every `*.test.ts` into `dist/`. The whole test
+suite, in the image, where a test file could in principle sit in the runtime graph.
+
+Excluding them from `tsconfig.json` would have been the wrong trade: that config is what
+`npm run typecheck` uses, and typechecking the tests is most of the value. `tsconfig.build.json`
+extends it and narrows only the file set, inheriting every strict flag, so the build cannot
+quietly compile under different rules than the typecheck.
+
+Same commit: a 1.6 MB sourcemap was being emitted AND referenced from the bundle, so every
+visitor downloaded five times the payload they needed. Off unless `SOURCE_MAPS=true`, taking
+`dist` from 2.5 MB to 941 KB.
+
+## The verify exit code that had no explanation
+
+An earlier `npm run verify` exited 1 while every individual step passed. The cause was
+`prettier --check` failing on a markdown file: its warning goes to stderr, PowerShell wraps it
+as a NativeCommandError, and my output filters never matched it.
+
+Not a test failure at all. A formatting failure that looked like a broken suite because the
+diagnostic was invisible. Worth recording because "verify is red and I cannot see why" is the
+worst state a project can be in, and the fix was to capture output to a file and read the
+whole thing instead of filtering it.
+
+## Two tooling mistakes worth remembering
+
+Both cost real time and neither was the code's fault:
+
+- `[System.IO.File]::UTF8` is not a thing. It is `[System.Text.Encoding]::UTF8`. A splice
+  built on the former produced a null array, and `null -join "\n"` writes an EMPTY file
+  rather than failing - which truncated `.github/workflows/ci.yml` to zero bytes. `git
+checkout HEAD --` restored it. Long file edits in PowerShell are a trap; the edit tool is
+  safer, and when a shell splice goes wrong, check the file length before assuming nothing
+  happened.
+- A scripted replacement matched twice and inserted a duplicate CI step. The diff showed 109
+  lines removed, which is what revealed the truncation.
+
 ## Log
