@@ -630,6 +630,14 @@ async function openDocument(documentId: string, key: DocumentKey | null): Promis
         renderSync();
       },
       onDocChange: (changes) => binding?.exportLocalChanges(changes) ?? [],
+      // Presence. The transport has always been able to send it and the UI has always been
+      // able to show it, but nothing ever called `sendPresence`, so the collaborator count was
+      // permanently blank and remote cursors never moved. Same shape as the operations bug:
+      // the capability existed, was tested in isolation, and was not wired to the thing that
+      // triggers it.
+      onSelectionChange: (cursor, selectedLength) => {
+        transport?.sendPresence(cursor, selectedLength);
+      },
     });
 
     binding = new EditorBinding({
@@ -695,6 +703,17 @@ async function openDocument(documentId: string, key: DocumentKey | null): Promis
         // The site id is informational. The local site drives element IDs, because a
         // server-assigned id would change on every reconnect and break this client's
         // own clock history.
+        // Nothing to do on welcome. An earlier version announced presence here so that a client
+        // which had merely opened the document would appear in the collaborator count.
+        //
+        // It had no effect, and that turned out to be correct rather than broken:
+        // `Relay.#cursorsFor` deliberately drops null cursors, so the collaborator list shows
+        // people who have their cursor IN the document rather than everyone holding a socket
+        // open. Announcing a null cursor announces nothing.
+        //
+        // Making the count include passive readers would mean reporting a fabricated cursor
+        // position, which would then be drawn at the wrong place in the document. Not worth it
+        // for a number.
         onWelcome: () => undefined,
         onError: (code, message) => {
           console.warn(`[collab-editor] server error ${code}: ${message}`);

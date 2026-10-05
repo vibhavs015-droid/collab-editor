@@ -58,6 +58,17 @@ export interface EditorOptions {
   readonly onDocChange?: (changes: ChangeSet) => void;
   /** Extra extensions, contributed by whoever needs to observe the editor. */
   readonly extraExtensions?: readonly Extension[];
+  /**
+   * Called whenever the cursor or selection moves.
+   *
+   * Separate from `onChange` because presence is about WHERE someone is, not what they
+   * typed. A selection change fires no document change at all, so routing presence through
+   * `onChange` would mean a collaborator's cursor is only broadcast when they happen to type.
+   *
+   * @param cursor character offset of the cursor head, or null when the editor is not focused.
+   * @param selectedLength how many characters are selected, which is zero for a bare cursor.
+   */
+  readonly onSelectionChange?: (cursor: number | null, selectedLength: number) => void;
 }
 
 /**
@@ -112,6 +123,24 @@ export function createEditor(options: EditorOptions): EditorHandle {
     // anything both claim.
     keymap.of([...defaultKeymap, indentWithTab]),
     EditorView.updateListener.of((update) => {
+      // Selection first, and unconditionally.
+      //
+      // A selection change produces no `docChanged`, so checking `docChanged` first - as this
+      // did - meant a moving cursor never reported. Presence was therefore implemented,
+      // tested, and never once exercised, because nothing called it.
+      //
+      // Order does not matter to correctness: `onChange` and `onDocChange` are guarded
+      // separately below.
+      if (options.onSelectionChange !== undefined) {
+        const head = update.state.selection.main.head;
+        const anchor = update.state.selection.main.anchor;
+
+        // A null cursor means "not looking at this", which is different from "looking at
+        // offset zero". The transport sends null rather than 0 so peers can grey the name out
+        // instead of parking it at the start of the document.
+        options.onSelectionChange(update.view.hasFocus ? head : null, Math.abs(head - anchor));
+      }
+
       if (!update.docChanged) {
         return;
       }
