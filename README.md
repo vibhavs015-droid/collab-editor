@@ -16,9 +16,15 @@ implementation correct rather than merely claiming it.
 | 1     | Single-user editor (CodeMirror + Postgres)        | ✅ Complete |
 | 2     | **RGA CRDT + convergence fuzz test**              | ✅ Complete |
 | 3     | Real-time sync (WebSocket relay, presence)        | ✅ Complete |
-| 5     | Production hardening (auth, k6, Docker, deploy)   | Complete    |
-| 6     | **End-to-end encryption**                         | Complete    |
-| 6     | Differentiator + public launch                    | Not started |
+| 4     | **Offline-first** (operation log, replay)         | ✅ Complete |
+| 5     | Production hardening (auth, k6, Docker, deploy)   | ✅ Complete |
+| 6     | **End-to-end encryption**                         | ✅ Complete |
+
+**Not done:** public launch. The roadmap's phase 6 was "differentiator + public launch";
+end-to-end encryption was chosen as the differentiator and is complete, but nothing has been
+published and the repository is still private. The Docker image has also never been built,
+so the deploy path is documented but unproven — see [docs/deploy.md](docs/deploy.md) for
+exactly what has and has not been verified.
 
 ---
 
@@ -163,7 +169,7 @@ with the real `Replica`, and runs in CI.
 | Lint            | `npm run lint`                 | 0 problems  |
 | Format          | `npm run format:check`         | clean       |
 | Line endings    | `npm run check:line-endings`   | clean       |
-| Tests           | `npm test`                     | 875 passing |
+| Tests           | `npm test`                     | 900 passing |
 | Vulnerabilities | `npm audit --audit-level=high` | 0           |
 
 CI runs each as a separate gate, plus a dependency-audit job.
@@ -385,10 +391,12 @@ Stated explicitly rather than left for a reviewer to discover.
   Snapshots preserve element IDs and compaction is gated on causal stability, so the
   log stays bounded while clients are connected. It is not bounded for a document
   nobody is editing.
-- **The local IndexedDB log is capped, not compacted.** Past 50,000 entries the
-  oldest are dropped, which breaks replay for a log that referenced them. A real
-  policy needs snapshot-and-truncate. A client that prunes below the server's
-  compaction floor is served a baseline, so it converges — it just wastes a frame.
+- **Encrypted documents never compact server-side and get no text cache.** Compaction
+  walks the live element set and the text cache replays the log; both need plaintext.
+  Their `document_ops` log therefore grows for the life of the document, and a cold device
+  replays the whole history rather than fetching a string. See
+  [ADR-0014](./docs/adr/0014-end-to-end-encryption.md), which names client-produced
+  snapshots as the way out and the new trust problem that would introduce.
 - **Authentication is anonymous, and that has limits.** A session is a signed token
   carrying a random subject; there are no accounts. Two browser profiles are two
   subjects with no way to prove they are the same person, and clearing site data
@@ -398,14 +406,22 @@ Stated explicitly rather than left for a reviewer to discover.
   anyone with the id may read and write, which is what kept pre-authentication data
   working.
 - **There is a race on claiming an unowned document.** First subject to claim wins.
+- **Run exactly one server instance.** Fan-out is in-process, so a second instance would
+  not see the first one's connected clients and a document's collaborators would be split
+  across two half-relays. A pub/sub broker is the fix and has not been built.
 - Rate limiting is per-process and in-memory, so it resets on restart.
 - Security has **not** been independently reviewed. Input validation covers
   protocol framing, request bodies and CRDT operations; authorisation is now
   covered by tests, but no one outside this repository has read it.
 - Client bundle is 297 kB (96 kB gzipped), mostly CodeMirror.
-- The test suite takes ~3 minutes, dominated by Postgres start-up per suite. Files
+- The test suite takes ~5 minutes, dominated by Postgres start-up per suite. Files
   that need many cases share one boot and truncate between tests; see
   `Database.truncateAll`.
+- **The encrypted path has load numbers but no k6 figures.** k6 runs on Go with no
+  WebCrypto, so it cannot encrypt, and writing AES-GCM in JavaScript for the load
+  generator would be a second crypto implementation. Convergence under contention is proven
+  in `src/server/encryptedConvergence.test.ts` with the real `Replica`; server-side
+  throughput for encrypted frames is not measured at all.
 
 ---
 

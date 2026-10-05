@@ -944,7 +944,7 @@ export class Database {
     }
 
     if (existing.encrypted) {
-      throw new EncryptedDocumentError(documentId, 'plaintext-on-encrypted-document');
+      throw new EncryptedDocumentError(documentId);
     }
 
     await this.#pg.exec('BEGIN');
@@ -1294,17 +1294,23 @@ interface DocumentRow {
  */
 export class EncryptedDocumentError extends Error {
   readonly documentId: string;
-  /** Why. One case today; a union so adding one does not change this signature. */
-  readonly reason: 'plaintext-on-encrypted-document';
 
-  constructor(documentId: string, reason: EncryptedDocumentError['reason']) {
+  /**
+   * Why it was refused.
+   *
+   * Optional because there is exactly one reason today. A caller that wants to branch
+   * should read `documentId` and the message; forcing a reason string through every call
+   * site would be a parameter nobody could use to make a different decision.
+   */
+  readonly reason = 'plaintext-on-encrypted-document' as const;
+
+  constructor(documentId: string) {
     super(
       `Document ${documentId} is encrypted; plaintext operations cannot be appended to it. ` +
         'The client is probably missing the key from the link, and must not fall back to plaintext.',
     );
     this.name = 'EncryptedDocumentError';
     this.documentId = documentId;
-    this.reason = reason;
   }
 }
 

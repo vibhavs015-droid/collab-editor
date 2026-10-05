@@ -27,7 +27,7 @@ import { RgaDocument, type Operation } from '../core/crdt/rga.js';
 import { parseOperations } from '../shared/operation-validation.js';
 import { decideCompaction, type CompactionPolicy } from './compaction.js';
 import type { EncryptedOperationFrame, JsonValue } from '../shared/protocol.js';
-import type { Database } from './db.js';
+import { EncryptedDocumentError, type Database } from './db.js';
 import type { RelayLog, RelayPage } from './relay.js';
 import { Logger } from './observability/logger.js';
 import { Metrics } from './observability/metrics.js';
@@ -166,6 +166,16 @@ export class DocumentStore {
    * a document nobody writes is not compacting anything anyway.
    */
   readonly #encrypted = new Set<string>();
+
+  /**
+   * Documents confirmed to hold plaintext.
+   *
+   * The negative counterpart to {@link #encrypted}, and the reason the keystroke path does
+   * not cost a query. Populated on the first `apply` and cleared by the first encrypted
+   * frame, which is the only transition that can invalidate it. See
+   * {@link #isEncryptedDocument} for why the clearing matters.
+   */
+  readonly #plaintext = new Set<string>();
 
   /**
    * One compaction pass in flight, process-wide.
@@ -356,6 +366,28 @@ export class DocumentStore {
    *   apply it would make the log permanently unreplayable.
    */
   async apply(documentId: string, raw: readonly JsonValue[]): Promise<StoreResult> {
+    // Refuse BEFORE any replica work.
+    //
+    // ---------------------------------------------------------------------------
+    // WHY THIS CHECK IS HERE AND NOT ONLY IN THE DATABASE
+    // ---------------------------------------------------------------------------
+    // `Database.appendOps` also refuses plaintext on an encrypted document, but that
+    // guard is far too late. By the time it would run, `#replicaFor` has already replayed
+    // this document's log through an RGA - and for an encrypted document that log is
+    // ciphertext, so the replay is nonsense.
+    //
+    // That nonsense is not harmless. `applyInAnyOrder` would report the garbage as
+    // `unplaced`, which is a CRDT health signal: a real unplaced operation means some peer
+    // is waiting for something that never arrived, and this would have that metric lit for
+    // a reason that has nothing to do with a peer.
+    //
+    // It is checked before `parseOperations` too, because a plaintext batch is not
+    // "operations plus some junk" on an encrypted document - it is the wrong protocol
+    // entirely.
+    if (await this.#isEncryptedDocument(documentId)) {
+      throw new EncryptedDocumentError(documentId);
+    }
+
     return this.#enqueue(documentId, async () => {
       const ops = parseOperations(raw);
       const replica = await this.#replicaFor(documentId);
@@ -439,6 +471,16 @@ export class DocumentStore {
       // one-way semantics. See ADR-0014.
       this.#encrypted.add(documentId);
 
+      // The negative cache is cleared HERE rather than trusted to expire. A document that
+      // was plaintext until this moment has a cached `false` saying so, and every
+      // subsequent plaintext write would otherwise take the fast path straight past the
+      // guard in `apply`.
+      //
+      // Not sufficient alone - `Database.appendOps` guards too - but leaving a stale
+      // `false` in place while claiming to have checked would be worse than not caching at
+      // all.
+      this.#plaintext.delete(documentId);
+
       this.#metrics.increment(M.opsReceived, { type: 'accepted-encrypted' }, frames.length);
 
       return { accepted: frames.length, rejected: 0, unplaced: [] };
@@ -448,6 +490,58 @@ export class DocumentStore {
   /** Whether this document's operations are ciphertext, as far as this store knows. */
   isEncrypted(documentId: string): boolean {
     return this.#encrypted.has(documentId);
+  }
+
+  /**
+   * Ask the database whether a document is encrypted, caching the answer.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY TWO SETS, AND WHY THE NEGATIVE ONE IS CLEARED RATHER THAN TRUSTED
+   * ---------------------------------------------------------------------------
+   * The mode is one-way (ADR-0014), so a document that is encrypted never stops being
+   * encrypted, and a `true` is safe to cache forever.
+   *
+   * A `false` is the interesting one. A document BECOMES encrypted the moment its first
+   * encrypted frame arrives, which is exactly the moment a client that was sending
+   * plaintext is going to be confused.
+   *
+   * WHAT ACTUALLY GUARDS THIS, stated precisely because three mechanisms are easy to
+   * confuse:
+   *
+   *   - The LOAD-BEARING one is the ORDER of the two checks below: `#encrypted` is
+   *     consulted first, so a document in both sets reads as encrypted. Swapping those two
+   *     checks was verified to fail two tests.
+   *   - The `#plaintext` clearing in `applyEncrypted` is belt-and-braces. On its own it
+   *     closes nothing, because the precedence already covers it - which is exactly why
+   *     deleting that line left all eight tests passing. It is kept so the two sets stay
+   *     DISJOINT and neither can hold a stale answer: worth having even though nothing can
+   *     currently observe it.
+   *   - Neither covers a write already past this check. That is what `Database.appendOps`
+   *     guards independently, and it is the authoritative layer.
+   *
+   * Caching the negative answer is what keeps this free in the common case. The first
+   * version queried on every write, which put one extra SELECT on the keystroke path for a
+   * document that was going to stay plaintext forever.
+   */
+  async #isEncryptedDocument(documentId: string): Promise<boolean> {
+    if (this.#encrypted.has(documentId)) {
+      return true;
+    }
+
+    if (this.#plaintext.has(documentId)) {
+      return false;
+    }
+
+    const withRead = this.#db as Partial<Database>;
+    const document = await withRead.getDocument?.(documentId);
+
+    if (document?.encrypted === true) {
+      this.#encrypted.add(documentId);
+      return true;
+    }
+
+    this.#plaintext.add(documentId);
+    return false;
   }
 
   /**

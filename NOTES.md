@@ -1324,4 +1324,85 @@ at all. A toggle would imply a round trip that is not there, so the button is hi
 document is encrypted rather than disabled. Removing the question is better than greying
 it out.
 
+## The encryption guard was in the wrong layer
+
+Found by writing a test for a claim nothing had checked: that 24 replicas converge when
+every operation crosses the cipher.
+
+`applyEncrypted` has no replica, so it cannot report `unplaced`. **That means the
+`unplaced` metric - the one a plaintext load test leans on - is 0 for an encrypted document
+by construction, not by correctness.** Convergence there is a claim only the clients can
+make.
+
+Writing that test surfaced a real ordering bug. The plaintext-on-encrypted guard lived in
+`Database.appendOps`, which runs AFTER `store.apply` has already called `#replicaFor` and
+replayed the document's log through an RGA. For an encrypted document that log is
+ciphertext, so the replay is nonsense and `applyInAnyOrder` reports it as `unplaced`,
+lighting the CRDT health metric for a reason unrelated to any peer waiting for anything.
+
+Found because a test expected a throw and got `accepted: 0` instead, which sent me looking
+for where the operation was dropped rather than assuming the guard had fired. Moved the
+check into `DocumentStore.apply`, ahead of all replica work. The database guard stays as
+the authoritative layer for a write already in flight.
+
+### Five failures that were my test, and one that was not
+
+Of six initial failures, five were harness bugs:
+
+1. **Editors never applied their own operations.** The relay deliberately does not echo to
+   its sender, so an editor that only SENDS ends up one editor's worth short. Every replica
+   had the same LENGTH but different CONTENT, and the differing elements were exactly one
+   editor's set - same length, different set is the signature of a missing delivery rather
+   than a misordered one. Found by diffing two replicas instead of reading code.
+2. **`settle(40)` produced fake convergence failures.** 960 encrypted operations, each a
+   WebCrypto round trip at both ends; the last message had not arrived. This is the worst
+   kind of failure - it reports a CRDT bug when the bug is the test's timing, and nothing
+   in the output distinguishes them. Now polls for the condition it asserts.
+3. **The "contention" test had no contention.** It inserted everything, settled, and only
+   then deleted.
+4. **Its assertion was a guess.** `length < EDITORS_COUNT * 10` failed at 460 against a 240
+   threshold, and 460 was CORRECT: the old target expression `(round + 1) % len` maps only
+   rounds 0-9, so exactly 10 of 240 elements were ever deleted. The assertion described the
+   intent rather than the arithmetic. Now derived from what it sends.
+5. **Substring matching on `<index>/<round>` tokens.** A deleted `'0/2'` is found inside the
+   surviving `'10/2'`, so a correctly applied tombstone read as a failure. Fixed with
+   fixed-width tokens and exact set comparison in both directions.
+
+The one that was not my test: dropping `#pendingDeletes.add(key)` fails the
+delete-before-insert test, which is the RGA behaving correctly. The plaintext path already
+covered it at `rga.test.ts:152`; the encrypted path had no parallel coverage and now does.
+
+### Two more tests that passed while proving nothing
+
+Third and fourth time breaking the code has been the only thing that found these:
+
+- **`refuses before touching a replica`** asserted only that `apply` throws. The DATABASE
+  guard also throws, so deleting the store-level guard left it passing. Rewritten to assert
+  `openDocumentCount` stays 0 - the only observable that distinguishes the two layers.
+- **The negative-cache invalidation** in `applyEncrypted` closes nothing on its own, because
+  `#encrypted` is consulted before `#plaintext` and a document in both sets already reads
+  as encrypted. Deleting the line left all eight tests green. Kept so the two sets stay
+  disjoint, but the comment now says which mechanism is load-bearing.
+
+### An asymmetry, recorded rather than fixed
+
+`isInsertOp` requires a one-character value. The encrypted path CANNOT check that, because
+the value is inside the ciphertext, so an encrypted document can hold multi-character
+elements the server would have refused in plaintext. Harmless - the CRDT accepts arbitrary
+values and clients agree - but the two paths accept different sets of documents.
+
+## An index-based edit silently deleted a completed phase
+
+I updated the README status table by row number instead of by content. It overwrote
+**phase 4, Offline-first**, and left two rows numbered 6. Phase 4 is one of this project's
+headline claims, and the table that reports status had removed it.
+
+Found by reading the diff, not by any test. The lesson generalises past markdown: the tool
+that made this fast - a scripted row replacement - is the same tool that made it silent.
+Content-anchored edits are slower and worth it.
+
+Also corrected while there: a "known limitation" claiming the client log is capped rather
+than compacted, which stopped being true in `12cbea8`. Stale limitations are worse than
+none, because they describe a problem a reader may have already solved.
+
 ## Log
