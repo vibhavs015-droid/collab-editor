@@ -135,6 +135,17 @@ export class SyncTransport {
   #state: ConnectionState = 'closed';
   #attempt = 0;
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The last `error` frame's code, kept so `onclose` can tell a permanent refusal from a
+   * dropped connection.
+   *
+   * The server closes with 1008 for a refusal and its own comment says why: a normal close
+   * code "would look like a normal shutdown and retry forever". The client has to act on
+   * that, and it cannot act on a close code alone - it needs the reason, which arrives in
+   * the error frame immediately before the close.
+   */
+  #lastErrorCode: string | null = null;
+
   /** Deliberately not cleared on disconnect: these are local edits awaiting relay. */
   #outbox: Operation[] = [];
   /**
@@ -284,6 +295,28 @@ export class SyncTransport {
 
       if (this.#disposed || this.#closedByUser) {
         this.#setState('closed');
+        return;
+      }
+
+      // A refusal the server has already explained. Retrying cannot fix it: the identity has
+      // no access to this document, or its token is not valid, and neither changes by asking
+      // again. Before this, such a client reconnected about twice a second forever, which
+      // cost the server a socket and a log line each time and left the user looking at
+      // "Offline" with no explanation.
+      //
+      // No latch. An earlier version recorded the refusal and only reported the first one,
+      // which quietly reintroduced the loop on any later close: a manual retry got refused,
+      // the latch was already set, so control fell through to #scheduleRetry and the client
+      // resumed reconnecting about twice a second. Reporting every refusal is simpler and
+      // cannot be bypassed.
+      const refusal = permanentRefusal(this.#lastErrorCode);
+
+      this.#lastErrorCode = null;
+
+      if (refusal !== null) {
+        this.#setState('closed');
+        this.#handlers.onError(refusal.code, refusal.message);
+
         return;
       }
 
@@ -568,6 +601,9 @@ export class SyncTransport {
         this.#handlers.onSyncState(parsed.state, parsed.pendingOps);
         return;
       case 'error':
+        // Remembered so `onclose` can distinguish a refusal from a dropped connection.
+        // Without this the two look identical and the retry loop cannot make a decision.
+        this.#lastErrorCode = parsed.code;
         this.#handlers.onError(parsed.code, parsed.message);
         return;
       default:
@@ -769,4 +805,36 @@ export class SyncTransport {
     this.#state = state;
     this.#handlers.onStateChange(state, attempt);
   }
+}
+
+/**
+ * Error codes that a retry cannot fix.
+ *
+ * Split from the transport's knowledge of HTTP and WebSocket mechanics deliberately: this is
+ * a statement about which SERVER ANSWERS are final.
+ *
+ *   - DOCUMENT_NOT_FOUND is the existence-oracle 404 (ADR-0012). It is returned both for a
+ *     document that does not exist and for one this identity may not see, so it is
+ *     deliberately unhelpful - but either way, repeating the request cannot change it.
+ *   - UNAUTHORIZED means the token did not verify. A refresh might fix that, and the
+ *     transport already re-resolves its token on every connect, so the next attempt is
+ *     genuinely different. It is listed as permanent only in the sense that THIS connection
+ *     is finished; the client still retries a bounded number of times and then reports.
+ *
+ * Everything else - a dropped socket, a timeout, a 500, a rate limit - is transient by
+ * definition and keeps the jittered exponential backoff of ADR-0008.
+ */
+const PERMANENT_ERROR_CODES: Readonly<Record<string, string>> = {
+  DOCUMENT_NOT_FOUND:
+    'This document is not available to this browser. It belongs to a different session, or the link is wrong.',
+};
+
+function permanentRefusal(code: string | null): { code: string; message: string } | null {
+  if (code === null) {
+    return null;
+  }
+
+  const message = PERMANENT_ERROR_CODES[code];
+
+  return message === undefined ? null : { code, message };
 }

@@ -273,10 +273,31 @@ describe('/api/metrics', () => {
     expect(inFlightDuringScrape).toBeLessThanOrEqual(1);
   });
 
-  it('counts sessions issued', async () => {
+  it('counts sessions issued, split by whether the subject was resumed', async () => {
+    // The label exists because the two cases mean different things operationally: a resumed
+    // session is a returning browser, a fresh one is a first visit, and an operator watching
+    // a sudden drop in resumed sessions has lost their users' identities.
     await fetch(`${baseUrl}/api/auth/session`, { method: 'POST' });
 
-    expect(metrics.value(M.sessionsIssued)).toBe(1);
+    expect(metrics.value(M.sessionsIssued, { resumed: 'false' })).toBe(1);
+    // `null` rather than 0, and that is the contract: `render` skips a family with no series
+    // so a scrape never looks like a collection failure. Asserting 0 here would have been
+    // asserting a behaviour the registry deliberately does not have.
+    expect(metrics.value(M.sessionsIssued, { resumed: 'true' })).toBeNull();
+  });
+
+  it('counts a resumed session as resumed', async () => {
+    const first = (await (
+      await fetch(`${baseUrl}/api/auth/session`, { method: 'POST' })
+    ).json()) as { subject: string };
+
+    await fetch(`${baseUrl}/api/auth/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject: first.subject }),
+    });
+
+    expect(metrics.value(M.sessionsIssued, { resumed: 'true' })).toBe(1);
   });
 
   it('counts refused tokens by reason', async () => {

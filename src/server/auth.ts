@@ -40,7 +40,6 @@
  */
 
 import { SignJWT, errors as joseErrors, jwtVerify } from 'jose';
-import { randomBytes } from 'node:crypto';
 
 import { isValidSubject, SUBJECT_RULE_MESSAGE } from '../shared/subject.js';
 
@@ -106,14 +105,6 @@ export interface Authenticator {
 
   /** False when this authenticator provides no security. Surfaced in /api/health. */
   readonly isOpen: boolean;
-}
-
-/** Generate a fresh, unguessable subject. */
-export function newSubject(): string {
-  // 128 bits, base64url. A subject is an identifier, not a secret, so this does
-  // not need to be a UUID; it needs to be collision-free and unguessable enough
-  // that guessing one is not an attack.
-  return randomBytes(16).toString('base64url');
 }
 
 /**

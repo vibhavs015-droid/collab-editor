@@ -198,12 +198,33 @@ export class EditorBinding {
   }
 
   /**
-   * Convert the changes in an update into operations.
+   * Convert the changes in an update into operations, apply them, and BROADCAST them.
    *
    * CodeMirror's ChangeSet reports positions in the coordinates of the state the
    * transaction started from, and every change in one set uses those same
    * coordinates. The translation into the running document lives in
    * `applyLocalEdits`, which is tested without a DOM.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THIS CALLS `onLocalOperations`, AND WHY IT USED NOT TO
+   * ---------------------------------------------------------------------------
+   * It used to RETURN the operations and let the caller send them. Every other mutation
+   * path here - undo, redo, title - goes through `#dispatchLocal`, which broadcasts. This one
+   * did not, and it is the path EVERY KEYSTROKE takes.
+   *
+   * The consequence was that the browser never sent a single typed character to the server.
+   * The local IndexedDB log was correct, so offline-first worked, the document looked right,
+   * the sync indicator said "Synced" because the outbox was empty, and 901 tests passed. Two
+   * windows could not collaborate, nothing was ever persisted server-side, and a raw
+   * WebSocket was the only thing in the entire investigation that ever reached the store.
+   *
+   * Found by opening the built application in a browser, typing, and asking the server what
+   * it had: `collab_operations_received_total` was absent, meaning the counter had never been
+   * incremented by anything except a hand-written probe.
+   *
+   * Returning the operations as well is kept, because it is useful and costs nothing. But the
+   * broadcast is no longer the caller's responsibility: a binding that can be used without
+   * knowing to forward its output is a footgun, and this one was stepped in.
    */
   exportLocalChanges(changes: ChangeSet): Operation[] {
     if (this.#reflecting || this.#detached) {
@@ -216,7 +237,13 @@ export class EditorBinding {
       edits.push({ from: fromBefore, to: toBefore, inserted: inserted.toString() });
     });
 
-    return applyLocalEdits(edits, this.#replica);
+    const ops = applyLocalEdits(edits, this.#replica);
+
+    if (ops.length > 0) {
+      this.#onLocalOperations(ops);
+    }
+
+    return ops;
   }
 
   /** Run a replica mutation, broadcast its operations, and keep the editor out of it. */

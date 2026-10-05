@@ -35,3 +35,38 @@ export function isValidSubject(value: unknown): value is string {
 /** Message shared by every rejection, so the client sees one explanation. */
 export const SUBJECT_RULE_MESSAGE =
   'Subject must be 1-128 characters of A-Z, a-z, 0-9, underscore, dot, colon or hyphen.';
+
+/** Generate a fresh, unguessable subject. */
+export function newSubject(): string {
+  // 128 bits, base64url. A subject is an identifier, not a secret, so this does not need to
+  // be a UUID; it needs to be collision-free and unguessable enough that guessing one is not
+  // an attack.
+  //
+  // WEB CRYPTO, NOT `node:crypto`, and that is not a style preference.
+  //
+  // This function used `randomBytes` from `node:crypto`, which is correct on the server and
+  // silently broken in the browser: Vite replaces `node:crypto` with an empty stub for the
+  // client bundle, so the call throws `randomBytes is not a function`. The browser code that
+  // called it caught the TypeError and fell back, so durable identity was quietly OFF in the
+  // one environment it exists for - and 901 tests passed, because every one of them ran under
+  // Node where `node:crypto` works.
+  //
+  // `globalThis.crypto.getRandomValues` exists in both: browsers have had it for years, and
+  // Node has had a global Web Crypto since v19. One implementation, no bundler stub, no
+  // environment branch. `btoa` is likewise global in both.
+  //
+  // The lesson generalises past this function: SHARED code must not import a Node builtin the
+  // browser bundle stubs, and the failure is invisible until it runs in a browser. See
+  // shared/browserSafety.test.ts, which now asserts it mechanically.
+  const bytes = new Uint8Array(16);
+
+  globalThis.crypto.getRandomValues(bytes);
+
+  let binary = '';
+
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}

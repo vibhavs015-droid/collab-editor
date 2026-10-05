@@ -75,6 +75,13 @@ const els = {
   logDepth: requireElement<HTMLSpanElement>('log-depth'),
 };
 
+/**
+ * Per-TAB CRDT replica identity. sessionStorage, not localStorage - see resolveSite.
+ *
+ * Named per tab, so do not confuse it with `collab-editor:subject` in localStorage, which is
+ * the per-browser-profile user identity. Confusing the two is what made two tabs share one
+ * replica identity.
+ */
 const SITE_KEY = 'collab-editor:site';
 
 /**
@@ -106,19 +113,45 @@ const COMPACT_KEEP_TAIL = 200;
  * characters, which is the one failure the CRDT cannot detect for itself.
  */
 function resolveSite(): SiteId {
+  // ---------------------------------------------------------------------------
+  // sessionStorage, NOT localStorage, and the distinction is load-bearing
+  // ---------------------------------------------------------------------------
+  // A site id is a CRDT REPLICA identity, not a user identity. Two tabs of the same document
+  // are two independent replicas, and if they share a site id they mint identical element ids
+  // - so the server's `ON CONFLICT (document_id, element_key) DO NOTHING` silently discards
+  // one tab's operations as duplicates, and the two tabs diverge with no error anywhere.
+  //
+  // Observed in a browser: typing "XYZ" in one window changed that window to "XYZRELOAD"
+  // while the other stayed at "RELOAD". Both reported "Synced". The earlier version of this
+  // function read localStorage, which is shared by every tab on the origin.
+  //
+  // sessionStorage has exactly the right lifetime: unique per tab, and it SURVIVES a reload
+  // of that tab. So:
+  //
+  //   - reload          -> same site, and the replica reloads its IndexedDB log, so clocks
+  //                        resume rather than colliding
+  //   - new tab         -> new site, because it is genuinely a second replica
+  //   - tab closed      -> site gone, which is correct, since that replica is gone
+  //
+  // The USER identity lives in localStorage (see SessionStore in api.ts) because that one
+  // must survive reloads and be shared across tabs. Two lifetimes, two stores, each matched
+  // to what it identifies.
   try {
-    const existing = window.localStorage.getItem(SITE_KEY);
+    const existing = window.sessionStorage.getItem(SITE_KEY);
+
     if (existing !== null && existing.length > 0) {
       return existing;
     }
 
     const minted = newDocumentId();
-    window.localStorage.setItem(SITE_KEY, minted);
+
+    window.sessionStorage.setItem(SITE_KEY, minted);
+
     return minted;
   } catch {
-    // Private browsing, or storage disabled. A per-session site is still correct:
-    // it only means a reload starts a fresh identity, and the server catches the
-    // replica up by replaying the log rather than by comparing clocks.
+    // Private browsing, or storage disabled. A fresh site per load is still correct: it only
+    // means this replica has a new identity, and the server catches it up by replaying the log
+    // rather than by comparing clocks.
     return `s-${newDocumentId()}`;
   }
 }

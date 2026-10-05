@@ -17,9 +17,9 @@ import {
   MIN_SECRET_BYTES,
   OpenAuthenticator,
   TokenAuthenticator,
-  newSubject,
   resolveAuthenticator,
 } from './auth.js';
+import { newSubject } from '../shared/subject.js';
 
 const SECRET = 'a-test-secret-that-is-long-enough-for-hs256-padding';
 const OTHER_SECRET = 'a-different-secret-of-equal-length-so-length-is-not-the-test';

@@ -74,10 +74,24 @@ let harness: Harness | null = null;
  * afterwards; the listener resolves it through a closure, which is safe because
  * no transaction is dispatched until the harness returns.
  *
- * `broadcast` deliberately collects from two places and nowhere else: the
- * listener's export of local changes, and the binding's own `onLocalOperations`
- * for undo, redo and start-up. Counting the replica's callback instead would
- * double-count, since the replica reports the very same operations.
+ * `broadcast` collects from ONE place: the binding's own `onLocalOperations`. Counting the
+ * replica's callback instead would double-count, since the replica reports the same
+ * operations.
+ *
+ * It used to collect from two places - this listener forwarded what `exportLocalChanges`
+ * returned, AND the binding reported through `onLocalOperations`. That arrangement was the
+ * reason the missing broadcast went unnoticed for so long:
+ *
+ *   - `main.ts` does exactly what this listener did NOT do. It calls `exportLocalChanges` and
+ *     discards the result, so with the binding not broadcasting either, every keystroke's
+ *     operations were computed and thrown away.
+ *   - This harness forwarded them by hand, so every test exercised a wiring the application
+ *     does not have. The tests were green and the application sent nothing to the server for
+ *     the whole life of the project.
+ *
+ * So the listener here does what `main.ts` does - call `exportLocalChanges` and ignore the
+ * result - and the binding broadcasts. The two are now wired identically, which is the only
+ * way a test of the binding can say anything about the application.
  */
 function create(site = 'local', initial = ''): Harness {
   const log = new NullLog();
@@ -91,11 +105,10 @@ function create(site = 'local', initial = ''): Harness {
       return;
     }
 
-    const ops = binding?.exportLocalChanges(update.changes) ?? [];
-
-    if (ops.length > 0) {
-      broadcast.push(ops);
-    }
+    // Deliberately ignores the return value, exactly as `main.ts` does. The binding
+    // broadcasts; forwarding here as well would double-count every keystroke and would hide
+    // the original bug behind a harness that was wired more carefully than the application.
+    binding?.exportLocalChanges(update.changes);
   });
 
   const host = document.createElement('div');
@@ -203,6 +216,35 @@ describe('EditorBinding - local editing', () => {
     // second batch derived from the binding's own dispatch, and in production as
     // an endless ping-pong of no-op operations.
     expect(harness.broadcast).toHaveLength(1);
+  });
+
+  it('broadcasts every keystroke, which the application depends on', async () => {
+    // The regression test for the worst bug this project has had.
+    //
+    // `exportLocalChanges` returned the operations and left broadcasting to the caller.
+    // Undo, redo and start-up go through `#dispatchLocal`, which DOES broadcast - so the
+    // class looked consistent, and every path except the one that matters was covered.
+    //
+    // `main.ts` calls `exportLocalChanges` from the editor's change listener and discards
+    // the result. So the browser never sent a single typed character to the server: the local
+    // IndexedDB log was correct, the editor looked right, the sync indicator said "Synced"
+    // because the outbox was empty, and 901 tests passed. Two windows could not collaborate
+    // and nothing was ever persisted server-side.
+    //
+    // Found by opening the built application in a browser, typing, and asking the server what
+    // it held - `collab_operations_received_total` was absent entirely.
+    //
+    // This test is only meaningful because the harness above no longer forwards the returned
+    // operations itself. While it did, this suite exercised a wiring the application does not
+    // have, and every one of these tests was green.
+    harness = await start();
+
+    harness.type('abc');
+
+    // One batch, three operations, delivered through `onLocalOperations` and nowhere else.
+    expect(harness.broadcast).toHaveLength(1);
+    expect(harness.broadcast.flat()).toHaveLength(3);
+    expect(harness.replica.text).toBe('abc');
   });
 
   it('broadcasts nothing for a remote change', async () => {

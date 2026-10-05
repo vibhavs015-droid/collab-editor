@@ -15,7 +15,8 @@ import type { Duplex } from 'node:stream';
 
 import type { Database } from './db.js';
 import type { DocumentRecord } from './db.js';
-import { AuthError, OpenAuthenticator, newSubject, type Authenticator } from './auth.js';
+import { AuthError, OpenAuthenticator, type Authenticator } from './auth.js';
+import { SUBJECT_RULE_MESSAGE, isValidSubject, newSubject } from '../shared/subject.js';
 import { Logger } from './observability/logger.js';
 import { Metrics } from './observability/metrics.js';
 import { M, declareMetrics } from './observability/index.js';
@@ -287,7 +288,7 @@ export class ApiServer {
       // obtains the token every other route requires. It hands out a random subject
       // and nothing else: no document is read, and no existing subject is disclosed.
       if (path === '/api/auth/session' && req.method === 'POST') {
-        await this.#issueSession(res);
+        await this.#issueSession(req, res);
         return;
       }
 
@@ -417,22 +418,76 @@ export class ApiServer {
   }
 
   /**
-   * Mint an anonymous session.
+   * Issue a session token.
    *
-   * No rate limit, deliberately. Signing HS256 costs microseconds, so a limit here
-   * would be overhead pretending to be protection. The endpoints worth limiting are
-   * the ones that touch the database, and `helloTimeout` already bounds how often a
-   * socket can make the server do that.
+   * ---------------------------------------------------------------------------
+   * WHY THE CALLER MAY CHOOSE ITS OWN SUBJECT
+   * ---------------------------------------------------------------------------
+   * This always minted a fresh random subject, and the client kept the resulting token in
+   * memory only. The reasoning was that persisting a token to localStorage exposes it to any
+   * script on the origin, and that "the cost of that is a user having to obtain a new session
+   * after a reload."
+   *
+   * With ACCOUNTS that framing is right: reload, log in again. With ANONYMOUS identities it
+   * is badly wrong, because there is no logging in. A new subject is a new person, so after
+   * one reload the browser permanently loses server-side access to every document it had
+   * opened. The local copy still renders from IndexedDB, so the failure looks like a flaky
+   * network rather than a lost identity - and it never recovers.
+   *
+   * Observed in a real browser rather than in a test: the page reported "Offline" forever
+   * while the server logged DOCUMENT_NOT_FOUND rejections about twice a second, indefinitely.
+   *
+   * So the SUBJECT becomes the durable thing and the token stays disposable. The client keeps
+   * one random 128-bit subject in localStorage and presents it here; a fresh short-lived
+   * token is minted from it on every load.
+   *
+   * SECURITY, stated plainly, because "anyone may claim any subject" sounds alarming:
+   *
+   *   - A subject is 16 random bytes. Guessing one is not an attack, so this is possession of
+   *     a secret rather than an assertion of identity.
+   *   - The threat model is unchanged in kind. Before, script on the origin could read a
+   *     bearer token from memory and nothing more; now it can read the subject and mint
+   *     tokens freely. Both amount to "script on this origin can act as this user".
+   *   - What improves is that there is no long-lived token to steal and reuse until it
+   *     expires, because the token is disposable and the subject is the only durable thing.
+   *
+   * A client with no stored subject still gets one minted, so this is additive and breaks
+   * nothing that previously worked.
    */
-  async #issueSession(res: ServerResponse): Promise<void> {
-    const issued = await this.#auth.issue(newSubject());
+  async #issueSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let subject = newSubject();
+    let resumed = false;
 
-    this.#obs.metrics.increment(M.sessionsIssued);
+    const body = await readJsonBody(req);
+
+    if (!('error' in body)) {
+      const requested: unknown = body.value['subject'];
+
+      if (requested !== undefined) {
+        if (!isValidSubject(requested)) {
+          // Refused rather than ignored. Silently minting a different subject would leave
+          // the client believing it had kept its identity while holding a new one, which is
+          // the exact failure this endpoint exists to make impossible.
+          sendError(res, 400, 'INVALID_BODY', SUBJECT_RULE_MESSAGE);
+
+          return;
+        }
+
+        subject = requested;
+        resumed = true;
+      }
+    }
+
+    const issued = await this.#auth.issue(subject);
+
+    this.#obs.metrics.increment(M.sessionsIssued, { resumed: String(resumed) });
 
     sendJson(res, 200, {
       token: issued.token,
       subject: issued.subject,
       expiresAt: issued.expiresAt,
+      /** True when this was the caller's own subject rather than a freshly minted one. */
+      resumed,
     });
   }
 

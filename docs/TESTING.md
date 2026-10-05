@@ -1,7 +1,13 @@
 # Testing this project on your own machine
 
-Everything below has been run at least once on the machine that wrote this file. Where a step
-says "expected", that is the observed result, not a hope.
+Every step below was run in a real browser against the built production server on the machine
+that wrote this file - driven through the browser's own automation, typing real key events
+into CodeMirror rather than setting values, and then asking the server's `/api/metrics` what
+it had actually received.
+
+That last part matters more than it sounds. Two of the bugs described below were invisible to
+all 900-odd automated tests and showed up only because the browser was asked a question the
+tests never asked: has the server received anything yet?
 
 Two ways to test:
 
@@ -102,11 +108,16 @@ build once served nothing at all (`/` returned 401) while every other test passe
 
 ## Part 2: By hand
 
-Open **two browser windows** side by side. For most of these you want two _different_ windows,
-not two tabs, because tabs share a session and the point is two independent clients.
+Open **two browser windows** side by side. Two tabs of the same browser work too: they share
+one identity, which is what you want, and each gets its own CRDT replica identity
+automatically.
 
-If you use two tabs, add `&nope=1` to the second one's URL so the client treats it as a
-separate tab and mints a different site id.
+An earlier version of this file told you to add `&nope=1` to the second tab's URL to force a
+different replica id. That workaround is gone, and it existed because the replica id was kept
+in `localStorage`, which every tab shares. Two tabs were then two replicas claiming the same
+identity, so the server deduplicated one tab's operations away and the tabs silently diverged.
+The replica id now lives in `sessionStorage` — unique per tab, and it survives a reload of
+that tab — while the user identity stays in `localStorage`.
 
 ### 2.1 The editor works
 
