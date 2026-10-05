@@ -56,6 +56,14 @@ jobs:
       - name: Line endings and encoding
         run: npm run check:line-endings
 
+      # A wrong .gitignore rule is SILENT: git does not error on adding a file it was supposed
+      # to exclude, it just adds it. This repo had `data/` where it meant `.data/`, and 997
+      # files totalling 38 MB of PGlite database were committed before anyone noticed by
+      # reading `git status`. Nothing else in the pipeline would ever have caught it, so this
+      # asks git directly whether the rules do what they claim.
+      - name: Gitignore coverage
+        run: npm run check:ignore
+
       - name: Test
         run: npm test
 

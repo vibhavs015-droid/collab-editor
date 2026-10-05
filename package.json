@@ -33,7 +33,8 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
     "check:line-endings": "node scripts/check-line-endings.mjs",
-    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run check:line-endings && npm test",
+    "check:ignore": "node scripts/check-ignore.mjs",
+    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run check:line-endings && npm run check:ignore && npm test",
     "verify:built": "npm run build && npm run smoke"
   },
   "devDependencies": {

@@ -1,8 +1,14 @@
 # `.tools/` - downloaded binaries (k6). Never committed; see scripts/load/README.md
 .tools/
 
-# `.data/` - PGlite database directory
-
+# `.data/` - PGlite database directory. Used by `npm run start:local`.
+#
+# The leading dot MATTERS. This read `data/` for its whole life, which matches a directory
+# named `data` and not `.data` - so the PGlite database was never ignored. 997 files and
+# 38 MB were committed in cda7007 before it was noticed. `scripts/check-ignore.mjs` now
+# asserts this rule actually covers the path, so a typo here fails the build instead of
+# quietly admitting a database.
+.data/
 data/
 
 # Local environment
