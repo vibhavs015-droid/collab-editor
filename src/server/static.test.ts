@@ -38,22 +38,52 @@ let baseUrl: string;
 const INDEX_HTML =
   '<!doctype html><title>collab</title><script src="/assets/a-abc123.js"></script>';
 
-/** Recursively remove a directory, tolerating absence. Used only in teardown. */
-async function removeQuietly(path: string): Promise<void> {
-  await rm(path, { recursive: true, force: true }).catch(() => undefined);
+/**
+ * Remove a directory tree, and say so when it does not work.
+ *
+ * The swallowing `.catch(() => undefined)` this replaced hid a 955 MB leak: on Windows
+ * `rm` fails while any handle into the directory is still open, and the failure was
+ * invisible. A test that cannot clean up after itself should fail rather than accumulate,
+ * because a full disk makes PGlite fail to boot, which looks like an unrelated flake.
+ */
+async function removeTree(path: string): Promise<void> {
+  try {
+    await rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (error) {
+    throw new Error(
+      `Failed to remove the test directory ${path}: ${String(error)}. ` +
+        'Leftover PGlite directories fill the disk and make unrelated tests fail.',
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * A throwaway directory tree that mimics `dist/client`.
+ *
+ * The PGlite database lives INSIDE this directory, not beside it. An earlier version
+ * used `join(root, '..', 'pg-<timestamp>')`, which put it in `%TEMP%` as a sibling that
+ * no cleanup path covered - about 38 MB per full-suite run, and 955 MB had accumulated in
+ * TEMP by the time this was noticed.
+ */
+async function makeStaticRoot(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'collab-static-'));
+  await mkdir(join(dir, 'assets'), { recursive: true });
+  await writeFile(join(dir, 'index.html'), INDEX_HTML, 'utf8');
+  await writeFile(join(dir, 'assets', 'a-abc123.js'), 'console.log(1);', 'utf8');
+  await writeFile(join(dir, 'assets', 'a-def456.css'), 'body{}', 'utf8');
+  await writeFile(join(dir, 'favicon.svg'), '<svg/>', 'utf8');
+  // A file whose name has no hyphen, so the route template cannot just strip a suffix.
+  await writeFile(join(dir, 'assets', 'collab-editor.js'), 'export default 1;', 'utf8');
+
+  return dir;
 }
 
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), 'collab-static-'));
-  await mkdir(join(root, 'assets'), { recursive: true });
-  await writeFile(join(root, 'index.html'), INDEX_HTML, 'utf8');
-  await writeFile(join(root, 'assets', 'a-abc123.js'), 'console.log(1);', 'utf8');
-  await writeFile(join(root, 'assets', 'a-def456.css'), 'body{}', 'utf8');
-  await writeFile(join(root, 'favicon.svg'), '<svg/>', 'utf8');
-  // A file whose name has no hyphen, so the route template cannot just strip a suffix.
-  await writeFile(join(root, 'assets', 'collab-editor.js'), 'export default 1;', 'utf8');
+  root = await makeStaticRoot();
 
-  db = await Database.openAt(join(root, '..', `pg-${Date.now()}`));
+  // Inside `root`, so the single cleanup below covers it.
+  db = await Database.openAt(join(root, 'pg'));
   server = new ApiServer({ db, static: await openStatic(root), port: 0 });
 
   const address = await server.listen();
@@ -63,7 +93,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await server?.close();
   await db?.close();
-  await removeQuietly(root);
+  await removeTree(root);
 });
 
 describe('resolveStaticPath', () => {
@@ -338,14 +368,16 @@ describe('a symlink pointing out of the root', () => {
   let linkServer: ApiServer;
   let linkUrl: string;
   let linkDb: Database;
+  let outsideRoot: string;
 
   beforeAll(async () => {
-    linkRoot = await mkdtemp(join(tmpdir(), 'collab-static-link-'));
+    linkRoot = await makeStaticRoot();
     await writeFile(join(linkRoot, 'index.html'), INDEX_HTML, 'utf8');
 
-    // A file the server must never serve, placed outside the root.
-    const outside = await mkdtemp(join(tmpdir(), 'collab-static-secret-'));
-    const secret = join(outside, 'secret.txt');
+    // A file the server must never serve, placed OUTSIDE the root. Its own directory,
+    // because a file inside the root would not prove the containment check does anything.
+    outsideRoot = await mkdtemp(join(tmpdir(), 'collab-static-secret-'));
+    const secret = join(outsideRoot, 'secret.txt');
 
     await writeFile(secret, 'TOP SECRET', 'utf8');
 
@@ -354,7 +386,7 @@ describe('a symlink pointing out of the root', () => {
       // that depends on this one skips itself rather than reporting a false pass.
     });
 
-    linkDb = await Database.openAt(join(outside, 'pg'));
+    linkDb = await Database.openAt(join(outsideRoot, 'pg'));
     linkServer = new ApiServer({ db: linkDb, static: await openStatic(linkRoot), port: 0 });
     linkUrl = `http://127.0.0.1:${(await linkServer.listen()).port}`;
   });
@@ -362,7 +394,10 @@ describe('a symlink pointing out of the root', () => {
   afterAll(async () => {
     await linkServer?.close();
     await linkDb?.close();
-    await removeQuietly(linkRoot);
+    // Both, not just the served root: the secret directory was the other leak, and it held
+    // a whole PGlite database.
+    await removeTree(linkRoot);
+    await removeTree(outsideRoot);
   });
 
   it('does not follow a symlink out of the root', async () => {
