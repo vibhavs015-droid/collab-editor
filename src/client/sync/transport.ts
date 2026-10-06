@@ -17,6 +17,7 @@
 
 import { parseOperations } from '../../shared/operation-validation.js';
 import {
+  MAX_OPS_PER_FRAME,
   PROTOCOL_VERSION,
   type ClientMessage,
   type EncryptedOperationFrame,
@@ -79,8 +80,6 @@ export interface TransportOptions {
   readonly socketFactory?: (url: string) => WebSocket;
   readonly baseRetryMs?: number;
   readonly maxRetryMs?: number;
-  /** Max operations buffered while disconnected before the oldest are dropped. */
-  readonly maxQueuedOps?: number;
   /**
    * Document key, from the URL fragment. See ADR-0014.
    *
@@ -118,7 +117,6 @@ export class SyncTransport {
   readonly #resolveToken: () => Promise<string>;
   readonly #baseRetryMs: number;
   readonly #maxRetryMs: number;
-  readonly #maxQueuedOps: number;
   /**
    * Document key, or null when this document is not encrypted. See ADR-0014.
    *
@@ -205,7 +203,6 @@ export class SyncTransport {
     this.#handlers = options.handlers;
     this.#baseRetryMs = options.baseRetryMs ?? 500;
     this.#maxRetryMs = options.maxRetryMs ?? 15_000;
-    this.#maxQueuedOps = options.maxQueuedOps ?? 5_000;
     this.#key = options.key ?? null;
     this.#socketFactory = options.socketFactory ?? ((url) => new WebSocket(url));
     // Default produces an empty token, which the server refuses. That is the honest
@@ -361,12 +358,19 @@ export class SyncTransport {
 
     this.#outbox.push(...ops);
 
-    if (this.#outbox.length > this.#maxQueuedOps) {
-      // Drop the oldest rather than growing without bound. Local edits are
-      // durable in the CRDT and in local storage; the relay only needs a
-      // reasonable tail to bring peers current.
-      this.#outbox = this.#outbox.slice(-this.#maxQueuedOps);
-    }
+    // There is deliberately no cap here, and in particular nothing is dropped.
+    //
+    // The outbox used to keep only the newest 5,000 operations. Typed text is a chain,
+    // each character anchored to the one before it, so discarding the oldest operations
+    // left every survivor anchored to something the relay never received. The relay
+    // accepted them as well formed, could not place them, and a peer saw an empty
+    // document, while this client reported itself synced. A single paste of 5,001
+    // characters was enough to trigger it. The relay needs the whole log, not a tail.
+    //
+    // The memory the cap protected is mostly not extra: the outbox holds references to
+    // operation objects the replica already keeps for every element, so a queued
+    // operation costs one pointer. Frame size is bounded where it matters, at send time,
+    // by MAX_OPS_PER_FRAME.
 
     if (this.#state === 'open') {
       this.#flushOutbox();
@@ -449,8 +453,6 @@ export class SyncTransport {
       return;
     }
 
-    const batch = this.#outbox;
-
     if (this.#key !== null) {
       // Encrypt before sending, and deliberately NOT before queueing.
       //
@@ -477,7 +479,13 @@ export class SyncTransport {
       // went out in one frame - but it is timing-dependent, not designed, and
       // `disconnect()` replaces the outbox outright, which would leave `batch` pointing
       // at an array nothing else can see.
-      const batch = [...this.#outbox];
+      const batch = this.#outbox.slice(0, MAX_OPS_PER_FRAME);
+
+      // True only when the socket refused the frame. Used below so a refused write is
+      // not retried at once: the transport may still believe the socket is open for a few
+      // event-loop turns, and retrying would re-encrypt the same batch in a loop until
+      // the close event arrived.
+      let writeFailed = false;
 
       void encryptOperations(this.#key, this.#documentId, batch)
         .then((frames) => {
@@ -485,16 +493,20 @@ export class SyncTransport {
             return;
           }
 
+          // Write first, remove second. The batch used to be removed before the write, so
+          // a socket that dropped while encryption was running took the batch with it:
+          // the comment said "left queued" and the code had already dequeued it.
+          if (!this.#send({ type: 'ops-enc', documentId: this.#documentId, frames })) {
+            writeFailed = true;
+
+            // Left queued. The reconnect path flushes it.
+            return;
+          }
+
           // Remove exactly what this batch covered. Re-reading the length rather than
           // trusting the captured array is what keeps an edit queued mid-encryption from
           // being sent twice or dropped.
           this.#outbox.splice(0, batch.length);
-
-          if (this.#send({ type: 'ops-enc', documentId: this.#documentId, frames })) {
-            return;
-          }
-
-          // Left queued on a failed write. The reconnect path flushes it.
         })
         .catch((error: unknown) => {
           // Left in the outbox, still plaintext, and retried on the next flush. The user
@@ -512,7 +524,7 @@ export class SyncTransport {
           // else will come along to flush it: `send()` returned early on the `#encrypting`
           // guard. Without this the second keystroke would sit in the outbox until the
           // next edit or a reconnect, which looks like a lost keystroke to the user.
-          if (this.#outbox.length > 0 && this.#state === 'open') {
+          if (!writeFailed && this.#outbox.length > 0 && this.#state === 'open') {
             this.#flushOutbox();
           }
 
@@ -525,13 +537,21 @@ export class SyncTransport {
       return;
     }
 
-    if (!this.#send({ type: 'ops', documentId: this.#documentId, ops: batch })) {
-      // Kept queued. The reconnect path flushes it, and the indicator keeps
-      // reporting them as pending.
-      return;
+    // In order, MAX_OPS_PER_FRAME at a time. The next chunk is sliced off a new array
+    // rather than spliced out of this one, so a caller still holding the array from
+    // `queuedOperations` is not emptied underneath it.
+    while (this.#outbox.length > 0) {
+      const chunk = this.#outbox.slice(0, MAX_OPS_PER_FRAME);
+
+      if (!this.#send({ type: 'ops', documentId: this.#documentId, ops: chunk })) {
+        // Kept queued. The reconnect path flushes it, and the indicator keeps
+        // reporting them as pending.
+        return;
+      }
+
+      this.#outbox = this.#outbox.slice(chunk.length);
     }
 
-    this.#outbox = [];
     this.#handlers.onSyncState('synced', 0);
   }
 

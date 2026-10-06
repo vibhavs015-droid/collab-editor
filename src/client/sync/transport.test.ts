@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Operation } from '../../core/crdt/rga.js';
+import { generateDocumentKey } from '../../core/crypto/documentKey.js';
+import { MAX_OPS_PER_FRAME } from '../../shared/protocol.js';
 import {
   SyncTransport,
   type Baseline,
@@ -564,11 +566,91 @@ describe('SyncTransport', () => {
       expect(sent.map((op) => op.id.clock)).toEqual([1, 2, 3]);
     });
 
-    it('drops the oldest operations past the queue cap', () => {
-      // Built directly rather than via the harness so the queue cap can be set.
+    /**
+     * Typed text is a chain: each character is anchored to the one before it. The
+     * outbox used to keep only its newest 5,000 operations, which left every survivor
+     * anchored to an operation the relay never received. The relay then accepted the
+     * batch, could not place it, and peers saw an empty document while this client
+     * reported itself synced. Hence these tests are about the head of the queue, not
+     * its size.
+     */
+    const chain = (count: number): Extract<Operation, { type: 'insert' }>[] =>
+      Array.from({ length: count }, (_unused, index) => ({
+        type: 'insert' as const,
+        id: { site: 'a', clock: index + 1 },
+        origin: index === 0 ? null : { site: 'a', clock: index },
+        value: 'x',
+      }));
+
+    const sentClocks = (socket: FakeSocket): number[][] =>
+      socket
+        .parsedSent()
+        .filter((m) => m['type'] === 'ops')
+        .map((m) => (m['ops'] as { id: { clock: number } }[]).map((op) => op.id.clock));
+
+    it('never drops queued operations, however many are queued', () => {
+      const h = harness();
+
+      h.transport.send(chain(12_000));
+
+      expect(h.transport.queuedOperationCount).toBe(12_000);
+      expect(h.transport.queuedOperations[0]).toEqual(chain(1)[0]);
+    });
+
+    it('sends a large backlog in bounded frames, in order, starting from the first operation', async () => {
+      const h = harness();
+      h.transport.send(chain(2_500));
+
+      h.transport.connect();
+      FakeSocket.last().admit();
+      await Promise.resolve();
+
+      const frames = sentClocks(FakeSocket.last());
+
+      expect(frames.map((clocks) => clocks.length)).toEqual([
+        MAX_OPS_PER_FRAME,
+        MAX_OPS_PER_FRAME,
+        500,
+      ]);
+      expect(frames.flat()).toEqual(chain(2_500).map((op) => op.id.clock));
+      expect(h.transport.queuedOperationCount).toBe(0);
+      expect(h.pending.at(-1)).toEqual({ state: 'synced', count: 0 });
+    });
+
+    it('sends a single paste larger than the frame size without losing its head', async () => {
+      const h = harness();
+      h.transport.connect();
+      FakeSocket.last().admit();
+      await Promise.resolve();
+
+      h.transport.send(chain(6_000));
+
+      const frames = sentClocks(FakeSocket.last());
+
+      expect(frames.flat()).toHaveLength(6_000);
+      expect(frames[0]?.[0]).toBe(1);
+      expect(Math.max(...frames.map((clocks) => clocks.length))).toBeLessThanOrEqual(
+        MAX_OPS_PER_FRAME,
+      );
+    });
+
+    /**
+     * A transport that encrypts, plus the socket IT created. Taken from the factory
+     * rather than `FakeSocket.last()`, so a socket left over from another test cannot be
+     * mistaken for this one. Real timers: encryption completes on the real event loop,
+     * and polling for it under fake timers would advance the transport's own timers.
+     */
+    const encryptedTransport = async (): Promise<{
+      transport: SyncTransport;
+      socket: () => FakeSocket;
+    }> => {
+      vi.useRealTimers();
+      FakeSocket.reset();
+      let created: FakeSocket | null = null;
       const transport = new SyncTransport({
         documentId: 'doc-1',
         url: 'ws://x',
+        key: await generateDocumentKey(),
         handlers: {
           onOps: () => undefined,
           onBaseline: () => undefined,
@@ -578,17 +660,62 @@ describe('SyncTransport', () => {
           onError: () => undefined,
           onStateChange: () => undefined,
         },
-        socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
-        maxQueuedOps: 3,
+        socketFactory: (url) => {
+          created = new FakeSocket(url);
+          return created as unknown as WebSocket;
+        },
+      });
+      return {
+        transport,
+        socket: () => {
+          if (created === null) {
+            throw new Error('the transport has not created a socket');
+          }
+          return created;
+        },
+      };
+    };
+
+    it('sends an encrypted backlog in bounded frames, in order', async () => {
+      const { transport, socket } = await encryptedTransport();
+      transport.send(chain(2_500));
+
+      transport.connect();
+      socket().admit();
+
+      await vi.waitFor(() => {
+        expect(transport.queuedOperationCount).toBe(0);
       });
 
-      for (let clock = 1; clock <= 6; clock += 1) {
-        transport.send([{ type: 'insert', id: { site: 'a', clock }, origin: null, value: 'x' }]);
-      }
+      const frames = socket()
+        .parsedSent()
+        .filter((m) => m['type'] === 'ops-enc')
+        .map((m) => (m['frames'] as unknown[]).length);
 
-      // Bounded, not unbounded. An unbounded queue is a memory leak waiting for
-      // a user who edits for an hour on a train.
-      expect(transport.queuedOperationCount).toBe(3);
+      expect(frames).toEqual([MAX_OPS_PER_FRAME, MAX_OPS_PER_FRAME, 500]);
+      transport.dispose();
+    });
+
+    it('keeps an encrypted batch queued when the socket cannot take it', async () => {
+      const { transport, socket } = await encryptedTransport();
+
+      transport.connect();
+      socket().admit();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // The socket stops being writable before the batch is sent, which is what a
+      // dropped connection looks like from inside the transport.
+      socket().readyState = 3;
+      transport.send(chain(5));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(
+        socket()
+          .parsedSent()
+          .filter((m) => m['type'] === 'ops-enc'),
+      ).toHaveLength(0);
+      expect(transport.queuedOperationCount).toBe(5);
+      transport.dispose();
     });
 
     it('ignores an empty send', () => {

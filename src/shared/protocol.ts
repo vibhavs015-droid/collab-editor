@@ -47,6 +47,30 @@ export type Operation = JsonValue;
 /** Wire protocol version. Bumped when the envelope shape changes. */
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Most operations a client puts in one `ops` or `ops-enc` frame.
+ *
+ * A client that has queued more than this sends several frames in order. One frame per
+ * flush would be simpler, but then the largest legitimate frame grows with the length of
+ * the offline session, and no frame-size limit on the server could be set that did not
+ * eventually reject an honest client. Chunking is what makes MAX_FRAME_BYTES enforceable.
+ *
+ * Measured with 4-byte characters: about 163 KiB per frame as plaintext and about 386 KiB
+ * encrypted.
+ */
+export const MAX_OPS_PER_FRAME = 1_000;
+
+/**
+ * Largest WebSocket message the relay will buffer, in bytes.
+ *
+ * Without an explicit limit the `ws` library accepts 100 MiB per message and the relay
+ * parses it before it knows who sent it. Four MiB is more than twice the largest frame
+ * any released client could produce (a full 5,000-operation outbox, encrypted, was about
+ * 1.9 MiB) and about ten times a MAX_OPS_PER_FRAME chunk, so no honest client is refused.
+ * The relay closes an oversized connection with code 1009.
+ */
+export const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+
 // ── Client → Server ──────────────────────────────────────────────────────
 
 export interface HelloMessage {
