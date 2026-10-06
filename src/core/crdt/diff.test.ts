@@ -621,3 +621,65 @@ describe('diffVisible - randomised property', () => {
     expect(changes[0]).toEqual({ from: 1_234, to: 1_235 });
   });
 });
+
+/*
+ * `diffVisible` works in element indices internally but must report editor offsets,
+ * which count UTF-16 code units. They differ after any astral character.
+ */
+describe('diffVisible - astral characters', () => {
+  const EMOJI = '\u{1F600}';
+
+  it('reports editor offsets rather than element indices for an insertion', () => {
+    const before = snapshot(`a${EMOJI}b`);
+    const after = insertAt(before, 2, 'X');
+
+    const changes = diffVisible(before, after);
+
+    expect(changes).toEqual([{ from: 3, insert: 'X' }]);
+  });
+
+  it('reports a deleted emoji as a two-unit range', () => {
+    const before = snapshot(`a${EMOJI}b`);
+    const after = before.filter((_element, index) => index !== 1);
+
+    expect(diffVisible(before, after)).toEqual([{ from: 1, to: 3 }]);
+  });
+
+  it('reports a trailing insertion after an emoji at the UTF-16 length', () => {
+    const before = snapshot(`a${EMOJI}`);
+    const after = insertAt(before, 2, 'X');
+
+    expect(diffVisible(before, after)).toEqual([{ from: 3, insert: 'X' }]);
+  });
+
+  it('produces the target text across a randomised mix of astral and plain characters', () => {
+    const random = mulberry32(20260421);
+    const alphabet = ['a', 'b', 'c', EMOJI, '\u{1F44B}', '\u4f60'];
+
+    for (let round = 0; round < 300; round += 1) {
+      const length = Math.floor(random() * 12);
+      const text = Array.from(
+        { length },
+        () => alphabet[Math.floor(random() * alphabet.length)],
+      ).join('');
+
+      let after: ElementSnapshot[] = snapshot(text);
+      const before = after;
+
+      for (let step = 0; step < 4; step += 1) {
+        if (random() < 0.5 && after.length > 0) {
+          const at = Math.floor(random() * after.length);
+          after = after.filter((_element, index) => index !== at);
+        } else {
+          const at = Math.floor(random() * (after.length + 1));
+          after = insertAt(after, at, alphabet[Math.floor(random() * alphabet.length)] ?? 'a');
+        }
+      }
+
+      const changes = diffVisible(before, after);
+
+      expect(changes).not.toBeNull();
+      expect(applyChanges(snapshotText(before), changes ?? [])).toBe(snapshotText(after));
+    }
+  });
+});
