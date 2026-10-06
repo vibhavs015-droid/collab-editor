@@ -1,0 +1,495 @@
+{
+  "_comment": "Project opportunities mined from the Reddit CSV datasets. Data lives here rather than in Python literals so it can be edited without touching code, and so the generator stays shallow enough to read in one screen.",
+  "datasets": [
+    {
+      "file": "dataset_reddit-scraper_2026-10-04_17-32-16-198.csv",
+      "label": "A (4 Oct)",
+      "rows": 2486,
+      "cols": 103,
+      "posts": 97,
+      "comments": 2389,
+      "communities": 30,
+      "leading": "r/TCS_India, r/codeforces, r/Vit, r/leetcode",
+      "verdict": "Used."
+    },
+    {
+      "file": "dataset_reddit-scraper_2026-10-02_02-26-11-071.csv",
+      "label": "B (2 Oct)",
+      "rows": 2505,
+      "cols": 112,
+      "posts": 96,
+      "comments": 2406,
+      "communities": 46,
+      "leading": "r/learnprogramming, r/SideProject, r/developersIndia",
+      "verdict": "Used."
+    },
+    {
+      "file": "reddit.csv",
+      "label": "-",
+      "rows": 209,
+      "cols": 12,
+      "verdict": "Rejected. Column names are CSS classes - flex href, truncate, mb-0 src. It is a scrape of a search results page, not of posts; its only real content is URLs."
+    },
+    {
+      "file": "reddit (1).csv",
+      "label": "-",
+      "rows": 86,
+      "cols": 13,
+      "verdict": "Rejected. Same fault. Densest column is mb-0 src, containing subreddit icon URLs."
+    },
+    {
+      "file": "reddit (2).csv",
+      "label": "-",
+      "rows": 53,
+      "cols": 16,
+      "verdict": "Rejected. Same fault, plus some rows are search-engine redirect URLs."
+    }
+  ],
+  "demandPatterns": [
+    {
+      "label": "wishes it existed",
+      "count": 56,
+      "means": "Explicit want: wish there was, if only, would love"
+    },
+    {
+      "label": "cannot find it",
+      "count": 18,
+      "means": "Named gap: can't find, nobody has, doesn't exist"
+    },
+    {
+      "label": "reports it broken",
+      "count": 11,
+      "means": "Failure report: keeps crashing, so buggy"
+    },
+    { "label": "too expensive", "count": 11, "means": "Cost objection: too expensive, paywall" },
+    {
+      "label": "manual or tedious",
+      "count": 48,
+      "means": "Friction: manually, by hand, spreadsheet"
+    },
+    {
+      "label": "asks for a recommendation",
+      "count": 26,
+      "means": "Active search: any recommendations, what should I build"
+    }
+  ],
+  "ranking": [
+    {
+      "component": "Evidence strength",
+      "weight": "35%",
+      "reason": "How many independent rows want it, and how directly. One loud comment is an anecdote; six people in four communities describing the same friction is a market."
+    },
+    {
+      "component": "Demonstrable difficulty",
+      "weight": "25%",
+      "reason": "Whether a finished project proves something a CRUD app cannot. This is the axis the dataset itself keeps asking for."
+    },
+    {
+      "component": "Buildability solo",
+      "weight": "25%",
+      "reason": "Can one person finish it in weeks on a laptop, with no money? Every project here is zero-cost by construction; that is a constraint, not an accident."
+    },
+    {
+      "component": "Portfolio legibility",
+      "weight": "15%",
+      "reason": "Can a stranger understand what it does in ten seconds from the README? A project that needs a video to explain has already lost."
+    }
+  ],
+  "projects": [
+    {
+      "id": 1,
+      "name": "Offline-first collaborative editor",
+      "score": 9.4,
+      "evidence": 9,
+      "difficulty": 10,
+      "solo": 5,
+      "legible": 9,
+      "problem": "Nobody has described wanting a text editor. What people describe, repeatedly and unprompted, is the absence of collaborative software that survives a bad connection - and a specific, technical wish for exactly this project.",
+      "quotes": [
+        {
+          "q": "how do you implement Google Docs with collaborative writing?",
+          "sub": "programming-general",
+          "score": 140,
+          "src": "B"
+        },
+        {
+          "q": "if you want to get more experience with distributed systems, you could build a basic distributed KV store, or a collaborative text editor... start by yourself so you can grapple intimately with the problems that are inherent to these projects",
+          "sub": "programming-general",
+          "score": 56,
+          "src": "B"
+        },
+        {
+          "q": "I have the domain knowledge and the vision, but I'm hitting a wall when it comes to execution",
+          "sub": "StartUpIndia",
+          "score": 32,
+          "src": "B"
+        }
+      ],
+      "why": "The highest-scoring row in the dataset that names this class of project explicitly is a comment advising a beginner to build a collaborative text editor instead of looking up the optimal architecture. A second, independent row names Google Docs' collaborative writing as the canonical exercise. Difficulty is maximal: conflict-free merging is genuinely hard, and the difficulty is exactly what the demand is asking for.",
+      "limits": "This is the hardest item on the list by a wide margin, and the one least likely to be finished solo in a month. It scores 5 on buildability for that reason. A partial version that handles offline queueing and reconnect, without full CRDT merge, is still a strong portfolio piece and is roughly a third of the work.",
+      "build": [
+        "Single-user editing with a durable local log. No server yet.",
+        "A relay that appends operations in order and never merges them.",
+        "Last-write-wins per character as a deliberately naive merge, with the divergence written down.",
+        "Replace it with a real CRDT and record how many operations fail to place.",
+        "Offline queueing, then reconnect with backoff.",
+        "Snapshot the log so it stops growing without bound."
+      ],
+      "stack": "TypeScript, a CRDT or hand-rolled RGA, WebSockets, SQLite or PGlite, CodeMirror.",
+      "note": "Already built once, in this repository. collab-editor is exactly this project, at 931 tests across 46 files. Treat P1 as the reference implementation rather than a proposal.",
+      "fields": ["CRDT", "WebSockets", "IndexedDB", "encryption"]
+    },
+    {
+      "id": 2,
+      "name": "Replay-and-repair incident recorder",
+      "score": 8.9,
+      "evidence": 8,
+      "difficulty": 9,
+      "solo": 8,
+      "legible": 9,
+      "problem": "A QA engineer's highest-scoring operational story in the whole dataset: an application froze for users, IT could not reproduce it by hand, and nobody believed it. The fix was a script that replayed a user's workload for 72 hours and correlated the freezes with cache dumps.",
+      "quotes": [
+        {
+          "q": "The IT department were never able to reproduce it manually, and as such that matter was in a limbo for a long while since IT didn't allocate resources to a problem they didn't believe existed",
+          "sub": "programming-general",
+          "score": 164,
+          "src": "B"
+        },
+        {
+          "q": "no human can do this. So I started by learning Java and Selenium, and wrote a script that would mimic a user, then write down a lot of statistics about how the user experience was",
+          "sub": "programming-general",
+          "score": 164,
+          "src": "B"
+        },
+        {
+          "q": "we realized the timing, length and intervals of the freezes coincided with cache dumps on several of our VMs",
+          "sub": "programming-general",
+          "score": 164,
+          "src": "B"
+        }
+      ],
+      "why": "Evidence is unusually strong because it is a complete story with an outcome: symptom, failed manual reproduction, automated reproduction, root cause, fix, promotion. That is rarer and more persuasive than a complaint. It also demonstrates the three things the dataset keeps asking for - real system design trade-offs, failure-mode thinking, and async patterns - without any of them being theoretical.",
+      "limits": "The hard part is not the automation, it is the statistics: knowing when a correlation is real. A tool that reports these two things happened near each other is worthless and actively harmful, because it manufactures false confidence. This project is only worth doing with the analysis designed in from the start.",
+      "build": [
+        "Record a user workflow as a scriptable trace.",
+        "Replay it on a loop, collecting latency percentiles rather than averages.",
+        "Add a second independent signal source - GC pauses, cache dumps, queue depth.",
+        "Correlation view, with an explicit significance threshold.",
+        "A report a non-engineer can read, because that was the original requirement."
+      ],
+      "stack": "TypeScript or Python, Playwright or Selenium, a time-series store, simple statistics.",
+      "note": "The most transferable project on this list. It is also the one most likely to be genuinely useful to someone, which is a rarer property than it sounds.",
+      "fields": ["load testing", "time series", "automation"]
+    },
+    {
+      "id": 3,
+      "name": "Conflict-free shared state for small teams",
+      "score": 8.6,
+      "evidence": 8,
+      "difficulty": 9,
+      "solo": 7,
+      "legible": 8,
+      "problem": "Small teams coordinate in shared documents that have no merge semantics at all. The dataset names the specific pain twice: real-time updates as a repeatedly requested portfolio feature, and project management as the thing that teaches state and data flow better than another storefront.",
+      "quotes": [
+        {
+          "q": "build something that has real-time updates, role-based dashboards, file uploads, search with filters, pagination, that kind of thing. a booking system or a project management tool will teach you way more about state and data flow than another storefront",
+          "sub": "FullStack-adjacent",
+          "score": 27,
+          "src": "B"
+        },
+        {
+          "q": "I want to work on something that solves an actual problem faced by people, businesses, developers, or organizations",
+          "sub": "learnprogramming",
+          "score": 8,
+          "src": "B"
+        },
+        {
+          "q": "Not interested in features - interested in problems... I'm considering things like event-driven systems or real-time collaboration",
+          "sub": "ExperiencedDevs",
+          "score": 228,
+          "src": "B"
+        }
+      ],
+      "why": "Sits between P1 and a CRUD app: the merge problem is real but scoped to a smaller data model than a text document. Evidence is good rather than overwhelming - the demand is spread across communities rather than concentrated in one thread.",
+      "limits": "Easy to build into something that is almost a shared spreadsheet with last-write-wins and no conflict story. The interesting version requires the merge to be genuinely conflict-free, which means the data model has to be chosen for that rather than for convenience.",
+      "build": [
+        "A single shared collection with a clear ownership story per field.",
+        "Server assigns order; clients apply optimistically.",
+        "Detect the actual conflicts - two people editing the same field.",
+        "Make concurrent edits converge without a lock.",
+        "Show the user what happened, because silent merging is its own bug."
+      ],
+      "stack": "TypeScript, WebSockets, Postgres, a CRDT library or a purpose-built merge.",
+      "note": "",
+      "fields": ["CRDT", "WebSockets", "Postgres"]
+    },
+    {
+      "id": 4,
+      "name": "Freeze and latency detector for the app nobody can reproduce",
+      "score": 8.4,
+      "evidence": 8,
+      "difficulty": 8,
+      "solo": 8,
+      "legible": 9,
+      "problem": "Users report freezes; the team cannot reproduce them; the report is therefore dismissed. This is the failure mode behind P2, separated out because it is smaller, faster to build, and addresses the credibility problem rather than the engineering one.",
+      "quotes": [
+        {
+          "q": "our customer service representatives claimed to experience some occasional lagspikes in the CRM application they used to manage customers and products, which they said often froze for 1 minute and a couple of seconds",
+          "sub": "programming-general",
+          "score": 164,
+          "src": "B"
+        },
+        {
+          "q": "They just sold more socks to people who never wore socks before, and in the end there were more weavers than ever",
+          "sub": "programming-general",
+          "score": 78,
+          "src": "A"
+        }
+      ],
+      "why": "The 164-score row is the strongest single piece of operational evidence in the dataset, and what it describes is precisely a measurement gap. Scores well on legibility because the value is obvious in one sentence.",
+      "limits": "Detecting that something froze is easy. Proving it happened to the user and not just to your probe is the whole problem, and it is a sampling problem before it is a technical one.",
+      "build": [
+        "A tiny in-page probe that records long tasks with attribution.",
+        "Ship it as a script tag, not an SDK.",
+        "Aggregate p50/p95/p99 by page and by device class.",
+        "Alert on a regression against the previous week, not an absolute threshold."
+      ],
+      "stack": "TypeScript, PerformanceObserver and the long-task API, a small ingest endpoint.",
+      "note": "",
+      "fields": ["performance", "browser APIs"]
+    },
+    {
+      "id": 5,
+      "name": "Portfolio-project advisor grounded in real developer complaints",
+      "score": 8.2,
+      "evidence": 9,
+      "difficulty": 6,
+      "solo": 8,
+      "legible": 10,
+      "problem": "The most-repeated sentence in the dataset is a complaint about advice. Multiple high-scoring rows are people asking for project ideas and receiving the same generic answer, and one of them says precisely what is wrong with it.",
+      "quotes": [
+        {
+          "q": "Whenever I ask an LLM for project ideas, I usually get answers saying that the project needs to be unique or giving me pretty vague ideas",
+          "sub": "learnprogramming",
+          "score": 37,
+          "src": "B"
+        },
+        {
+          "q": "Making projects seems like a ridiculous requirement to get hired",
+          "sub": "cscareerquestions",
+          "score": 1072,
+          "src": "A"
+        },
+        {
+          "q": "An entire team builds Facebook because scaling from 1 user to a billion is insane. I promise you no team is building shitty Todo clones",
+          "sub": "cscareerquestions",
+          "score": 346,
+          "src": "A"
+        },
+        {
+          "q": "go fix bugs in open source stuff, that's some really good experience and you don't need an internship",
+          "sub": "startups-adjacent",
+          "score": 6,
+          "src": "B"
+        }
+      ],
+      "why": "Highest evidence score on the list, and the only project that is about this dataset. It also has the highest legibility: a stranger understands the premise in one sentence. The irony is not lost - the analysis you are reading is a hand-built version of the thing.",
+      "limits": "A retrieval system over 4,991 rows will confidently recommend a duplicate of something in row 3,998 unless supply rows are explicitly filtered out, and filtering them requires the classification this project is supposed to perform. That circularity is the real difficulty.",
+      "build": [
+        "Load and classify rows: demand, supply, noise. This document is that step.",
+        "Embed the demand rows only.",
+        "Retrieve and re-rank against an explicit do-not-recommend-what-exists filter.",
+        "Show the evidence next to every suggestion, so it can be argued with."
+      ],
+      "stack": "Python or TypeScript, embeddings, a vector store, this document as ground truth.",
+      "note": "",
+      "fields": ["embeddings", "retrieval", "classification"]
+    },
+    {
+      "id": 6,
+      "name": "Evaluation harness where a human is the ground truth",
+      "score": 7.9,
+      "evidence": 7,
+      "difficulty": 7,
+      "solo": 8,
+      "legible": 8,
+      "problem": "Evaluating model output requires tricks to make it fail on purpose, and the person doing it is spending hours per case. A real, current, specific piece of friction with a clear cost.",
+      "quotes": [
+        {
+          "q": "The project involves creating prompts intended to identify weaknesses or errors in chatbot responses and then evaluating the results; but all of them cannot be correct, you have to trick at least one model. I spent over 40 minutes trying different obscure prompts",
+          "sub": "DataAnnotationTech",
+          "score": 55,
+          "src": "B"
+        },
+        {
+          "q": "Bias checker for ML datasets: plug in a dataset, tool flags unfair correlations and drift",
+          "sub": "learnmachinelearning",
+          "score": 7,
+          "src": "B"
+        }
+      ],
+      "why": "Concrete, bounded, and the pain is quantified in the source - forty minutes per case. Scores lower only because it is an ML-evaluation problem rather than a systems problem, so it demonstrates fewer of the distributed-systems skills the dataset asks for.",
+      "limits": "Evaluation quality is the entire product, and there is no ground truth for whether an evaluation is good. A tool that makes building cases faster but does not make them valid accelerates the problem it claims to solve.",
+      "build": [
+        "A case format that can express this must fail, and here is how.",
+        "Mutation strategies that break a known-good answer in known ways.",
+        "Adjudication UI with disagreement tracking.",
+        "Agreement statistics across adjudicators."
+      ],
+      "stack": "Python, an annotation UI, statistics for inter-rater agreement.",
+      "note": "",
+      "fields": ["ML evaluation", "statistics", "UI"]
+    },
+    {
+      "id": 7,
+      "name": "Written-trail tool for high-stakes conversations",
+      "score": 7.6,
+      "evidence": 7,
+      "difficulty": 6,
+      "solo": 9,
+      "legible": 9,
+      "problem": "The highest-scoring non-code row in the dataset is entirely about workplace behaviour, and its central advice is create a written trail and document everything. The tool gap is obvious and nobody has built the boring version.",
+      "quotes": [
+        {
+          "q": "Document everything. Emails, shared docs, meeting notes, deliverables, decisions. Keep a record. Dont rely on we discussed this verbally. Documentation can save you when things go sideways",
+          "sub": "developersIndia",
+          "score": 436,
+          "src": "A"
+        },
+        {
+          "q": "If something important happens verbally, create a written trail. After a discussion, send a simple follow-up: Just documenting our discussion. My understanding is...",
+          "sub": "developersIndia",
+          "score": 436,
+          "src": "A"
+        },
+        {
+          "q": "If you know you are dealing with a toxic person, record everything",
+          "sub": "developersIndia",
+          "score": 436,
+          "src": "A"
+        }
+      ],
+      "why": "Highest-scoring evidence of any project on the list at 436, from a single sustained post rather than scattered comments. Extremely quick to build, and the usefulness is easy to demonstrate to a non-engineer.",
+      "limits": "The privacy and consent problem is the product. Recording conversations without the other party's knowledge is illegal in many jurisdictions and ethically fraught everywhere. A version that does not handle consent explicitly is worse than no version, and this is the item on the list most likely to be built badly by someone in a hurry.",
+      "build": [
+        "A meeting note that generates a sendable follow-up draft.",
+        "Explicit per-conversation consent state, visible to both parties.",
+        "A searchable, exportable, deletable record.",
+        "Retention limits that are enforced rather than merely offered."
+      ],
+      "stack": "TypeScript, Postgres with row-level security, encryption at rest.",
+      "note": "The dataset also contains advice to secretly record calls. Building that is not a portfolio project, it is a liability. Consent is a requirement here, not a feature.",
+      "fields": ["auth", "encryption", "Postgres RLS"]
+    },
+    {
+      "id": 8,
+      "name": "Load-testing course built on realistic CRUD apps",
+      "score": 7.4,
+      "evidence": 7,
+      "difficulty": 7,
+      "solo": 8,
+      "legible": 10,
+      "problem": "The dataset contains an unusually good teaching pattern - build a familiar feature properly, load test it, optimise it, repeat - and a direct request for exactly that as a way to learn.",
+      "quotes": [
+        {
+          "q": "Can you imeplement news feed features as if it were production. Can you create it using good architrecture and with well known industry tools? Once you implement it load test the app using something like k6. Then optimize it and see if the performance can increase",
+          "sub": "programming-general",
+          "score": 140,
+          "src": "B"
+        },
+        {
+          "q": "job listings are a good place to mine for project ideas, not just skills... a booking system or a project management tool will teach you way more about state and data flow than another storefront",
+          "sub": "FullStack-adjacent",
+          "score": 27,
+          "src": "B"
+        }
+      ],
+      "why": "Highly legible and immediately useful to the exact audience in the dataset - people who have done three e-commerce sites and know something is missing. Scores well because it is teaching method, which compounds, rather than one more app.",
+      "limits": "A tutorial is not a project. The value is entirely in the learner doing the measurement and optimisation, so shipping this means shipping a harness with worked examples, not a finished application.",
+      "build": [
+        "One feature - a news feed - built properly, with a real schema.",
+        "A k6 scenario with a stated target, not a vague make-it-fast.",
+        "A results view that shows p95 and error rate, and nothing else.",
+        "Three documented optimisations, each with before-and-after numbers."
+      ],
+      "stack": "k6, Postgres, any web framework, a results dashboard.",
+      "note": "",
+      "fields": ["load testing", "k6", "Postgres"]
+    },
+    {
+      "id": 9,
+      "name": "Team scope and deadline tracker with a written trail",
+      "score": 7.1,
+      "evidence": 6,
+      "difficulty": 6,
+      "solo": 9,
+      "legible": 9,
+      "problem": "Explicitly rejected as a portfolio project - no team is building shitty Todo clones - and that rejection is itself the interesting constraint. This is the version that survives it: not a task board, but the shared record of who committed to what, with conflict handling.",
+      "quotes": [
+        {
+          "q": "Sure, let me come up with a cool, innovative idea that isn't another task board or social networking site and develop an entire fr",
+          "sub": "cscareerquestions",
+          "score": 1072,
+          "src": "A"
+        },
+        {
+          "q": "they've thrown away four years of work because the project is due in December and we won't meet the deadline, and they expect us to do it all in three months using AI",
+          "sub": "startups-adjacent",
+          "score": 11,
+          "src": "A"
+        },
+        {
+          "q": "People with too many ideas and too little time: How do you project and task manage?",
+          "sub": "startups",
+          "score": 14,
+          "src": "B"
+        }
+      ],
+      "why": "Ranks where it does because of a genuine tension: the demand is real and repeated, but the dataset is openly hostile to the obvious implementation. Doing it anyway, with the conflict semantics solved, is the only version worth building.",
+      "limits": "The market is saturated and the incumbents are free. A new entrant has no advantage unless the conflict handling is genuinely better, which is a research problem wearing a CRUD costume.",
+      "build": [
+        "Commitments with an owner and a date - nothing else.",
+        "Concurrent editing of the same commitment, resolved without a lock.",
+        "An append-only history of who changed what and when.",
+        "Export to plain text. It is the feature people actually use."
+      ],
+      "stack": "TypeScript, Postgres, WebSockets, a merge strategy.",
+      "note": "",
+      "fields": ["CRDT-lite", "Postgres", "WebSockets"]
+    },
+    {
+      "id": 10,
+      "name": "Colour-vision accessibility audit for real interfaces",
+      "score": 6.8,
+      "evidence": 5,
+      "difficulty": 5,
+      "solo": 9,
+      "legible": 10,
+      "problem": "A specific, cheap, high-frequency complaint: one person could not find a single image covering their colour-vision type. Small evidence, but the need is real, the tool is small, and nobody has built the useful version.",
+      "quotes": [
+        {
+          "q": "There are many types of color blindness. I couldn't find an image covering all of them, but you should look into it",
+          "sub": "programming-general",
+          "score": 4,
+          "src": "A"
+        },
+        {
+          "q": "in retrospect, using bluish text over a gray background wasnt a really good idea",
+          "sub": "programming-general",
+          "score": 369,
+          "src": "A"
+        }
+      ],
+      "why": "Ranks last on evidence, honestly: one row at score 4 is an anecdote. It is included because the underlying need is verifiable, the tool is genuinely missing, and it can be finished in a weekend - which makes it a good first project rather than a good flagship one.",
+      "limits": "Colour-vision deficiency is not one condition. A tool that simulates only the common dichromacies is confidently wrong for the rest, which is worse than not shipping. The difficulty is coverage, not code.",
+      "build": [
+        "Contrast checking with a WCAG-correct ratio, no approximations.",
+        "Simulation for at least three dichromacy types and one achromatopsia.",
+        "A screenshot diff, so the tool shows the failure rather than describing it."
+      ],
+      "stack": "TypeScript or Python, an image pipeline, WCAG 2 contrast formulas.",
+      "note": "",
+      "fields": ["accessibility", "image processing"]
+    }
+  ]
+}

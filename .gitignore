@@ -23,3 +23,7 @@ coverage/
 *.log
 *.k6.out
 .smoke.*
+
+# Python bytecode, from the document generators.
+__pycache__/
+*.pyc
