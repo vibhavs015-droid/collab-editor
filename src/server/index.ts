@@ -5,8 +5,9 @@
  * server never accepts a request against a schema that does not exist yet.
  */
 
-import { WebSocketServer } from 'ws';
+import type { WebSocketServer } from 'ws';
 
+import { createRelaySocketServer } from './socketServer.js';
 import { ApiServer } from './api.js';
 import { AuthError, resolveAuthenticator } from './auth.js';
 import { Database } from './db.js';
@@ -216,7 +217,7 @@ async function main(): Promise<void> {
 
   // noServer: the socket is handed over by the ApiServer's upgrade handler,
   // so WebSocket and HTTP share one port and the browser sees a single origin.
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = createRelaySocketServer();
 
   wss.on('connection', (socket, request) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
