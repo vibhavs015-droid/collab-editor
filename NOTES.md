@@ -1585,4 +1585,72 @@ Open the application on day one, not at the end. Every one of these four was a *
   unit under test. The lesson generalises past this project: a component with excellent tests can
   still be dead on arrival if nothing ever calls it.
 
+## External review: the 5,001st character, and three siblings
+
+An independent review (an AI reviewer, 6 Oct 2026) ran probes against the real server and a
+real `SyncTransport` instead of reading the code and the passing suite. Four problems were
+reproduced before anything was changed. All four had a green test suite sitting on top of them.
+
+### One paste left every other client with an empty document
+
+`SyncTransport.send` kept only the newest 5,000 queued operations. Typed text is a chain: each
+character is anchored to the one before it. Dropping the _oldest_ operations therefore left
+every survivor anchored to something the relay had never received. The relay accepted the batch
+as well formed, could not place it, and a fresh client downloaded **zero characters** - while
+the sender's indicator read "Synced", because the outbox was genuinely empty.
+
+Measured, one paste while connected: 5,000 characters converged; **5,001 did not**. Offline
+typing behaved the same above the cap. The server's own `collab_operations_unplaced_total`
+read 10,000 and then 20,000 (the surviving half of each failing run), and its help text says
+"non-zero means peers are diverging". Nothing raised an error.
+
+The comment justified the cap with "the relay only needs a reasonable tail". For a log-based
+relay that is false: it needs the whole log. The unit test asserted that the oldest operations
+were dropped, which was true, and said nothing about what the relay could then do with the
+rest. The offline e2e test never went near the cap, because it sends the whole authored log
+over a raw socket and bypasses `SyncTransport` entirely.
+
+Fixed by removing the cap (the outbox holds references to operations the replica already keeps,
+so a queued operation costs one pointer) and sending in frames of at most `MAX_OPS_PER_FRAME`.
+After the fix 4,000, 6,000 and 12,000 characters typed offline and pastes of 5,000, 5,001 and
+6,000 characters all converge, and the unplaced counter stays absent.
+
+### The ordering bug from Phase 5, still alive in the other branch
+
+The "Baseline protocol" section above records `#flushOutbox` clearing the outbox before
+`#send`, so a refused write dropped keystrokes. That was fixed for the plaintext branch. The
+encrypted branch kept the original order: it removed the batch, then wrote, under a comment
+reading "left queued on a failed write". A connection that dropped while encryption was
+running took the batch with it. Reproduced (queue length 0 where 5 was expected), fixed by
+writing first and removing only on success.
+
+The lesson is about duplicated branches, not about this line: a fix to one of two parallel
+paths is half a fix unless something tests the other.
+
+### Editor offsets count UTF-16; the CRDT counts code points
+
+An emoji is one element and two code units, so every offset after one disagreed. The local
+path passed editor offsets straight to the replica and had no check afterwards: typing after
+an emoji inserted one character too far right, and deleting an emoji deleted the character
+after it as well (two delete operations broadcast for one deletion), with zero anomalies
+reported. The remote path was wrong in the same way but failed safe, because the binding
+verifies it and falls back to a full replacement. Translation now happens at the two
+boundaries (`applyLocalEdits`, `diffVisible`); the data model and persisted operations are
+unchanged.
+
+### No limit on a WebSocket frame
+
+`ws` defaults to 100 MiB per message, and the relay parses a message before it knows who sent
+it. A 30 MB frame from a socket that never sent hello was accepted and parsed; six concurrent
+60 MB frames raised server memory by about 590 MB. `maxPayload` is now `MAX_FRAME_BYTES` (4 MiB)
+via `createRelaySocketServer`, which `index.ts` and a test both use, because every other server
+test builds its own `WebSocketServer` and nothing exercised the options production used.
+Re-measured: the same frames are closed with 1009 and memory is unchanged.
+
+### Not checked
+
+The outbox is emptied when `ws.send` returns, not when the server acknowledges. A connection
+that dies after the write but before delivery is not obviously recovered by anything. This was
+not tested and is recorded as a question, not a finding.
+
 ## Log
