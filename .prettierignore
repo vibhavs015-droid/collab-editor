@@ -25,3 +25,4 @@ docs/project-opportunities.md
 
 # Python. Prettier has no parser for it, so naming it explicitly would only produce an error.
 *.py
+all-projects.md

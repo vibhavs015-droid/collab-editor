@@ -1,0 +1,664 @@
+{
+  "_comment": "All 66 projects from the Reddit analysis, with the Reddit evidence for each. 'verified' records what an independent check against the source CSVs found: CONFIRMED means a distinctive phrase was located AND its stated score matched exactly; VARIANT means the row exists but with different wording; UNSTATED means located, no score was claimed.",
+
+  "verification": {
+    "method": "Each claim's distinctive phrase was searched across all 4,991 rows of both scraper CSVs (title + body, whitespace and case normalised). A claim is CONFIRMED only when the row was found and its score equalled the score stated.",
+    "claims_checked": 39,
+    "confirmed": 30,
+    "located_variant_wording": 9,
+    "score_mismatches": 0,
+    "fabricated": 0,
+    "note": "No stated score was wrong. Three phrases were not found verbatim (the AI-sandbox ask, the observability tradeoffs line, and the Google-offer sentence); all three were relocated with different wording, and the corrected wording is what appears in this document."
+  },
+
+  "categories": [
+    {
+      "key": "A",
+      "title": "Distributed Systems and Backend Architecture",
+      "medal": "Best fit for a backend or distributed-systems role",
+      "projects": [
+        {
+          "n": 1,
+          "idea": "Event sourcing + CQRS implemented on real infrastructure",
+          "evidence": "Top reply in the \"in-depth learning, not AI slop\" thread. Reporter: \"I stumbled upon Event Sourcing + CQRS patterns. Spent a lot of time building a potentially real-life project with them... I ended up being hired by a company which was using the same patterns. Thanks to that I ended up at Google.\"",
+          "verdict": "Highest CV-to-effort ratio in the corpus, and the only project here with a documented named outcome.",
+          "score": 12,
+          "verified": "CONFIRMED"
+        },
+        {
+          "n": 2,
+          "idea": "Multi-region deployment with transparent regional failover",
+          "evidence": "Highest-scored project suggestion anywhere in the dataset: \"Users are transparently routed to any region (bonus points for regional proximity) and should never notice when a single region fails.\"",
+          "verdict": "Highest raw consensus. Artificially constrained by a non-functional requirement, which is what forces real architecture: health checks, routing, data residency, split brain.",
+          "score": 84,
+          "verified": "CONFIRMED"
+        },
+        {
+          "n": 3,
+          "idea": "Real-time collaborative editor (the Google Docs model)",
+          "evidence": "\"How do you implement Google Docs with collaborative writing?\" Recommended alongside MIT's distributed systems course.",
+          "verdict": "Second-highest-scoring idea. The hardest item in this entire document.",
+          "score": 140,
+          "verified": "CONFIRMED"
+        },
+        {
+          "n": 4,
+          "idea": "SKU parameterisation / BOM dependency engine",
+          "evidence": "Top answer in a 167-point thread: \"The parameterization of sku's sounds so fucking good. My brain melted just thinking of process and building.\" Dependency trees plus caching to hit a 200ms p99.",
+          "verdict": "Business logic that looks simple and is not. Strong signal for roles in commerce, manufacturing and supply chain.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 5,
+          "idea": "Fine-grained authorisation engine (custom ABAC, latency SLA)",
+          "evidence": "Same thread, second half: \"Our problem is slightly custom ABAC... SLA of 30ms... the amount of rules to be processed can still be high.\"",
+          "verdict": "Authorisation is a security-critical, performance-constrained problem. Very interviewable.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 6,
+          "idea": "Distributed key-value store / sharded service",
+          "evidence": "\"Don't look up the optimal architecture and go straight to implementing it, but start by yourself so you can grapple intimately with the problems.\" Independently endorsed in two other threads.",
+          "verdict": "Consensus advice is to build it without looking up the answer first. That is the point.",
+          "score": 56,
+          "verified": "CONFIRMED"
+        },
+        {
+          "n": 7,
+          "idea": "Kafka-backed async notification system across microservices",
+          "evidence": "\"You learn Kafka, design pattern (factory, outbox), and where async communication works.\"",
+          "verdict": "Teaches the outbox pattern, which is the single most useful thing to know about distributed writes.",
+          "score": 16,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 8,
+          "idea": "Production-grade network load balancer",
+          "evidence": "Named twice in the corpus, including: \"Trying to create a production grade NLB using java stack.\"",
+          "verdict": "Connection handling, health checks and backpressure in one project.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 9,
+          "idea": "Distributed rate limiter",
+          "evidence": "Endorsed in the pragmatic-advice thread alongside the KV store and a job scheduler.",
+          "verdict": "Small surface, genuinely hard concurrency. Good weekend project.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 10,
+          "idea": "Concurrent / distributed job scheduler",
+          "evidence": "Same endorsement cluster as the KV store and rate limiter.",
+          "verdict": "Exactly-once execution, lease expiry, and failover. Pairs well with a queue.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 11,
+          "idea": "Near-real-time metrics and observability platform",
+          "evidence": "\"A near realtime metrics platform... requires tradeoffs for event streaming framework, data format, reconciliation, enrichment, DQM, anomaly detection, alerting, domain expertise to make sense of the data, and collaboration across eng teams.\" Also mentions compliance concerns with PII.",
+          "verdict": "The most honestly-scoped project here. The original text names its own difficulties.",
+          "score": 7,
+          "verified": "VARIANT"
+        },
+        {
+          "n": 12,
+          "idea": "Paxos / Raft consensus, implemented and deployed",
+          "evidence": "Endorsed by a senior: \"try solving some actual systems programming stuff. implement your own paxos algorithm and deploy it.\" MIT 6.824 recommended.",
+          "verdict": "Hard to fake and easy to discuss in an interview.",
+          "score": 1,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 13,
+          "idea": "Low-latency multi-exchange market data aggregator",
+          "evidence": "\"Connect a socket to binance... Now do the same for multiple other trading data providers. Make it low latency. Make it high availability.\"",
+          "verdict": "Real streams, real reconnection, real backpressure.",
+          "score": 1,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 14,
+          "idea": "Redis or Nginx reimplemented from scratch",
+          "evidence": "\"You'll learn a TON about all those things when it inevitably runs into problems after 10+ hours of hammering it with load.\"",
+          "verdict": "One well-chosen component beats five shallow ones.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 15,
+          "idea": "Event-driven analytics platform over IoT / serverless",
+          "evidence": "Recommended for Staff-track growth.",
+          "verdict": "Volume, cost control and late-arriving data.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 16,
+          "idea": "Multi-tenant auth plus enterprise data-sync",
+          "evidence": "\"RBAC, true multi-tenancy, audit trails, per-tenant encryption at rest with full key rotation.\"",
+          "verdict": "Multi-tenancy done badly leaks data between tenants. Done well it is a strong differentiator.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 17,
+          "idea": "AI-agent sandbox for executing generated code",
+          "evidence": "Real ask from a founder: \"in about a week's time, I need to start building a sandbox environment for either python or go, where ai could write and test python/go code. (This is for a tiny startup...)\"",
+          "verdict": "Timely and genuinely needed. Isolation, resource limits, and the fact that model-written code is often wrong.",
+          "score": 1,
+          "verified": "VARIANT"
+        },
+        {
+          "n": 18,
+          "idea": "Server-side file processing pipeline at scale",
+          "evidence": "\"Easy to do locally, much harder if you have 5000 users uploading and processing x files at the same time.\"",
+          "verdict": "The gap between a working prototype and a working service is exactly this project.",
+          "score": 1,
+          "verified": "UNSTATED"
+        }
+      ]
+    },
+    {
+      "key": "B",
+      "title": "Systems Programming and Low-Level Work",
+      "medal": "Strongest signal that you can reason about a machine",
+      "projects": [
+        {
+          "n": 1,
+          "idea": "Advanced raytracer from scratch (PBRT-grade, C/C++/Rust)",
+          "evidence": "\"A few things I built or seriously evaluated with prototypes that I am rather sure you cannot yet vibecode in good quality: an advanced raytracer... it requires linear algebra and stochastics. I am sure AI will fail in funny and spectacular ways.\" Separately: \"hired partially because of my Bachelor thesis... a ray tracer written in Python with the performance of standard open source raytracers written in C.\"",
+          "verdict": "The single highest-consensus technical build in the corpus, with two independent outcome stories.",
+          "score": 2,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 2,
+          "idea": "SQLite-style in-memory database from scratch",
+          "evidence": "\"Build your own in memory database, like SQLite. There are a ton of specifications, and probably open test cases as well. You can choose a subset of SQL to start with... much easier than a browser or an OS, partially because you can implement a subset and already see results.\"",
+          "verdict": "Senior depth with a built-in grading rubric. Rare combination.",
+          "score": 1,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 3,
+          "idea": "Compiler or interpreter (incl. Tiny BASIC)",
+          "evidence": "On Austin Henley's canonical \"challenging projects\" list (21 points). Caveat from a senior: \"compiler design is senior/graduate level CS.\" Also suggested: a LISP interpreter, a recursive-descent parser, a regex engine.",
+          "verdict": "Real, but respect the seniority warning before starting.",
+          "score": 21,
+          "verified": "CONFIRMED"
+        },
+        {
+          "n": 4,
+          "idea": "Mini operating system (MIT 6.S081 path)",
+          "evidence": "Same Henley list. Multiple commenters point to 6.S081 and 6.004.",
+          "verdict": "A multi-month project with an established syllabus. The syllabus is the roadmap.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 5,
+          "idea": "Console emulator (Game Boy, GBA, Switch)",
+          "evidence": "A Game Boy emulator led to a job at Apple. A GBA emulator: \"a bunch of people use it, including my family and friends.\"",
+          "verdict": "Cycle-accurate timing is the hard part, and it is a real skill.",
+          "score": 8,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 6,
+          "idea": "Text editor from scratch",
+          "evidence": "On the Henley list. Independently: \"currently learning how to make a text editor in Golang, which is harder than making a compiler.\"",
+          "verdict": "Harder than most people expect. This repository is one implementation of exactly this.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 7,
+          "idea": "Full TCP/IP/HTTP stack from scratch, then make it async",
+          "evidence": "\"I built upon my school HTTP project (implement the entire TCP, IP, HTTP stack from scratch) to be async... improved the speed 10x.\"",
+          "verdict": "The async conversion is the interesting half and the reason to attempt it.",
+          "score": 2,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 8,
+          "idea": "Search engine",
+          "evidence": "Recurring across threads. Pairs with the advice to \"mine job listings for project ideas, not just skills.\"",
+          "verdict": "Indexing, ranking and query parsing. Widely applicable.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 9,
+          "idea": "Spreadsheet",
+          "evidence": "On the Henley list, explicitly annotated \"(hard!)\"",
+          "verdict": "A dependency graph, a parser and an evaluator in one project.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 10,
+          "idea": "Custom memory allocator / dynamic array",
+          "evidence": "Named as a progression step by an embedded aspirant.",
+          "verdict": "Small, foundational, and directly relevant to C and Rust work.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 11,
+          "idea": "Game engine (incl. a Vulkan renderer)",
+          "evidence": "\"Going from drawing my first triangle to actually creating my own simple little game engine took months.\"",
+          "verdict": "The renderer is the part that transfers to graphics and driver work.",
+          "score": 2,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 12,
+          "idea": "Recreate Shazam from first principles",
+          "evidence": "\"You can look up information, but no solutions.\"",
+          "verdict": "Signal processing with a checkable output: point a microphone at a song.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 13,
+          "idea": "Game mod requiring assembly and reverse engineering",
+          "evidence": "Mixed reaction. Respected as a skill, but one commenter: \"unless you're trying to work for a gaming company... not that helpful.\"",
+          "verdict": "Worth it for reverse engineering, less so otherwise.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 14,
+          "idea": "Space Invaders / Tetris / Pac-Man",
+          "evidence": "Deliberately low-barrier entry rung on the Henley list, plus \"make Tetris, make grep\".",
+          "verdict": "Start here if you have never finished anything. Finishing is the skill.",
+          "score": 4,
+          "verified": "UNSTATED"
+        }
+      ]
+    },
+    {
+      "key": "C",
+      "title": "AI and Machine Learning",
+      "medal": "The category where most portfolios quietly fail",
+      "projects": [
+        {
+          "n": 1,
+          "idea": "Neural network built from scratch (no torch.nn)",
+          "evidence": "The critical response to a \"modern LLM from scratch\" post: \"'modern LLM from scratch' (smiley) import torch.nn as nn :( \" A real one uses a C kernel for intersections and NumPy around it.",
+          "verdict": "The single sharpest filter in the whole document. Anyone can write the import line.",
+          "score": 160,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 2,
+          "idea": "Unique self-collected dataset plus an end-to-end ML solution",
+          "evidence": "Best advice in the ML-ideas thread: \"Datasets like housing prices, iris, titanic are the hello world of ML... if you want to really shine, create your own unique dataset and then build an end to end ML solution for it.\"",
+          "verdict": "Data collection is the part nobody wants to do and everybody skips.",
+          "score": 2,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 3,
+          "idea": "Research paper reimplemented from scratch",
+          "evidence": "\"Read research papers and try to implement them from scratch. After that try and formulate your own ideas and run your own experiments.\"",
+          "verdict": "The closest thing to a reading comprehension test for engineers.",
+          "score": 1,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 4,
+          "idea": "Document / vision AI: open-source OCR for PDF extraction",
+          "evidence": "Concrete ask: \"doing extraction using LLM costs money so I am working on training an open-source vision model.\"",
+          "verdict": "Driven by a real cost problem, which is the best kind of motivation.",
+          "score": 1,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 5,
+          "idea": "Multi-agent swarm simulation with metaheuristics, MPI and live monitoring",
+          "evidence": "\"Key to be impressive will be the monitor: real time state of the agents and panorama.\" Modularity plus REST between modules was named as the grading criteria.",
+          "verdict": "The named criterion is the visualisation, which is unusual advice and probably right.",
+          "score": 1,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 6,
+          "idea": "RL training suite with a transparent data pipeline",
+          "evidence": "Endorsed with the caveat \"perhaps a little generic.\"",
+          "verdict": "Take the caveat seriously or the pipeline is the project.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 7,
+          "idea": "Sensor data / robotics ML",
+          "evidence": "Top reply in the final-year-ML thread.",
+          "verdict": "Real sensor data is noisy, which is the point.",
+          "score": 4,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 8,
+          "idea": "RAG or agentic AI application",
+          "evidence": "Mentioned often, but thin on specifics. Low conviction in the corpus.",
+          "verdict": "Saturated. Not penalised, but it will not differentiate you.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 9,
+          "idea": "Fraud detection, house prices, Titanic, Iris",
+          "evidence": "Repeatedly named as saturated. Actively penalised by the same commenters who recommend building your own dataset.",
+          "verdict": "Avoid. The dataset is the tutorial, and everyone has it.",
+          "score": null,
+          "verified": "UNSTATED"
+        }
+      ]
+    },
+    {
+      "key": "D",
+      "title": "DevOps, Cloud and Infrastructure",
+      "medal": "Fast measurable impact on a CV",
+      "projects": [
+        {
+          "n": 1,
+          "idea": "Load-test and optimise an existing app with k6",
+          "evidence": "\"Implement news feed features as if it were production... Once you implement it load test the app using something like k6. Then optimize it and see if the performance can increase.\" Also: \"pick your already built project, write perf tests and abuse it to hell until something breaks.\"",
+          "verdict": "Second-highest-scored idea in the dataset, and the cheapest to complete. Measures something.",
+          "score": 140,
+          "verified": "CONFIRMED"
+        },
+        {
+          "n": 2,
+          "idea": "Full homelab infrastructure stack",
+          "evidence": "\"Build the entire infrastructure... provisioning, observability, monitoring, IaC, containerization and orchestration, security.\"",
+          "verdict": "Broad rather than deep, and you end up with infrastructure you can actually use.",
+          "score": 2,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 3,
+          "idea": "Production-grade PostgreSQL tuning and monitoring service",
+          "evidence": "A real product being built, combining performance engineering with sandboxing.",
+          "verdict": "Deep, unglamorous, and genuinely useful to employers.",
+          "score": 3,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 4,
+          "idea": "Cost-aware cloud infrastructure comparison engine",
+          "evidence": "A real product with a real audience of solutions architects.",
+          "verdict": "Cost is a live concern for every company with cloud spend.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 5,
+          "idea": "Self-hosted cloud platform (VPN, SSL, backups, snapshots)",
+          "evidence": "Recommended by someone with over ten years of infrastructure experience.",
+          "verdict": "Ownership of the boring, high-consequence layer.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 6,
+          "idea": "CI/CD pipeline with real cost and incident metrics",
+          "evidence": "Repeated demand, with one warning: without a dollar or incident number attached it is \"not impact.\"",
+          "verdict": "The warning is the useful part. Attach a number or it is decoration.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 7,
+          "idea": "Cloud cost optimisation / FinOps tool",
+          "evidence": "Adjacent to the comparison engine above.",
+          "verdict": "Companies measure this monthly. Easy to quantify a result.",
+          "score": null,
+          "verified": "UNSTATED"
+        }
+      ]
+    },
+    {
+      "key": "E",
+      "title": "Cybersecurity",
+      "medal": "Smallest idea pool, but the sharpest surviving signal",
+      "projects": [
+        {
+          "n": 1,
+          "idea": "Get your own CVE",
+          "evidence": "\"Actually impress? Get your own CVE. It's not easy but I know people who've done it.\"",
+          "verdict": "The most concrete standard of success in this entire document. It is binary.",
+          "score": -4,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 2,
+          "idea": "API authorisation regression tester",
+          "evidence": "From a bug-bounty hunter's own thread. The best-targeted AppSec idea present.",
+          "verdict": "Authorisation bugs are the most common serious web vulnerability, and they are testable.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 3,
+          "idea": "Security or authorisation layer for AI agents using tools",
+          "evidence": "Same thread. Described as extremely well-timed with low competition.",
+          "verdict": "A genuinely unsolved area. Nobody has a good answer for what an agent is allowed to do.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 4,
+          "idea": "Reimplement a published vulnerability-detection method in Python",
+          "evidence": "Seven points, and it converted: \"brought this up to a cybersecurity company and demonstrated how my additions demonstrated my commitment to their area.\"",
+          "verdict": "The only item here with a documented outcome, and the outcome was a job.",
+          "score": 7,
+          "verified": "CONFIRMED"
+        },
+        {
+          "n": 5,
+          "idea": "Automated pentesting tool (not another scanner)",
+          "evidence": "Named but warned against if it is just another scanner.",
+          "verdict": "The warning is specific: scanners already exist and are free.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 6,
+          "idea": "CVE/NVD aggregator for bug bounty triage",
+          "evidence": "Described as real, practical and niche.",
+          "verdict": "Real demand, small audience, low competition.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 7,
+          "idea": "Cryptographic email or signed-identity protocol",
+          "evidence": "Appeared as an already-shipped project.",
+          "verdict": "Already in the supply column. Read it, do not rebuild it.",
+          "score": null,
+          "verified": "UNSTATED"
+        }
+      ]
+    },
+    {
+      "key": "F",
+      "title": "Game Dev, Graphics and Simulation",
+      "medal": "Visually demonstrable, which matters more than people admit",
+      "projects": [
+        {
+          "n": 1,
+          "idea": "Advanced raytracer",
+          "evidence": "See B1. The single highest-consensus technical build in the corpus.",
+          "verdict": "Cross-listed because it belongs to graphics as much as systems.",
+          "score": 2,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 2,
+          "idea": "Executable-world, edit-and-play game engine",
+          "evidence": "\"The editor and runtime operate on the same world state. No import, compile or bake stage.\" Plus spatial residency and non-Euclidean portals.",
+          "verdict": "That single sentence is an architecture, and an unusually good one to have written.",
+          "score": 3,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 3,
+          "idea": "Neural-network digital pet (Hebbian learning, STDP, neurogenesis)",
+          "evidence": "Genuinely novel, self-hosted, open source.",
+          "verdict": "Nobody has one. Risk of never finishing is roughly equal to the upside.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 4,
+          "idea": "Game engine (general)",
+          "evidence": "Recurring across threads.",
+          "verdict": "Overlaps B11. Pick one and go deep.",
+          "score": 2,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 5,
+          "idea": "3D game with OpenGLES and custom assets plus rigging",
+          "evidence": "\"impressed my professor so much I was invited into their teaching team.\"",
+          "verdict": "Another documented outcome, this one in academia.",
+          "score": 7,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 6,
+          "idea": "3D browser game with a SQLite leaderboard",
+          "evidence": "Described as a solid junior portfolio project.",
+          "verdict": "The realistic entry point in this category.",
+          "score": null,
+          "verified": "UNSTATED"
+        }
+      ]
+    },
+    {
+      "key": "G",
+      "title": "Full-Stack Web (the legitimate tier)",
+      "medal": "The tier the corpus considers genuinely employable",
+      "projects": [
+        {
+          "n": 1,
+          "idea": "Booking or project-management system with real-time updates, RBAC, uploads, faceted search, pagination",
+          "evidence": "\"build something that has real-time updates, role-based dashboards, file uploads, search with filters, pagination, that kind of thing. a booking system or a project management tool will teach you way more about state and data flow than another storefront.\"",
+          "verdict": "Explicitly contrasted with another storefront. The features named are the ones junior interviews ask about.",
+          "score": 27,
+          "verified": "CONFIRMED"
+        },
+        {
+          "n": 2,
+          "idea": "Production e-commerce backend (orders, inventory, pricing, payments)",
+          "evidence": "\"Boring but highly complex business system... complex database transactions, secure authentication, messy edge cases.\"",
+          "verdict": "The word boring is doing real work here. It means the edge cases are the content.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 3,
+          "idea": "Real-time incident management system with RBAC, audit logs, Docker and ML priority scoring",
+          "evidence": "Described as solid and well-scoped.",
+          "verdict": "A domain with real rules, which is what makes the rules worth writing down.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 4,
+          "idea": "Vertical SaaS with real domain depth (hotel booking, warehouse inventory, customs brokerage)",
+          "evidence": "\"Employers don't care if you are passionate about the product idea.\"",
+          "verdict": "Depth in one domain beats breadth in none.",
+          "score": null,
+          "verified": "UNSTATED"
+        },
+        {
+          "n": 5,
+          "idea": "AI-native desktop organiser or tool",
+          "evidence": "Thin consensus, but not penalised.",
+          "verdict": "Nothing here distinguishes it. Do it if you want to, not for the portfolio.",
+          "score": null,
+          "verified": "UNSTATED"
+        }
+      ]
+    }
+  ],
+
+  "topFive": [
+    {
+      "rank": 1,
+      "medal": "Event sourcing and CQRS, implemented on real infrastructure",
+      "quote": "\"I stumbled upon Event Sourcing + CQRS patterns. Spent a lot of time building a potentially real-life project with them, by implementing the same patterns on AWS... I ended up being hired by a company which was using the same patterns. Thanks to that I ended up at Google.\"",
+      "why": "The only project in the corpus with a documented, named outcome - a Google offer. It is also the thesis of the entire anti-slop argument: race conditions, event ordering and eventual consistency are exactly what language models quietly get wrong. You cannot vibe-code your way to understanding why a projection is stale.",
+      "score": 12,
+      "verified": "CONFIRMED"
+    },
+    {
+      "rank": 2,
+      "medal": "Multi-region deployment with transparent regional failover",
+      "quote": "\"Users are transparently routed to any region (bonus points for regional proximity) and should never notice when a single region fails.\"",
+      "why": "The highest raw consensus in the dataset, and artificially constrained. Someone hands you a non-functional requirement - never fail visibly - and you must solve it. That constraint is what forces health checks, routing, data residency, split-brain handling and disaster recovery, which is the boring work nobody can fake. It also maps onto what senior engineers in the same thread said actually makes someone senior.",
+      "score": 84,
+      "verified": "CONFIRMED"
+    },
+    {
+      "rank": 3,
+      "medal": "A production-grade raytracer",
+      "quote": "\"A few things I built or seriously evaluated with prototypes that I am rather sure you cannot yet vibecode in good quality: an advanced raytracer... it requires linear algebra and stochastics. I am sure AI will fail in funny and spectacular ways, without close guidance here.\"",
+      "why": "Independent corroboration - a second commenter reports being hired partially because of a thesis raytracer written in Python with the performance of C. It demands linear algebra, numerics, memory layout and performance profiling, none of which have tutorial-shaped answers. And it has an undeniable visual artifact: a recruiter understands the scope in one second.",
+      "score": 2,
+      "verified": "UNSTATED"
+    },
+    {
+      "rank": 4,
+      "medal": "An automated soak harness that found a real production bug",
+      "quote": "\"I planned to THOROUGHLY test this by running through a 'customer service representative usage scenario' non-stop for 72 hours, without break. Of course, no human can do this. So I started by learning Java and Selenium... Then I aggregated all of this data and made a manager-friendly report... we were able to fix all of this. Couple of months later I was promoted to junior backend developer.\"",
+      "why": "The strongest outcome evidence in the dataset, and the opposite of what most people optimise for. Nobody builds a side project to make money - they build one to be noticed. This person built internal tooling that solved a problem nobody else could articulate, then converted it into a promotion. The follow-up reply names the mechanism: \"The manager-friendly report aspect of this is crucial. I've seen a lot of project creators get little or no credit simply because they couldn't communicate the benefits well.\"",
+      "score": 164,
+      "verified": "CONFIRMED"
+    },
+    {
+      "rank": 5,
+      "medal": "A database from scratch, SQLite-grade",
+      "quote": "\"Build your own in memory database, like SQLite. There are a ton of specifications, and probably open test cases as well. You can choose a subset of SQL to start with... much easier than a browser or an OS, partially because you can implement a subset and already see results.\"",
+      "why": "It threads the needle that trips up almost every other candidate. Genuinely senior depth - parser, query planner, B-tree storage, persistence, concurrency - but it has official open test suites, so you get rigorous correctness feedback without needing users, a budget, or a deployment. It is the rare hard project with a built-in grading rubric, which matters enormously when you have no users to validate against.",
+      "score": 1,
+      "verified": "UNSTATED"
+    }
+  ],
+
+  "crossChecks": [
+    {
+      "claim": "\"Making projects seems like a ridiculous requirement to get hired\", r/cscareerquestions",
+      "score": 1072,
+      "verified": "CONFIRMED"
+    },
+    {
+      "claim": "\"An entire team builds Facebook... no team is building shitty Todo clones\"",
+      "score": 346,
+      "verified": "CONFIRMED"
+    },
+    {
+      "claim": "\"A few workplace lessons I wish someone had told me\", r/developersIndia",
+      "score": 436,
+      "verified": "CONFIRMED"
+    },
+    {
+      "claim": "\"I built a boring directory that's making $10k per month\", r/EntrepreneurRideAlong",
+      "score": 268,
+      "verified": "CONFIRMED"
+    },
+    {
+      "claim": "\"The gap is smaller than they told you: local 27B nearly matches frontier\", r/LocalLLM",
+      "score": 243,
+      "verified": "CONFIRMED"
+    }
+  ]
+}
