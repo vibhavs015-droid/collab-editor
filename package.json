@@ -31,14 +31,16 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.e2e.json",
     "check:line-endings": "node scripts/check-line-endings.mjs",
     "check:ignore": "node scripts/check-ignore.mjs",
     "verify": "npm run typecheck && npm run lint && npm run format:check && npm run check:line-endings && npm run check:ignore && npm test",
-    "verify:built": "npm run build && npm run smoke"
+    "verify:built": "npm run build && npm run smoke",
+    "test:e2e": "npm run build && playwright test"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
     "@types/node": "^24.0.0",
     "@types/ws": "8.18.2",
     "@vitest/coverage-v8": "5.0.3",

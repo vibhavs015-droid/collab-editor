@@ -1,0 +1,37 @@
+/**
+ * Browser-test TypeScript configuration.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A SEPARATE FILE
+ * ---------------------------------------------------------------------------
+ * `npm run typecheck` must cover these specs, but they cannot live in the main config for two
+ * independent reasons:
+ *
+ *   1. `tsconfig.json` sets `rootDir: "src"`. That constrains EMIT. Adding `e2e` there is fine
+ *      for a --noEmit typecheck, but the moment anyone compiles it the output moves from
+ *      `dist/server/...` to `dist/src/server/...` - and the Dockerfile asserts
+ *      `test -f /app/dist/server/index.js`, so the image build breaks. Widening rootDir was
+ *      tried and reverted for exactly that reason.
+ *   2. The specs import `@playwright/test`, which the application does not depend on. Keeping
+ *      it out of the build graph means a Playwright upgrade can never affect the shipped
+ *      bundle.
+ *
+ * So `npm run typecheck` runs BOTH this and the main config. The strict flags, including
+ * `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess`, are inherited unchanged, so the
+ * specs are held to the same standard as the code they test.
+ *
+ * ASCII only. See the encoding note in src/core/crdt/rga.ts.
+ */
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The specs live outside src, so rootDir has to be the directory that contains them.
+    // `noEmit` means nothing is ever written, so this cannot affect the build.
+    "rootDir": ".",
+    "noEmit": true,
+    // Playwright's types are pulled in via the package itself; nothing else is needed.
+    "types": ["node"]
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

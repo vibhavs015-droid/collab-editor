@@ -1653,4 +1653,38 @@ The outbox is emptied when `ws.send` returns, not when the server acknowledges. 
 that dies after the write but before delivery is not obviously recovered by anything. This was
 not tested and is recorded as a question, not a finding.
 
+## A browser, and what it cost to build the tests for it
+
+946 source-level tests passed while the application never once sent a typed character to the
+server. Nothing rendered the UI, so nothing could notice. Four bugs in a row lived at a seam
+between two well-tested layers, which is exactly the class a unit suite cannot see: the
+components were correct and the wiring between them was not, and the wiring is not inside any
+component.
+
+Part of this is now guarded mechanically. `e2e/` drives the real built server in Chromium, and
+`npm run test:e2e` runs it as a separate CI job so a runner problem cannot block every push.
+
+Three things were learned the hard way and are recorded in `docs/browser-tests.md`:
+
+1. **`setOffline` is not an outage.** Neither is CDP `Network.emulateNetworkConditions`, nor
+   `routeWebSocket`. All three leave an ESTABLISHED WebSocket connected in Chromium, verified by
+   confirming that operations typed while "offline" arrived at the server. A test written against
+   them passes with offline handling deleted. The specs therefore stop the server process.
+
+2. **Three coordinate systems meet at the editor.** The CRDT counts code points, CodeMirror
+   counts UTF-16 units, and `ArrowRight` steps by grapheme. The first draft of the emoji test
+   pressed the arrow key three times to get to UTF-16 offset 3 and landed one character too far,
+   and then asserted the behaviour of Delete while calling it Backspace. Both were the test being
+   wrong about the editor, not the application.
+
+3. **A green test can prove nothing.** The first version of the revert used to prove the emoji
+   scenario bites left an unused variable behind. Typecheck rejected it, the build failed, `dist/`
+   kept the patched code, and the test passed against the code it was attacking. This is the same
+   failure as the four wiring bugs above - something reported success without having been
+   exercised - and it is why the reverts are scripted and the build is checked before each run.
+
+Also worth noting for later: the protocol has no application-level ping, so a half-open socket
+that drops packets rather than being refused would not be noticed promptly by either side. The
+outage tests cover a stopped server, which is a TCP RST, and not that case.
+
 ## Log

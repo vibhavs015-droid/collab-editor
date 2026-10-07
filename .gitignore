@@ -27,3 +27,7 @@ coverage/
 # Python bytecode, from the document generators.
 __pycache__/
 *.pyc
+# Browser-test output. Traces and screenshots are written per failed run and are large;
+# the HTML report is a build artifact.
+test-results/
+playwright-report/
