@@ -32,6 +32,68 @@ export async function waitForSynced(page: Page): Promise<void> {
   await expect.poll(() => syncState(page), { timeout: 30_000 }).toBe('Synced');
 }
 
+/** Where {@link watchCspViolations} records violations on the page's window. */
+const CSP_LOG = '__cspViolations';
+
+export interface CspViolation {
+  directive: string;
+  blocked: string;
+}
+
+/**
+ * Record every Content-Security-Policy violation the page triggers.
+ *
+ * --------------------------------------------------------------------------------
+ * WHY THIS RUNS IN THE PAGE AND NOT THROUGH THE CONSOLE
+ * --------------------------------------------------------------------------------
+ * The instructions ask to confirm ZERO violations in the console. Reading Playwright's
+ * `console` events would be the obvious way, and it is the wrong one: whether a violation is
+ * reported at all depends on the mode. Under `Content-Security-Policy-Report-Only` the browser
+ * does NOT block the load, so the console usually stays silent and a clean console proves
+ * nothing. Only an enforcing policy produces the errors that would be visible.
+ *
+ * The `securitypolicyviolation` event is the reliable signal: it fires in BOTH modes, on the
+ * document the policy applies to, and it carries the directive and the blocked URI.
+ *
+ * `addInitScript` is what makes it complete. A listener attached after `goto` misses everything
+ * the bundle does while it evaluates, which is most of what a CSP would object to.
+ */
+export async function watchCspViolations(page: Page): Promise<void> {
+  await page.addInitScript((key) => {
+    const log: CspViolation[] = [];
+    Object.defineProperty(window, key, { value: log, configurable: true });
+
+    // No cast: the DOM lib already types this event as SecurityPolicyViolationEvent, so
+    // `event` is usable directly. An assertion here would be the kind of noise that trains a
+    // reader to stop checking assertions.
+    document.addEventListener('securitypolicyviolation', (event) => {
+      log.push({
+        directive: event.effectiveDirective || event.violatedDirective,
+        blocked: event.blockedURI,
+      });
+    });
+  }, CSP_LOG);
+}
+
+/**
+ * Assert nothing tripped the policy, naming the offenders.
+ *
+ * A bare "expected 0, received 2" leaves the reader with nothing to act on, and the whole
+ * point of collecting this is to be told which directive is wrong.
+ */
+/** The violations a page has recorded. Throws if the page is already closed. */
+export async function cspViolations(page: Page): Promise<CspViolation[]> {
+  return page.evaluate(
+    (key) => (window as unknown as Record<string, CspViolation[]>)[key] ?? [],
+    CSP_LOG,
+  );
+}
+
+// Note there is deliberately no `openWatchedPage(context, url)` helper. An earlier draft had
+// one, and the fixture in fixtures.ts made it redundant: every page in every context is watched
+// automatically, so a spec that opened a page through this helper would believe it had opted in
+// when it had actually opted out.
+
 /**
  * A URL for a document both contexts can share.
  *

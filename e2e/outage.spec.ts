@@ -19,7 +19,9 @@
  * So the server process is genuinely stopped and restarted. See e2e/global-setup.ts.
  */
 
-import { expect, test, type Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
+
+import { expect, test } from './fixtures.js';
 
 import { appUrl, editor, editorText, newDocumentId, syncState, waitForSynced } from './helpers.js';
 import { startServer, stopServer, teardownServer } from './global-setup.js';

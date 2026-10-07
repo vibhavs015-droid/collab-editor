@@ -9,7 +9,9 @@
  * ASCII only. See the encoding note in src/core/crdt/rga.ts.
  */
 
-import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import type { Browser, BrowserContext, Page } from '@playwright/test';
+
+import { expect, test } from './fixtures.js';
 
 import {
   appUrl,

@@ -62,6 +62,10 @@ function env(dataDir: string): NodeJS.ProcessEnv {
     // strangers to each other and the ownership rules still apply.
     JWT_SECRET: 'e2e-test-secret-not-a-real-credential-0123456789',
     LOG_LEVEL: process.env['LOG_LEVEL'] ?? 'info',
+    // Passed through explicitly rather than relying on the ...process.env spread, so that
+    // running CSP_MODE=report-only npx playwright test is a supported way to reproduce the
+    // instructions' first rollout phase (report, confirm zero violations, then enforce).
+    CSP_MODE: process.env['CSP_MODE'],
   };
 }
 

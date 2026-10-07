@@ -127,6 +127,42 @@ both. Two things tried along the way are recorded because they look reasonable a
   two options are not scoped by `files` in flat config, and made `eslint.config.js` itself
   unlintable.
 
+## Confirming the Content-Security-Policy has no violations
+
+Every page in every browser context now records `securitypolicyviolation` events, and an
+`afterEach` asserts the list is empty. All six scenarios pass with the policy **enforcing**, so
+the browser tests are the reason `CSP_MODE` can default to `enforce` rather than `report-only`.
+
+Two things about that check are worth stating, because the obvious implementation of each is
+wrong:
+
+**The console is not the signal.** The instructions ask to confirm zero violations in the
+console. Under `Content-Security-Policy-Report-Only` the browser does not block the load, so
+the console stays quiet whether or not the policy was tripped. A clean console under report-only
+proves nothing. The `securitypolicyviolation` event fires in both modes and carries the
+effective directive and the blocked URI, which is what makes the check meaningful.
+
+**The check has to run before the context closes.** The specs close their contexts at the end of
+each test. A `page.evaluate` in `afterEach` then failed on all six scenarios with
+`page.evaluate: Target page, context or browser has been closed` — a red for a reason unrelated
+to the policy. So `context.close()` is wrapped too, and the violations are snapshotted while the
+page is still alive.
+
+And the failure path is explicit: if the log cannot be read at all, that is reported as a
+violation with `directive: 'unreadable'` rather than as an empty list. "Could not check" and
+"nothing wrong" must never look the same, which is the same trap the four wiring bugs in this
+project set were.
+
+Verified the check actually bites by removing `'unsafe-inline'` from `style-src`:
+
+```
+Error: Content-Security-Policy violations:
+  style-src-elem blocked inline
+```
+
+That is also the empirical confirmation that `style-src 'unsafe-inline'` is required: CodeMirror
+injects a `<style>` element at runtime.
+
 ## What is not covered
 
 - **Firefox and WebKit.** Chromium only. Playwright is configured for one project because the

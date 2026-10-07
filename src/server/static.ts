@@ -36,6 +36,8 @@ import { realpath, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 
+import { securityHeaders, type CspMode } from './securityHeaders.js';
+
 /**
  * Content types, keyed by extension.
  *
@@ -77,6 +79,18 @@ export interface StaticOptions {
    * cheap but `realpath` is a syscall and this runs on every asset fetch.
    */
   readonly realRoot: string;
+  /**
+   * Report violations only, or refuse them.
+   *
+   * Part of the options rather than a module constant because the two modes have different
+   * risks and an operator must be able to choose between them without a rebuild: enforcing a
+   * policy that is wrong for the deployed assets breaks the page, while reporting only cannot
+   * protect anything on its own.
+   *
+   * Defaults to 'enforce'. See resolveCspMode for why the instructions' report-only-first
+   * rollout does not make report-only the permanent default.
+   */
+  readonly cspMode: CspMode;
 }
 
 /**
@@ -86,7 +100,10 @@ export interface StaticOptions {
  * looks healthy and every user sees a blank page" is a much worse failure than a refusal
  * to start.
  */
-export async function openStatic(root: string): Promise<StaticOptions> {
+export async function openStatic(
+  root: string,
+  cspMode: CspMode = 'enforce',
+): Promise<StaticOptions> {
   const realRoot = await realpath(resolve(root));
 
   const info = await stat(realRoot);
@@ -95,7 +112,7 @@ export async function openStatic(root: string): Promise<StaticOptions> {
     throw new Error(`static root is not a directory: ${root}`);
   }
 
-  return { root, realRoot };
+  return { root, realRoot, cspMode };
 }
 
 /**
@@ -359,12 +376,26 @@ export async function serveStatic(
     // protection against a mislabelled asset is the explicit content type above.
     'X-Content-Type-Options': 'nosniff',
     'Last-Modified': new Date(info.mtimeMs).toUTCString(),
+    // CSP, frame-ancestors, and the rest. The reason this matters HERE specifically is the
+    // end-to-end encryption key: it lives in the URL fragment, which the browser never sends,
+    // but any script running in this page can read it out of `location.hash`. There is no
+    // injection sink today, so this is the net for the day one is added - it decides what an
+    // injected script may load and exfiltrate. See securityHeaders.ts.
+    ...securityHeaders(options.cspMode),
   };
 
   // Conditional request. A 304 still needs the validators, which is why headers are built
   // before this branch rather than inside the 200 path.
+  //
+  // The security headers go on the 304 too. They are not body-specific, and a cached response
+  // that keeps its ETag but loses its CSP is a response that a browser may reuse without ever
+  // re-applying the policy.
   if (matchesEtag(req.headers['if-none-match'], etag)) {
-    res.writeHead(304, { ETag: etag, 'Cache-Control': headers['Cache-Control'] });
+    res.writeHead(304, {
+      ETag: etag,
+      'Cache-Control': headers['Cache-Control'],
+      ...securityHeaders(options.cspMode),
+    });
     res.end();
     return { status: 304, pathname: servedPath };
   }

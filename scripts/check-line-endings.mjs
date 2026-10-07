@@ -43,6 +43,14 @@ const SKIP_DIRECTORIES = new Set([
   '.tools',
   'docs/benchmarks',
   'docs/load-artifacts',
+  // Playwright's output directories, for the same reason as `docs/benchmarks` above: a tool
+  // we do not control writes them, and a byte-level scan of them is slow and uninformative.
+  //
+  // Without this, `npx playwright test` writes `test-results/.last-run.json` with no trailing
+  // newline and the gate below fails on a file that is gitignored, was never committed, and
+  // is deleted by the next run. That is a gate red for a reason nobody can act on.
+  'test-results',
+  'playwright-report',
 ]);
 
 /**

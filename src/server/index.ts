@@ -17,6 +17,7 @@ import { Logger } from './observability/logger.js';
 import { Metrics } from './observability/metrics.js';
 import { declareMetrics, M } from './observability/index.js';
 import { openStatic, type StaticOptions } from './static.js';
+import { resolveCspMode } from './securityHeaders.js';
 
 /**
  * Open the built client, treating "not built yet" as normal.
@@ -28,7 +29,7 @@ import { openStatic, type StaticOptions } from './static.js';
  */
 async function openClient(root: string, logger: Logger): Promise<StaticOptions | undefined> {
   try {
-    return await openStatic(root);
+    return await openStatic(root, resolveCspMode(process.env['CSP_MODE']));
   } catch {
     if (process.env['NODE_ENV'] === 'production') {
       // In production a missing bundle means a broken image, and serving nothing while
