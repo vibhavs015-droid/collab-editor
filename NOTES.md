@@ -839,6 +839,30 @@ likely thing to be wrong. Verify the harness before changing the code.
   to `10.0.5`. The CI audit gate caught this automatically, which is the first
   real proof that gate earns its keep.
 
+  **Later, and this time the upgrade is what broke it.** `shell-quote@1.8.4` -
+  `1.10.0` carries a critical command-injection advisory, and `concurrently` gained a
+  dependency on the vulnerable range in 9.2.3. So the "fix" moved the project from
+  vulnerable to _also_ vulnerable, and `npm audit --audit-level=high` exited 1 - which
+  means CI's `security` job was red and had been for a while.
+
+  The audit did not notice because `npm audit` has nothing to say about the fact that
+  the gate was red; nobody ran it locally before pushing.
+
+  The fix was to **delete `concurrently`**, not to downgrade it. It was used for exactly
+  one thing: running the API and the Vite dev server side by side with their output
+  labelled. That is thirty lines, and it removes four transitive packages instead of
+  pinning one of them to a version that happens not to be affected. `scripts/dev.mjs`
+  keeps the behaviours people rely on - per-child labels, Ctrl+C stopping both, one
+  exiting taking the other down.
+
+  The first version of `dev.mjs` used `shell: true` to spawn `npm` on Windows, and Node
+  emitted DEP0190 about passing arguments to a shell - the exact hazard the dependency was
+  removed for. The shell is now avoidable: `npm_execpath` names the npm-cli.js that is
+  running, and invoking it with the same Node is both exact and shell-free.
+
+  **The lesson is not "always upgrade".** It is that a dependency can be fixed into a new
+  vulnerability, and that a red security gate is only noticed by running the gate.
+
 ### Test suite
 
 106 tests, ~2 minutes. The runtime is dominated by Postgres initialisation

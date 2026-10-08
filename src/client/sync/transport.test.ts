@@ -306,6 +306,27 @@ const sampleOps: Operation[] = [
   { type: 'insert', id: { site: 'a', clock: 1 }, origin: null, value: 'x' },
 ];
 
+/** Admit the current socket, as the relay's `welcome` does. */
+async function admit(socket: FakeSocket): Promise<void> {
+  socket.deliver({
+    type: 'welcome',
+    protocolVersion: 1,
+    site: 'server-site',
+    documentId: 'doc-1',
+    snapshot: [],
+    seq: 0,
+  });
+  await Promise.resolve();
+}
+
+/** Every `ops` frame sent on a socket, flattened. */
+function opsSentOn(socket: FakeSocket): unknown[] {
+  return socket
+    .parsedSent()
+    .filter((f) => f['type'] === 'ops')
+    .flatMap((f) => (f['ops'] as unknown[] | undefined) ?? []);
+}
+
 describe('SyncTransport', () => {
   beforeEach(() => {
     FakeSocket.reset();
@@ -1148,27 +1169,6 @@ describe('SyncTransport', () => {
    * document missing this user's edits - with the sender's indicator reading "Synced".
    */
   describe('a socket that dies after the write (T4)', () => {
-    /** Admit the current socket, as the relay's `welcome` does. */
-    async function admit(socket: FakeSocket): Promise<void> {
-      socket.deliver({
-        type: 'welcome',
-        protocolVersion: 1,
-        site: 'server-site',
-        documentId: 'doc-1',
-        snapshot: [],
-        seq: 0,
-      });
-      await Promise.resolve();
-    }
-
-    /** Every `ops` frame sent on a socket, flattened. */
-    function opsSentOn(socket: FakeSocket): unknown[] {
-      return socket
-        .parsedSent()
-        .filter((f) => f['type'] === 'ops')
-        .flatMap((f) => (f['ops'] as unknown[] | undefined) ?? []);
-    }
-
     it('RESENDS operations that were written but never acknowledged', async () => {
       // The test that decides whether T4's hypothesis is true or false.
       const h = harness({ baseRetryMs: 100 });
@@ -1269,6 +1269,122 @@ describe('SyncTransport', () => {
 
       expect(h.transport.queuedOperationCount).toBe(0);
       expect(opsSentOn(second)).toHaveLength(2);
+    });
+  });
+
+  /**
+   * The client half of liveness: giving up on a socket that never closes.
+   *
+   * A half-open connection fires no `error`, no `close`, and leaves `readyState` at OPEN, so
+   * every recovery path in this class - the reconnect, the in-flight replay, the offline state -
+   * waits for an event that never comes. These are the tests for the deadline that does not.
+   */
+  describe('a socket that never closes (T4 follow-up)', () => {
+    it('gives up on a server that has stopped sending anything', async () => {
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      await admit(FakeSocket.last());
+
+      const before = FakeSocket.instances.length;
+
+      // Nothing wrong with the socket as far as anyone can tell: no error, no close, still OPEN.
+      // Just silence, which is what a dropped-packets connection looks like.
+      vi.advanceTimersByTime(120_000);
+
+      expect(
+        FakeSocket.instances.length,
+        'the client never noticed a server that had gone quiet',
+      ).toBeGreaterThan(before);
+    });
+
+    it('does not give up while the server is still pinging', async () => {
+      // The other half. A watchdog that fired on a fixed timer rather than on silence would
+      // pass the test above and break every healthy connection.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      const before = FakeSocket.instances.length;
+
+      for (let round = 0; round < 20; round += 1) {
+        // Answer every ping, as a live server's client would.
+        FakeSocket.last().deliver({ type: 'ping', t: round + 1 });
+        FakeSocket.last().triggerOpen();
+        vi.advanceTimersByTime(10_000);
+      }
+
+      expect(FakeSocket.instances.length, 'a responsive server was declared dead').toBe(before);
+    });
+
+    it('answers a ping with a pong carrying the same token', () => {
+      const h = harness();
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      FakeSocket.last().deliver({ type: 'ping', t: 4321 });
+
+      const pong = FakeSocket.last()
+        .parsedSent()
+        .find((f) => f['type'] === 'pong');
+
+      expect(pong).toEqual({ type: 'pong', t: 4321 });
+    });
+
+    it('answers immediately, without waiting for a timer', () => {
+      // The reply must not depend on anything throttled, queued or slow: a backgrounded tab that
+      // answers pings late is a tab the server declares dead.
+      const h = harness();
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      FakeSocket.last().deliver({ type: 'ping', t: 1 });
+
+      expect(FakeSocket.last().sent).toContain(JSON.stringify({ type: 'pong', t: 1 }));
+    });
+
+    it('declares itself capable of ping in hello', async () => {
+      // Without this the server never pings, and the whole mechanism is off.
+      const h = harness();
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      const hello = FakeSocket.last()
+        .parsedSent()
+        .find((f) => f['type'] === 'hello');
+
+      expect(hello?.['capabilities']).toEqual(['ping']);
+    });
+
+    it('replays unacknowledged work after the watchdog fires', async () => {
+      // The point of noticing. Recovering the connection is only worth doing if the edits
+      // written to the dead socket come back with it.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      h.transport.send(sampleOps);
+
+      expect(opsSentOn(FakeSocket.last())).toHaveLength(1);
+
+      // Silence. No close, no error.
+      vi.advanceTimersByTime(120_000);
+
+      expect(FakeSocket.instances.length).toBeGreaterThan(1);
+
+      const second = FakeSocket.last();
+
+      second.triggerOpen();
+      await Promise.resolve();
+      await admit(second);
+
+      expect(opsSentOn(second)).toHaveLength(1);
     });
   });
 

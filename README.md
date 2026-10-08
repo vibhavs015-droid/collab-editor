@@ -21,10 +21,13 @@ implementation correct rather than merely claiming it.
 | 6     | **End-to-end encryption**                         | ✅ Complete |
 
 **Not done:** public launch. The roadmap's phase 6 was "differentiator + public launch";
-end-to-end encryption was chosen as the differentiator and is complete, but nothing has been
-published and the repository is still private. The Docker image has also never been built,
-so the deploy path is documented but unproven — see [docs/deploy.md](docs/deploy.md) for
-exactly what has and has not been verified.
+end-to-end encryption was chosen as the differentiator and is complete, and the repository is
+public, but **nothing is deployed and no real user has used it**. The Docker image has also never
+been built, so the deploy path is documented but unproven — see
+[docs/deploy.md](docs/deploy.md) for exactly what has and has not been verified.
+
+Visibility is a decision, not a milestone, and it can be reversed with one setting. It was made
+public so that other agents could review the code.
 
 ---
 

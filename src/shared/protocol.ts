@@ -84,6 +84,46 @@ export interface HelloMessage {
    * Lets the server decide between sending a delta and a full snapshot.
    */
   readonly lastAppliedSeq: number;
+  /**
+   * Optional server-to-client frames this client understands.
+   *
+   * The same opt-in idea as {@link BatchId}, for the same reason: a client that does not
+   * recognise a message type falls through to its "unrecognised frame" handler, so sending an
+   * unfamiliar frame is a user-visible error, not a no-op. An absent list means "send me
+   * nothing the protocol did not already require", which is what a client from before
+   * acknowledgements sent.
+   *
+   * `ack` is NOT listed here even though new clients support it. It is gated on the client
+   * sending a `batchId` instead, because the id IS the thing being acknowledged - asking for one
+   * is the opt-in, and it needs no separate declaration to go out of sync.
+   */
+  readonly capabilities?: readonly Capability[];
+}
+
+/** Server-to-client frames a client can declare support for in its `hello`. */
+export type Capability = 'ping';
+
+/** Every capability this server knows how to honour. Anything else is dropped on arrival. */
+const KNOWN_CAPABILITIES: readonly Capability[] = ['ping'];
+
+/**
+ * The server's liveness check.
+ *
+ * `t` is a token the client must echo. Without it a `pong` that was delayed in a buffer for
+ * three minutes would satisfy today's check, and the server would conclude a dead client is
+ * alive - which is the exact failure this frame exists to catch. The token makes each pong
+ * attributable to a specific ping.
+ */
+export interface PingMessage {
+  readonly type: 'ping';
+  readonly t: number;
+}
+
+/** The client's answer to a {@link PingMessage}. */
+export interface PongMessage {
+  readonly type: 'pong';
+  /** Echoed verbatim from the ping being answered. */
+  readonly t: number;
 }
 
 /**
@@ -209,7 +249,8 @@ export type ClientMessage =
   | SubmitOpsMessage
   | SubmitEncryptedOpsMessage
   | PresenceMessage
-  | ResyncRequestMessage;
+  | ResyncRequestMessage
+  | PongMessage;
 
 // ── Server → Client ──────────────────────────────────────────────────────
 
@@ -334,11 +375,12 @@ export type ServerMessage =
   | PresenceMessageServer
   | SyncStateMessage
   | AckMessage
+  | PingMessage
   | ErrorMessage;
 
 // ── Runtime validation ───────────────────────────────────────────────────
 
-const CLIENT_MESSAGE_TYPES = new Set(['hello', 'ops', 'ops-enc', 'presence', 'resync']);
+const CLIENT_MESSAGE_TYPES = new Set(['hello', 'ops', 'ops-enc', 'presence', 'resync', 'pong']);
 
 /**
  * Envelope version the server speaks.
@@ -507,6 +549,7 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       const protocolVersion = parsed['protocolVersion'];
       const token = parsed['token'];
       const lastAppliedSeq = parsed['lastAppliedSeq'];
+      const capabilities = parsed['capabilities'];
 
       if (
         typeof documentId !== 'string' ||
@@ -523,7 +566,30 @@ export function parseClientMessage(raw: string): ClientMessage | null {
         return null;
       }
 
-      return { type, protocolVersion, token, documentId, lastAppliedSeq };
+      // Optional, but every element has to be a known capability. An unrecognised one is
+      // dropped rather than refused: a newer client may declare capabilities this server does
+      // not implement, and refusing the handshake over that would make the two versions
+      // incompatible rather than merely less capable. This is the same rule as `batchId` -
+      // accept the shape, keep only what is understood.
+      const known = KNOWN_CAPABILITIES.filter((capability) =>
+        Array.isArray(capabilities) ? capabilities.includes(capability) : false,
+      );
+
+      return known.length > 0
+        ? { type, protocolVersion, token, documentId, lastAppliedSeq, capabilities: known }
+        : { type, protocolVersion, token, documentId, lastAppliedSeq };
+    }
+
+    case 'pong': {
+      const t = parsed['t'];
+
+      // A `pong` the client cannot be matched to a `ping` is not a liveness signal, so an
+      // unparseable one is refused rather than treated as an answer.
+      if (typeof t !== 'number' || !Number.isFinite(t)) {
+        return null;
+      }
+
+      return { type, t };
     }
 
     case 'ops': {

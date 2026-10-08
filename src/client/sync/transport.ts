@@ -19,6 +19,7 @@ import { parseOperations } from '../../shared/operation-validation.js';
 import {
   MAX_OPS_PER_FRAME,
   PROTOCOL_VERSION,
+  type Capability,
   type ClientMessage,
   type EncryptedOperationFrame,
   type ServerMessage,
@@ -110,6 +111,48 @@ export interface TransportOptions {
 }
 
 /**
+ * Server-to-client frames this client understands, declared in every `hello`.
+ *
+ * `ack` is absent because it is gated on the client sending a `batchId`, which is a stronger
+ * signal than a declaration: it is the specific thing being acknowledged, and it cannot be sent
+ * by a client that does not intend to use it.
+ */
+const CLIENT_CAPABILITIES: readonly Capability[] = ['ping'];
+
+/**
+ * How long the client waits for ANY frame from the server before declaring the socket dead.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS: A HALF-OPEN SOCKET IS INVISIBLE WITHOUT IT
+ * ---------------------------------------------------------------------------
+ * Everything else in this file - the reconnect, the in-flight replay, the honest `Synced` -
+ * depends on the socket's `close` event arriving. A TCP connection whose packets are being
+ * silently dropped never closes. No error fires, no `close` fires, the browser's `readyState`
+ * stays `OPEN`, and the client keeps believing it is connected while its edits pile up
+ * unacknowledged.
+ *
+ * That is not hypothetical for this project: the browser tests had to stop the server process
+ * outright to simulate an outage, because `context.setOffline(true)`, CDP
+ * `Network.emulateNetworkConditions` and `routeWebSocket` all leave an ESTABLISHED WebSocket
+ * connected. Real networks behave like those, not like a stopped process.
+ *
+ * The server pings every {@link PING_INTERVAL_MS} and the client answers, so "no frame at all
+ * for this long" is a sound liveness signal.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY IT IS LONGER THAN ONE PING INTERVAL
+ * ---------------------------------------------------------------------------
+ * A single missed ping is a congested network, not a dead one. This is deliberately more than one
+ * interval so that one lost packet does not cost a reconnect - which would replay every
+ * in-flight batch for nothing.
+ *
+ * A backgrounded browser tab throttles its timers, which delays this check rather than causing
+ * it to fire early: network events are not throttled, so a throttled tab still records frames and
+ * still answers pings promptly. The result is later detection, never false detection.
+ */
+const SERVER_IDLE_TIMEOUT_MS = 75_000;
+
+/**
  * One outbound frame that has been written but not acknowledged.
  *
  * The message is held whole, rather than just the operations, so that a resend is byte-identical
@@ -145,6 +188,8 @@ export class SyncTransport {
   #state: ConnectionState = 'closed';
   #attempt = 0;
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Liveness watchdog. See {@link SERVER_IDLE_TIMEOUT_MS}. */
+  readonly #watchdog: ReturnType<typeof setInterval>;
   /**
    * The last `error` frame's code, kept so `onclose` can tell a permanent refusal from a
    * dropped connection.
@@ -188,6 +233,13 @@ export class SyncTransport {
    * reset would reissue an id that the server may already have acknowledged on the old socket.
    */
   #nextBatchId = 1;
+  /**
+   * When the last frame arrived from the server, or null while disconnected.
+   *
+   * The liveness signal for a socket that never closes. See {@link SERVER_IDLE_TIMEOUT_MS} for
+   * why waiting for a `close` event is not enough.
+   */
+  #lastFrameAt: number | null = null;
   /**
    * Highest server sequence this client holds.
    *
@@ -252,6 +304,21 @@ export class SyncTransport {
     // and retries. Silently sending something that looks valid would be worse.
     this.#resolveToken = options.resolveToken ?? (() => Promise.resolve(''));
     this.#seq = options.initialSeq ?? 0;
+
+    // The liveness watchdog, started once for the transport's whole life rather than per
+    // connection. It is cheap when there is nothing to check: `#checkLiveness` returns
+    // immediately unless there is a live socket that has gone quiet.
+    //
+    // Unref'd where the runtime supports it, so a pending watchdog cannot be the reason a
+    // process stays alive. In a browser there is no such thing and unref does not exist.
+    this.#watchdog = setInterval(
+      () => {
+        this.#checkLiveness();
+      },
+      Math.floor(SERVER_IDLE_TIMEOUT_MS / 3),
+    );
+
+    (this.#watchdog as { unref?: () => void }).unref?.();
   }
 
   get state(): ConnectionState {
@@ -311,11 +378,16 @@ export class SyncTransport {
 
     socket.onopen = () => {
       this.#attempt = 0;
+      this.#lastFrameAt = Date.now();
       this.#setState('open');
       void this.#sendHello();
     };
 
     socket.onmessage = (event: MessageEvent<string>) => {
+      // Recorded BEFORE parsing, so a frame this client cannot understand still counts as proof
+      // the server is alive. A server sending something unrecognised is alive; one sending
+      // nothing at all is not, and that is the distinction being made.
+      this.#lastFrameAt = Date.now();
       this.#receive(event.data);
     };
 
@@ -326,47 +398,10 @@ export class SyncTransport {
 
     socket.onclose = () => {
       this.#socket = null;
-      // The handshake does not survive the socket. A reconnect must re-run it, or it
-      // would flush queued operations into a connection the server has not
-      // authorised yet.
-      this.#admitted = false;
-      this.#helloSent = false;
 
-      // Anything the server never acknowledged goes back into the send path, because the
-      // socket it was written to is gone. Without this, operations that reached a socket which
-      // then died are lost silently - measured in src/server/writeDurability.test.ts.
-      this.#requeueInflight();
-
-      if (this.#disposed || this.#closedByUser) {
-        this.#setState('closed');
-        return;
-      }
-
-      // A refusal the server has already explained. Retrying cannot fix it: the identity has
-      // no access to this document, or its token is not valid, and neither changes by asking
-      // again. Before this, such a client reconnected about twice a second forever, which
-      // cost the server a socket and a log line each time and left the user looking at
-      // "Offline" with no explanation.
-      //
-      // No latch. An earlier version recorded the refusal and only reported the first one,
-      // which quietly reintroduced the loop on any later close: a manual retry got refused,
-      // the latch was already set, so control fell through to #scheduleRetry and the client
-      // resumed reconnecting about twice a second. Reporting every refusal is simpler and
-      // cannot be bypassed.
-      const refusal = permanentRefusal(this.#lastErrorCode);
-
-      this.#lastErrorCode = null;
-
-      if (refusal !== null) {
-        this.#setState('closed');
-        this.#handlers.onError(refusal.code, refusal.message);
-
-        return;
-      }
-
-      this.#setState('closed');
-      this.#handlers.onSyncState('offline', this.#outbox.length);
-      this.#scheduleRetry();
+      // Everything below is the shared close transition. See #onSocketClosed for why the
+      // liveness watchdog calls the same thing rather than reimplementing it.
+      this.#onSocketClosed();
     };
   }
 
@@ -394,6 +429,10 @@ export class SyncTransport {
   /** Permanent shutdown. Used on page teardown and in tests. */
   dispose(): void {
     this.#disposed = true;
+    // The watchdog outlives every connection, so disposing the transport has to stop it. A
+    // live interval here would be a timer firing forever on a disposed transport, holding a
+    // closure that holds the socket - which is the leak this class is careful about elsewhere.
+    clearInterval(this.#watchdog);
     this.disconnect();
   }
 
@@ -801,6 +840,21 @@ export class SyncTransport {
       case 'snapshot':
         this.#receiveBaseline(parsed);
         return;
+      case 'ping': {
+        // Answered immediately and synchronously. That is the whole point: the reply must not
+        // depend on anything that could be slow, throttled or queued, or the server would time
+        // out a client that is perfectly alive.
+        //
+        // The token is echoed verbatim. The server matches it against the ping it actually
+        // sent, so a pong that arrives late cannot be mistaken for a current one.
+        if (typeof parsed.t !== 'number' || !Number.isFinite(parsed.t)) {
+          this.#handlers.onError('BAD_RESPONSE', 'Server sent a malformed ping.');
+          return;
+        }
+
+        this.#send({ type: 'pong', t: parsed.t });
+        return;
+      }
       case 'presence':
         this.#handlers.onPresence(parsed.cursors);
         return;
@@ -962,6 +1016,9 @@ export class SyncTransport {
       // local operations have no server sequence yet, so claiming them here would
       // ask the server to skip operations this client has never seen.
       lastAppliedSeq: this.#seq,
+      // Declaring the capability is what opts this client into being pinged. Without it the
+      // server sends nothing new, so a client that does not understand `ping` never sees one.
+      capabilities: CLIENT_CAPABILITIES,
     });
 
     if (sent) {
@@ -983,6 +1040,87 @@ export class SyncTransport {
 
     this.#socket.send(JSON.stringify(message));
     return true;
+  }
+
+  /**
+   * Give up on a socket that has gone quiet, so a half-open connection is noticed.
+   *
+   * Called from a timer rather than from any event, because there IS no event: a connection
+   * whose packets are being dropped never fires `error`, never fires `close`, and leaves
+   * `readyState` at OPEN. Waiting for `close` is waiting for a thing that does not happen.
+   *
+   * The socket is closed deliberately rather than abandoned, because closing it runs `onclose`,
+   * which is where the reconnect, the in-flight replay and the honest offline state all live.
+   * Abandoning it would need all of that duplicated here, and would be a second code path for
+   * the same transition - which is how the two drift apart.
+   */
+  #checkLiveness(): void {
+    if (this.#disposed || this.#closedByUser || this.#socket === null) {
+      return;
+    }
+
+    if (this.#lastFrameAt === null) {
+      return;
+    }
+
+    if (Date.now() - this.#lastFrameAt < SERVER_IDLE_TIMEOUT_MS) {
+      return;
+    }
+
+    this.#handlers.onError('SERVER_UNREACHABLE', 'Lost contact with the server. Reconnecting.');
+
+    const socket = this.#socket;
+
+    // Cleared BEFORE closing, so the close handler cannot re-enter with a socket it believes
+    // is live. `close()` on a socket that never closes is safe; `terminate()` is not available
+    // on the DOM type and would be wrong here anyway - this socket still looks healthy.
+    this.#socket = null;
+
+    try {
+      socket.close();
+    } catch {
+      // Already gone. The close handler below still runs the reconnect.
+    }
+
+    // The browser may never deliver `close` for a half-open socket - that is the entire
+    // problem - so the transition is driven here rather than left to the event.
+    this.#onSocketClosed();
+  }
+
+  /**
+   * The close transition, shared by the real `close` event and the liveness watchdog.
+   *
+   * Extracted so both routes run identical logic. When this was inlined in `onclose`, the
+   * watchdog would have needed its own copy of the in-flight replay and the refusal check, and
+   * the two would have been free to diverge - which is exactly how a reconnect ends up working
+   * in one case and silently losing work in the other.
+   */
+  #onSocketClosed(): void {
+    this.#lastFrameAt = null;
+    this.#admitted = false;
+    this.#helloSent = false;
+
+    this.#requeueInflight();
+
+    if (this.#disposed || this.#closedByUser) {
+      this.#setState('closed');
+      return;
+    }
+
+    const refusal = permanentRefusal(this.#lastErrorCode);
+
+    this.#lastErrorCode = null;
+
+    if (refusal !== null) {
+      this.#setState('closed');
+      this.#handlers.onError(refusal.code, refusal.message);
+
+      return;
+    }
+
+    this.#setState('closed');
+    this.#handlers.onSyncState('offline', this.#unacknowledged());
+    this.#scheduleRetry();
   }
 
   /**

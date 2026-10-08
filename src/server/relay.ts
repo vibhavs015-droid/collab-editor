@@ -67,6 +67,21 @@ interface Client {
    * {@link Limits.opsBurst}.
    */
   readonly opsBudget: TokenBucket;
+  /**
+   * Server-to-client frames this client declared it understands.
+   *
+   * Empty for a client that sent no `capabilities`, which is how a client from before this
+   * feature behaves - and it is what stops the relay sending such a client a `ping` it would
+   * report as an unrecognised frame, every 25 seconds, forever.
+   */
+  readonly capabilities: ReadonlySet<string>;
+  /**
+   * The `ping` currently outstanding, if any.
+   *
+   * At most one at a time, which is what makes {@link PONG_DEADLINE_MS} meaningful. Null means
+   * nothing is outstanding: either none has been sent yet, or the last one was answered.
+   */
+  pendingPing: { readonly token: number; readonly sentAt: number } | null;
 }
 
 /**
@@ -97,8 +112,28 @@ const MAX_BACKPRESSURE_FRAMES = 100;
 /** Reap a connection that has sent nothing for this long. */
 const STALE_CONNECTION_MS = 60_000;
 
-/** Heartbeat interval. Must be comfortably under the stale threshold. */
+/**
+ * Heartbeat interval. Must be comfortably under the stale threshold.
+ *
+ * Also the `ping` cadence. 25 seconds is chosen against the cost of getting it wrong in each
+ * direction: too short and a mobile client on a congested link is declared dead and pays a
+ * reconnect, which replays its in-flight batches; too long and a genuinely dead connection
+ * occupies a socket, a room membership and a peer slot for that long before anyone notices.
+ *
+ * It is NOT a detection deadline on its own. Nothing was wrong with this number before; what was
+ * wrong was that nothing was waiting for an answer.
+ */
 const HEARTBEAT_INTERVAL_MS = 25_000;
+
+/**
+ * How long a `ping` may go unanswered before the connection is declared dead.
+ *
+ * Shorter than the interval, deliberately: at most one ping is outstanding at a time, so a client
+ * that has had a full interval plus this grace has had one whole missed round trip. A deadline
+ * LONGER than the interval would let two pings be outstanding at once, and answering either
+ * would then prove the client is alive when the other is still unanswered.
+ */
+const PONG_DEADLINE_MS = 10_000;
 
 /**
  * Operations replayed per round trip when catching a client up.
@@ -239,6 +274,19 @@ export interface RelayOptions {
    * facts.
    */
   readonly limits?: Limits;
+
+  /**
+   * How long a `ping` may go unanswered before the connection is declared dead.
+   *
+   * An option rather than a constant because it is only testable if a test can shorten it, and a
+   * test that has to wait out the production value is a test nobody runs often. It must stay
+   * comfortably below `heartbeatMs`, or two pings end up outstanding at once and answering
+   * either would count as answering both.
+   *
+   * Defaults to {@link PONG_DEADLINE_MS}. A production deployment should not need to set this;
+   * if you find yourself wanting to, the interval above is the number to tune.
+   */
+  readonly pongDeadlineMs?: number;
 }
 
 export class Relay {
@@ -263,7 +311,17 @@ export class Relay {
   readonly #logger: Logger;
   readonly #replayBatchSize: number;
   readonly #limits: Limits;
+  readonly #pongDeadlineMs: number;
   #siteCounter = 0;
+  /**
+   * Token for the next `ping`.
+   *
+   * Per process rather than per connection, so two connections can never be holding the same
+   * token. That does not actually matter for correctness - each connection matches its own - but
+   * it makes a captured trace unambiguous, which is the sort of thing that is cheap now and
+   * annoying to retrofit.
+   */
+  #pingCounter = 0;
 
   constructor(options: RelayOptions = {}) {
     const heartbeatMs = options.heartbeatMs ?? HEARTBEAT_INTERVAL_MS;
@@ -277,6 +335,7 @@ export class Relay {
     declareMetrics(this.#metrics);
     this.#replayBatchSize = options.replayBatchSize ?? DEFAULT_REPLAY_BATCH;
     this.#limits = options.limits ?? DEFAULT_LIMITS;
+    this.#pongDeadlineMs = options.pongDeadlineMs ?? PONG_DEADLINE_MS;
 
     this.#heartbeat =
       heartbeatMs > 0
@@ -393,6 +452,10 @@ export class Relay {
       // Born full, and full for THIS connection: see TokenBucket on why an empty bucket
       // would be the wrong starting state.
       opsBudget: new TokenBucket(this.#limits.opsBurst, this.#limits.opsPerSecond),
+      // Replaced by the client's `hello` when it declares any. Empty until then, so the first
+      // ping cannot be sent before the client has said whether it understands one.
+      capabilities: new Set<string>(),
+      pendingPing: null,
     };
 
     if (client.authenticated) {
@@ -552,6 +615,27 @@ export class Relay {
     }
 
     return all;
+  }
+
+  /**
+   * Record which optional server-to-client frames this client understands.
+   *
+   * Replaces rather than merges, so a `hello` with no `capabilities` on a socket that earlier
+   * declared some means the client no longer wants them - which is the conservative reading, and
+   * the one that cannot result in sending a frame the client will reject.
+   */
+  #adoptCapabilities(client: Client, declared: readonly string[] | undefined): void {
+    const next = new Set<string>();
+
+    for (const capability of declared ?? []) {
+      next.add(capability);
+    }
+
+    // `#capabilities` is readonly on Client, so it is swapped through a cast rather than
+    // mutated. The alternative is making the field mutable, which would allow a code path to
+    // widen a client's declared capabilities at any point in the connection rather than only
+    // in response to a handshake.
+    (client as { capabilities: ReadonlySet<string> }).capabilities = next;
   }
 
   #join(client: Client): void {
@@ -872,11 +956,30 @@ export class Relay {
           // Already admitted: either there is no authoriser, or this is a second
           // hello on a live socket. Either way the client just wants catching up
           // again, which is harmless and cheaper than re-authorising.
+          //
+          // The capabilities are still (re-)read, because a client that sends hello twice with
+          // different ones should get the ones it most recently declared - and because a
+          // reconnect on the same socket is exactly when a client would re-advertise.
+          this.#adoptCapabilities(client, message.capabilities);
+
           void this.#replayFrom(client, message.lastAppliedSeq);
           return;
         }
 
+        this.#adoptCapabilities(client, message.capabilities);
+
         void this.#authenticate(client, message.token, message.lastAppliedSeq);
+        return;
+      }
+
+      case 'pong': {
+        // The answer to a liveness check. Matched against the OUTSTANDING token, so a pong
+        // that was delayed in a buffer for minutes cannot be mistaken for a fresh one - which
+        // is the exact failure the token exists to prevent.
+        if (client.pendingPing !== null && client.pendingPing.token === message.t) {
+          client.pendingPing = null;
+        }
+
         return;
       }
 
@@ -1177,13 +1280,26 @@ export class Relay {
    * that does not exist and would make every call site need a floating promise.
    */
   #reapStale(): void {
-    const cutoff = Date.now() - STALE_CONNECTION_MS;
+    const now = Date.now();
+    const cutoff = now - STALE_CONNECTION_MS;
 
     for (const room of [...this.#rooms.values()]) {
       for (const client of [...room]) {
+        // The pong deadline is checked FIRST, and it is strictly tighter than the stale
+        // threshold. A client that has opted into pings and stopped answering is gone, and
+        // waiting the full minute for the `lastSeen` sweep would keep a dead peer in the room
+        // and in everyone's peer count the whole time.
+        if (client.pendingPing !== null && now - client.pendingPing.sentAt > this.#pongDeadlineMs) {
+          this.#close(client, 1001, 'No pong');
+          continue;
+        }
+
         if (client.lastSeen < cutoff) {
           this.#close(client, 1001, 'Stale connection');
+          continue;
         }
+
+        this.#sendPing(client, now);
       }
     }
 
@@ -1191,10 +1307,37 @@ export class Relay {
     // cannot see them. They are exactly the connections nobody is waiting for, so
     // they are the ones that must be swept.
     for (const client of [...this.#pending]) {
-      if (client.helloDeadline !== null && Date.now() > client.helloDeadline) {
+      if (client.helloDeadline !== null && now > client.helloDeadline) {
         this.#close(client, 1008, 'No hello');
       }
     }
+  }
+
+  /**
+   * Ping a client that asked to be pinged, unless one is already outstanding.
+   *
+   * The token is a per-connection counter rather than a clock, so it is monotonic even if the
+   * clock moves, and two pings on one connection can never share a token.
+   *
+   * A client that did not declare the capability is never pinged: it would answer with its
+   * unrecognised-frame handler, once per interval, forever.
+   */
+  #sendPing(client: Client, now: number): void {
+    if (!client.capabilities.has('ping')) {
+      return;
+    }
+
+    // One outstanding at a time. Pinging again while waiting would put two tokens in flight,
+    // and answering either would then count as an answer to the other.
+    if (client.pendingPing !== null) {
+      return;
+    }
+
+    this.#pingCounter += 1;
+    const token = this.#pingCounter;
+
+    client.pendingPing = { token, sentAt: now };
+    this.#send(client, { type: 'ping', t: token });
   }
 
   /** Close every socket and stop the heartbeat. Synchronous by design. */

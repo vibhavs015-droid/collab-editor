@@ -41,6 +41,7 @@ infer from code.
 | [0013](./0013-client-log-compaction.md)                   | Client compaction by snapshot           | Accepted |
 | [0014](./0014-end-to-end-encryption.md)                   | E2EE: the server sees ciphertext        | Accepted |
 | [0015](./0015-acknowledged-writes.md)                     | Acknowledged writes                     | Accepted |
+| [0016](./0016-liveness-ping.md)                           | Liveness by application-level ping      | Accepted |
 
 ## Planned
 
