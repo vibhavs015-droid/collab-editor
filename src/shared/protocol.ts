@@ -264,9 +264,21 @@ export interface SyncStateMessage {
  * reason instead of parsing a sentence. The wire protocol and the HTTP API share
  * it: the same condition produces the same code on both, which is what lets the
  * client handle one failure the same way regardless of transport.
+ *
+ * The two quota codes are here rather than being HTTP-only, because they are the ones a client
+ * has to be able to REASON about rather than just display. `RATE_LIMITED` means "you are going
+ * too fast; back off", which is actionable and transient. `DOCUMENT_TOO_LARGE` means "this
+ * document cannot grow any further", which is permanent for that document but still leaves
+ * deletion working. A client that cannot tell those two apart will retry the second forever.
  */
 export type ErrorCode =
-  'BAD_MESSAGE' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'DOCUMENT_NOT_FOUND' | 'INTERNAL';
+  | 'BAD_MESSAGE'
+  | 'UNAUTHORIZED'
+  | 'RATE_LIMITED'
+  | 'DOCUMENT_NOT_FOUND'
+  | 'DOCUMENT_TOO_LARGE'
+  | 'TITLE_TOO_LONG'
+  | 'INTERNAL';
 
 export interface ErrorMessage {
   readonly type: 'error';

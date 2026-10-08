@@ -37,6 +37,7 @@ import {
 } from '../core/crdt/snapshot.js';
 import { isValidSubject } from '../shared/subject.js';
 import type { EncryptedOperationFrame } from '../shared/protocol.js';
+import { DEFAULT_LIMITS } from './limits.js';
 
 /** One saved document. */
 export interface DocumentRecord {
@@ -304,8 +305,21 @@ export type GrantResult =
 export class Database {
   readonly #pg: PGlite;
 
-  private constructor(pg: PGlite) {
+  /**
+   * Rows a document's log may hold before new elements are refused, or null for no cap.
+   *
+   * Null rather than Infinity because a test can then say "no cap" by passing `null` and mean
+   * it, while `Number.POSITIVE_INFINITY` would make every comparison a NaN-adjacent special case.
+   *
+   * Set at open time rather than read from the environment here, because this class is also
+   * constructed directly by tests with a deliberate small cap; a cap that could only arrive from
+   * `process.env` would be untestable at any size small enough to reach.
+   */
+  readonly #maxDocumentElements: number | null;
+
+  private constructor(pg: PGlite, maxDocumentElements: number | null) {
     this.#pg = pg;
+    this.#maxDocumentElements = maxDocumentElements;
   }
 
   /**
@@ -314,14 +328,25 @@ export class Database {
    * @param dataDir persistence location. Omit for a throwaway in-memory
    *   database, which is what the tests use — it is discarded on close, so tests
    *   cannot leak state into one another.
+   * @param options.maxDocumentElements element cap per document. Omitted means the shipped
+   *   default; pass `null` for no cap, which is only for tests that need to build a document
+   *   past a million rows. The real server passes the value it resolved from the environment,
+   *   so this class never reads `process.env` itself.
    */
-  static async open(dataDir?: string): Promise<Database> {
+  static async open(
+    dataDir?: string,
+    options: { readonly maxDocumentElements?: number | null } = {},
+  ): Promise<Database> {
     // Note: PGlite has no ':memory:' pseudo-path. Undefined selects its
     // internal in-memory filesystem; any string is treated as a real directory
     // and created on disk, so passing ':memory:' silently wrote a directory
     // literally named ':memory:'.
     const pg = dataDir === undefined ? new PGlite() : new PGlite(dataDir);
-    const db = new Database(pg);
+    const cap =
+      options.maxDocumentElements === undefined
+        ? DEFAULT_LIMITS.maxDocumentElements
+        : options.maxDocumentElements;
+    const db = new Database(pg, cap);
     await db.#migrate();
     return db;
   }
@@ -334,9 +359,12 @@ export class Database {
    * at the wrong thing entirely. Creating the parent up front turns a
    * confusing runtime crash into a non-event.
    */
-  static async openAt(dataDir: string): Promise<Database> {
+  static async openAt(
+    dataDir: string,
+    options: { readonly maxDocumentElements?: number | null } = {},
+  ): Promise<Database> {
     await mkdir(dirname(resolve(dataDir)), { recursive: true });
-    return Database.open(dataDir);
+    return Database.open(dataDir, options);
   }
 
   async #migrate(): Promise<void> {
@@ -880,6 +908,13 @@ export class Database {
 
     let seq = await this.#latestSeq(documentId);
 
+    // Cap check before the loop, on the WHOLE batch.
+    //
+    // Checking per row would let a batch half-apply and then throw: the client would lose
+    // some of its edits and be told the batch failed, with no way to know which half landed.
+    // One check, one outcome.
+    this.#assertRoom(documentId, seq, frames.filter((f) => f.type === 'insert').length);
+
     for (const frame of frames) {
       const result = await this.#pg.query<{ seq: string | number }>(
         `INSERT INTO document_ops (document_id, seq, site, op, element_key)
@@ -908,6 +943,47 @@ export class Database {
 
   /** Tail of the in-process write queue. See {@link Database.appendOps}. */
   #writeQueue: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Refuse growth that would push a document past its element cap.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY `seq` IS A SAFE UPPER BOUND ON STORED ROWS
+   * ---------------------------------------------------------------------------
+   * `seq` is the highest sequence number ever handed out for the document, and it never moves
+   * backwards - not when compaction prunes rows (it keeps the floor, and a snapshot preserves
+   * element ids), and not when a duplicate is deduplicated (`ON CONFLICT DO NOTHING` does not
+   * consume a number). So `seq` is the high-water mark of rows this document has ever held, and
+   * therefore an upper bound on the rows it holds now.
+   *
+   * Over-counting is safe here and under-counting would not be: compaction can only make the
+   * real row count SMALLER than `seq`, never larger, so a check against `seq` can refuse an
+   * append that would technically have fitted. It cannot admit one that would not.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY ONLY INSERTS COUNT
+   * ---------------------------------------------------------------------------
+   * A document at its cap is still editable, and the way to edit it is to delete. Refusing
+   * tombstones as well would leave a full document with no way to become smaller, which turns a
+   * quota into a dead end: the user can neither add nor remove. So `growth` counts inserts only,
+   * and deletions stay available at the cap so compaction can eventually reclaim the space.
+   *
+   * The encrypted frames carry their type in cleartext (`EncryptedOperationFrame.type`), which
+   * is what lets this rule apply identically to a document the server cannot read. The design
+   * would not support a per-element cap otherwise, which is a fair thing to note: this is a
+   * shape that had to be chosen earlier for a rule written later.
+   */
+  #assertRoom(documentId: string, seq: number, growth: number): void {
+    if (this.#maxDocumentElements === null || growth <= 0) {
+      return;
+    }
+
+    if (seq + growth <= this.#maxDocumentElements) {
+      return;
+    }
+
+    throw new DocumentTooLargeError(documentId, this.#maxDocumentElements);
+  }
 
   /**
    * Run a write exclusively, in call order.
@@ -950,6 +1026,14 @@ export class Database {
     await this.#pg.exec('BEGIN');
     try {
       let seq = await this.#latestSeq(documentId);
+
+      // See #appendEncryptedOpsLocked for why the whole batch is checked before any of it is
+      // written. Same rule, same reason.
+      this.#assertRoom(
+        documentId,
+        seq,
+        ops.reduce((count, op) => (op.type === 'insert' ? count + 1 : count), 0),
+      );
 
       for (const op of ops) {
         // ON CONFLICT DO NOTHING rather than an existence check: one round trip
@@ -1279,6 +1363,32 @@ interface DocumentRow {
   updated_at: Date;
   owner: string | null;
   encrypted: boolean;
+}
+
+/**
+ * Raised when a write would push a document past its element cap.
+ *
+ * A named error, for the same reason as {@link EncryptedDocumentError}: the relay has to answer
+ * the client with something it can act on, and "DOCUMENT_TOO_LARGE" is actionable in a way
+ * "append failed" is not. The client can still delete from the document, which is the only way
+ * out of being full, so this is a temporary refusal of GROWTH rather than a lock.
+ *
+ * `documentId` and `limit` are on the error rather than in the message so the caller can decide
+ * what to say without parsing a sentence.
+ */
+export class DocumentTooLargeError extends Error {
+  readonly documentId: string;
+  readonly limit: number;
+
+  constructor(documentId: string, limit: number) {
+    super(
+      `Document ${documentId} is at its ${limit} element limit. It can still be read and ` +
+        'edited by deleting from it.',
+    );
+    this.name = 'DocumentTooLargeError';
+    this.documentId = documentId;
+    this.limit = limit;
+  }
 }
 
 /**

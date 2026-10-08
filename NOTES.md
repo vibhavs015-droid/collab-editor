@@ -880,6 +880,48 @@ zero violations across all six scenarios. It takes `report-only` for changing th
 falls back to `enforce` on any unrecognised value: a typo in an environment variable should not
 be able to silently leave a deployment unprotected.
 
+## Quotas, and the two places a limit can be wrong
+
+One row is stored per character, and an anonymous session costs nothing, so the only limit
+anywhere was MAX_CREATE_PER_HOUR = 60. Four numbers now bound the rest. The defaults were chosen
+so that nothing legitimate trips them, and that claim - not the arithmetic - is what is tested:
+`limits.e2e.test.ts` pushes a 12,000-operation offline flush through a real relay at the shipped
+defaults and requires it to arrive whole. If that test ever fails, the number is wrong, not the test.
+
+Three things turned out to matter more than the numbers:
+
+1. **At the document cap, deletion still works.** Refusing tombstones as well as inserts would
+   leave a full document with no way to empty it, which turns a quota into a dead end. The rule
+   counts inserts only. This is only possible because `EncryptedOperationFrame.type` is
+   cleartext - a shape that had to be chosen earlier, for a rule written later.
+
+2. **Neither quota code is on the client's list of permanent refusals.** For
+   DOCUMENT_TOO_LARGE the obvious answer is wrong. The refusal genuinely cannot be retried away,
+   so "a retry cannot fix it, therefore stop" reads as correct - but the user's only route out of
+   a full document is to delete from it, and deletion needs a live connection. A client that
+   refused to reconnect would strand anyone who filled a document. Both are reported loudly and
+   reconnect with jittered backoff. I wrote the test asserting the opposite first, watched it
+   fail, and then worked out that the test was wrong rather than the code.
+
+3. **A Prometheus counter that has never been incremented renders nothing.** Not `0` - nothing.
+   No HELP, no TYPE, no sample. Two assertions I wrote (`toBe(0)` in a test, "is the counter
+   declared" in the smoke script) were both asserting facts this registry cannot produce, and
+   both failed for reasons that had nothing to do with the limits. "Could not check" and
+   "nothing happened" must never look the same, which is now the subject of two explicit tests.
+
+Three of my own test bugs, all arithmetic, none of them the product's:
+
+- the reconnect test sent 1,000 operations against a burst of 500 and expected success; a single
+  frame larger than the burst is refused on any connection, new or not
+- the encrypted test sent 4 frames against a burst of 10, so it was never near the limit
+- the flush test slept one second and then asserted a count; at one second 4,000 of 12,000 had
+  arrived, which would have made it a coin flip on machine speed. It polls now.
+
+Also: `scripts/env-example.test.ts` finds environment variables by searching source for two
+specific access shapes, so a computed `env[name]` is invisible to it and the gate correctly
+reported four documented-but-unread variables. Naming each one literally is worth the four
+repetitions.
+
 ## Log
 
 - **Phase 4** — Offline-first. 397 tests. Two ADRs. The headline claim is now

@@ -858,6 +858,137 @@ describe('SyncTransport', () => {
       vi.restoreAllMocks();
     });
 
+    it('backs off after a RATE_LIMITED refusal rather than spinning', () => {
+      // ---------------------------------------------------------------------------
+      // WHY THIS TEST EXISTS
+      // ---------------------------------------------------------------------------
+      // The server answers an over-rate connection with an `error` frame carrying code
+      // RATE_LIMITED, then closes with 1008. Both halves of that are a contract, and the client
+      // is the only party that can break it:
+      //
+      //   - If RATE_LIMITED were treated as PERMANENT, the client would give up and the user's
+      //     queued edits would sit in memory until the tab closed. The document is full of
+      //     nothing; a slower connection works.
+      //   - If the close were treated as an ordinary transient drop with a flat retry, the
+      //     client would reconnect, be refused again, and loop at the backoff rate - which for
+      //     a server that just refused it is the worst possible response.
+      //
+      // So the assertion is on both: the refusal is reported, and the reconnect still happens
+      // with GROWING delay.
+      //
+      // Jitter is pinned at 1.0 so the delay is exactly half the exponential value and the
+      // measurement is not flaky; two adjacent attempts can otherwise jitter to nearly the
+      // same delay.
+      vi.spyOn(Math, 'random').mockReturnValue(1);
+
+      const h = harness({ baseRetryMs: 100, maxRetryMs: 100_000 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      const delays: number[] = [];
+
+      for (let round = 0; round < 4; round += 1) {
+        const socket = FakeSocket.last();
+
+        // Exactly what the server sends before closing: the error frame, then the close.
+        socket.deliver({
+          type: 'error',
+          code: 'RATE_LIMITED',
+          message: 'Over 5000 operations/second. Reconnect to continue.',
+        });
+        socket.triggerClose();
+
+        let elapsed = 0;
+
+        while (FakeSocket.instances.length === round + 1) {
+          vi.advanceTimersByTime(10);
+          elapsed += 10;
+          if (elapsed > 200_000) break;
+        }
+
+        delays.push(elapsed);
+      }
+
+      // The user is told, every time, rather than left watching "Offline" with no explanation.
+      const rateLimits = h.errors.filter((e) => e.code === 'RATE_LIMITED');
+      expect(rateLimits.length).toBeGreaterThan(0);
+
+      // Not a tight loop: the first retry is not immediate, and the delay grows.
+      expect(delays[0] ?? 0).toBeGreaterThan(0);
+
+      for (let i = 1; i < delays.length; i += 1) {
+        expect(delays[i] ?? 0).toBeGreaterThan(delays[i - 1] ?? 0);
+      }
+
+      vi.restoreAllMocks();
+    });
+
+    it('does NOT give up permanently on RATE_LIMITED', () => {
+      // The complement of the test above, and the one that would catch the mistake of adding
+      // RATE_LIMITED to PERMANENT_ERROR_CODES. That list exists to stop a client hammering a
+      // server that will never answer; a rate limit is precisely the case where the server
+      // WILL answer, just not immediately.
+      const h = harness({ baseRetryMs: 100, maxRetryMs: 100_000 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      FakeSocket.last().deliver({
+        type: 'error',
+        code: 'RATE_LIMITED',
+        message: 'Reconnect to continue.',
+      });
+      FakeSocket.last().triggerClose();
+
+      expect(h.transport.state).not.toBe('closed-permanently');
+
+      vi.advanceTimersByTime(200);
+
+      // A second socket exists: the client tried again rather than reporting a dead end.
+      expect(FakeSocket.instances.length).toBeGreaterThan(1);
+    });
+
+    it('keeps a full document recoverable, rather than giving up on it', () => {
+      // The other quota code, and the one where the obvious answer is wrong.
+      //
+      // DOCUMENT_TOO_LARGE says the document cannot GROW. It does not say the connection is
+      // dead, and the server does not close the socket when it refuses a write. So the client
+      // stays connected, the user is told, and the only way forward - deleting from the
+      // document - still needs a live connection.
+      //
+      // Treating it as permanent would be a trap that looks correct: the refusal genuinely
+      // cannot be retried away, so "do not retry" seems right. But the client cannot tell
+      // "this document is full" from "this document is full AND I have disconnected", and
+      // answering the second by refusing to reconnect is how a user who filled a document ends
+      // up permanently unable to empty it.
+      //
+      // So: reported loudly, reconnected with backoff. Same treatment as RATE_LIMITED, for the
+      // same reason - in both cases the next connection is not futile, it is just not immediate.
+      const h = harness({ baseRetryMs: 100, maxRetryMs: 100_000 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      FakeSocket.last().deliver({
+        type: 'error',
+        code: 'DOCUMENT_TOO_LARGE',
+        message: 'This document is at its 1000000 character limit. Deleting from it still works.',
+      });
+
+      // The socket is NOT closed by this refusal; the client stays usable.
+      expect(FakeSocket.instances.length).toBe(1);
+      expect(h.errors.map((e) => e.code)).toContain('DOCUMENT_TOO_LARGE');
+
+      // And if the connection does drop afterwards, the client comes back - with backoff, so
+      // this is not a retry loop either.
+      vi.spyOn(Math, 'random').mockReturnValue(1);
+
+      FakeSocket.last().triggerClose();
+      vi.advanceTimersByTime(200);
+
+      expect(FakeSocket.instances.length).toBeGreaterThan(1);
+
+      vi.restoreAllMocks();
+    });
+
     it('applies jitter so clients do not return in lockstep', () => {
       // This is the thundering-herd guard. Verified by observing that repeated
       // identical failures produce differing first-retry timings.

@@ -31,6 +31,7 @@ import {
 } from '../shared/protocol.js';
 import { parseClientMessage } from '../shared/protocol.js';
 import { Logger } from './observability/logger.js';
+import { DEFAULT_LIMITS, TokenBucket, type Limits } from './limits.js';
 import { Metrics } from './observability/metrics.js';
 import { M, declareMetrics } from './observability/index.js';
 
@@ -57,6 +58,15 @@ interface Client {
   admitting: boolean;
   /** When an unauthenticated socket is dropped for never saying hello. */
   helloDeadline: number | null;
+  /**
+   * Per-connection write budget, refilled by elapsed time.
+   *
+   * Per CONNECTION, not per client identity, because a connection is the thing holding a file
+   * descriptor and a place in every room's broadcast set. A subject that reconnects gets a fresh
+   * bucket, which is the same property a reconnecting client needs to recover - see
+   * {@link Limits.opsBurst}.
+   */
+  readonly opsBudget: TokenBucket;
 }
 
 /**
@@ -216,6 +226,19 @@ export interface RelayOptions {
    */
   readonly metrics?: Metrics;
   readonly logger?: Logger;
+
+  /**
+   * Write quotas enforced per connection.
+   *
+   * Defaults to {@link DEFAULT_LIMITS}, so a relay built in a test without this option is
+   * still bounded - the failure mode being defended against is a socket writing without limit,
+   * and a test-only unbounded relay would let that regress unnoticed.
+   *
+   * Only {@link Limits.opsBurst} and {@link Limits.opsPerSecond} are read here. The title and
+   * document caps belong to the API and the store, which are the components that own those
+   * facts.
+   */
+  readonly limits?: Limits;
 }
 
 export class Relay {
@@ -239,6 +262,7 @@ export class Relay {
   readonly #metrics: Metrics;
   readonly #logger: Logger;
   readonly #replayBatchSize: number;
+  readonly #limits: Limits;
   #siteCounter = 0;
 
   constructor(options: RelayOptions = {}) {
@@ -252,6 +276,7 @@ export class Relay {
     this.#logger = options.logger ?? Logger.silent();
     declareMetrics(this.#metrics);
     this.#replayBatchSize = options.replayBatchSize ?? DEFAULT_REPLAY_BATCH;
+    this.#limits = options.limits ?? DEFAULT_LIMITS;
 
     this.#heartbeat =
       heartbeatMs > 0
@@ -334,12 +359,22 @@ export class Relay {
    *   has been broadcast, so a caller can store them without reading them. See
    *   ADR-0014. Separate from `onOps` because a handler that accepts plaintext must not
    *   silently start accepting ciphertext, or the reverse.
+   *
+   *   Both callbacks receive the sending client's `site`. That is what lets a caller report a
+   *   write refusal back to the right socket through {@link Relay.reportRefusal}: the relay
+   *   hands persistence off asynchronously, so by the time the store discovers a document is
+   *   full the frame is long gone, and a caller with no way to name the sender could only log
+   *   the refusal where the user would never see it.
    */
   attach(
     socket: WebSocket,
     documentId: string,
-    onOps?: (ops: readonly JsonValue[]) => void,
-    onEncryptedOps?: (documentId: string, frames: readonly EncryptedOperationFrame[]) => void,
+    onOps?: (ops: readonly JsonValue[], site: string) => void,
+    onEncryptedOps?: (
+      documentId: string,
+      frames: readonly EncryptedOperationFrame[],
+      site: string,
+    ) => void,
   ): void {
     const requiresAuth = this.#authorize !== undefined;
 
@@ -355,6 +390,9 @@ export class Relay {
       authenticated: !requiresAuth,
       admitting: false,
       helloDeadline: requiresAuth ? Date.now() + this.#helloTimeoutMs : null,
+      // Born full, and full for THIS connection: see TokenBucket on why an empty bucket
+      // would be the wrong starting state.
+      opsBudget: new TokenBucket(this.#limits.opsBurst, this.#limits.opsPerSecond),
     };
 
     if (client.authenticated) {
@@ -467,6 +505,53 @@ export class Relay {
    */
   #parse(raw: string): ClientMessage | null {
     return parseClientMessage(raw);
+  }
+
+  /**
+   * Tell a client, by site, that its write was refused downstream.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THIS EXISTS RATHER THAN CHECKING CAPACITY BEFORE BROADCASTING
+   * ---------------------------------------------------------------------------
+   * The obvious design is to ask the store "is there room?" before relaying a batch. It is
+   * wrong here for one reason: the relay broadcasts synchronously and persists
+   * asynchronously, and that asynchrony is load-bearing. Awaiting a database round trip before
+   * broadcasting a keystroke to everyone in the room would make one slow write delay every
+   * reader, which is the opposite of what a relay is for (see the comment at the call site in
+   * index.ts).
+   *
+   * So the frame goes out, and the refusal comes back afterwards by site. The cost is that a
+   * client may briefly see its own operations locally and then be told they were not stored -
+   * which it would see anyway on any store failure, and which is strictly better than the
+   * alternative, which is a silent failure the user never learns about.
+   *
+   * Silently ignores a site that is no longer connected. A client that disconnected before its
+   * write was refused has already gone, and a close frame to a dead socket is noise.
+   */
+  reportRefusal(site: string, code: ErrorCode, message: string): boolean {
+    for (const client of this.#clients()) {
+      if (client.site !== site) {
+        continue;
+      }
+
+      this.#send(client, { type: 'error', code, message });
+      return true;
+    }
+
+    return false;
+  }
+
+  /** Every client the relay currently knows about, in rooms and awaiting hello. */
+  #clients(): Iterable<Client> {
+    const all = new Set<Client>(this.#pending);
+
+    for (const room of this.#rooms.values()) {
+      for (const client of room) {
+        all.add(client);
+      }
+    }
+
+    return all;
   }
 
   #join(client: Client): void {
@@ -630,11 +715,63 @@ export class Relay {
     }
   }
 
+  /**
+   * Take `amount` from this connection's budget, refusing the connection if it cannot pay.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY CLOSE THE SOCKET RATHER THAN JUST REFUSE THE FRAME
+   * ---------------------------------------------------------------------------
+   * A refused frame leaves the connection alive and the client free to try again immediately,
+   * which means the cost of refusing is paid again on every frame: the server still parses,
+   * validates and measures every one. Closing makes the refusal total, and 1008 is RFC 6455's
+   * "policy violation" - the one code that tells a client this was the server's decision
+   * rather than a network problem.
+   *
+   * The client side of that contract is already written: `SyncTransport` reconnects with
+   * jittered exponential backoff (ADR-0008), and a 1008 is an ordinary close as far as it is
+   * concerned. So the client backs off rather than spinning, and a reconnecting client gets a
+   * fresh bucket - which is what makes this survivable rather than a lockout.
+   *
+   * Returns true when the caller should continue. Nothing is broadcast and nothing is handed
+   * to the log on a refusal, so the operations in the offending frame are dropped, not half
+   * applied.
+   */
+  #chargeOps(client: Client, amount: number): boolean {
+    if (client.opsBudget.take(amount)) {
+      return true;
+    }
+
+    this.#metrics.increment(M.opsRateLimited);
+    this.#logger.warn('connection refused: operation rate exceeded', {
+      site: client.site,
+      documentId: client.documentId,
+      operations: amount,
+      burst: this.#limits.opsBurst,
+      perSecond: this.#limits.opsPerSecond,
+    });
+
+    // Sent before the close so the client learns WHY. The close frame that follows carries its
+    // own code, and a client that reads only one of the two still gets a usable answer.
+    this.#send(client, {
+      type: 'error',
+      code: 'RATE_LIMITED',
+      message: `Over ${this.#limits.opsPerSecond} operations/second. Reconnect to continue.`,
+    });
+
+    this.#close(client, 1008, 'Rate limit exceeded');
+
+    return false;
+  }
+
   #handle(
     client: Client,
     message: ClientMessage,
-    onOps?: (ops: readonly JsonValue[]) => void,
-    onEncryptedOps?: (documentId: string, frames: readonly EncryptedOperationFrame[]) => void,
+    onOps?: (ops: readonly JsonValue[], site: string) => void,
+    onEncryptedOps?: (
+      documentId: string,
+      frames: readonly EncryptedOperationFrame[],
+      site: string,
+    ) => void,
   ): void {
     // Nothing but `hello` is accepted from a client that has not been authorised.
     //
@@ -672,6 +809,10 @@ export class Relay {
         // The relay does not interpret operations. It forwards them verbatim.
         // Interpreting them here would duplicate the CRDT and create a second
         // source of truth.
+        if (!this.#chargeOps(client, message.ops.length)) {
+          return;
+        }
+
         this.#metrics.increment(M.opsReceived, { type: 'batch' }, message.ops.length);
 
         this.#broadcast(client.documentId, client.site, {
@@ -684,7 +825,7 @@ export class Relay {
         // belongs to the CRDT rather than here. Narrowing the type is therefore a
         // cast, justified by that boundary: the relay genuinely has no opinion
         // about what an operation contains.
-        onOps?.(message.ops);
+        onOps?.(message.ops, client.site);
         return;
       }
 
@@ -699,6 +840,16 @@ export class Relay {
         // Separate metrics label, because "accepted" here means stored rather than
         // applied. Counting them in the same series as plaintext operations would let a
         // green `ops_received` stand in for a count of things nobody verified.
+        //
+        // The rate limit is charged BEFORE the encryption branch and per FRAME, not per
+        // operation: an encrypted frame carries one element, so one frame is one unit of
+        // work, and the client already chunks plaintext at MAX_OPS_PER_FRAME. Charging
+        // encrypted traffic by frame means the two modes cost the same to abuse, which a
+        // per-byte or per-byte-of-ciphertext rule would not.
+        if (!this.#chargeOps(client, message.frames.length)) {
+          return;
+        }
+
         this.#metrics.increment(M.opsReceived, { type: 'batch-encrypted' }, message.frames.length);
 
         this.#broadcast(client.documentId, client.site, {
@@ -707,7 +858,7 @@ export class Relay {
           frames: message.frames,
         });
 
-        onEncryptedOps?.(message.documentId, message.frames);
+        onEncryptedOps?.(message.documentId, message.frames, client.site);
         return;
       }
 

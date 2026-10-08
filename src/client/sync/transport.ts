@@ -843,6 +843,21 @@ export class SyncTransport {
  *
  * Everything else - a dropped socket, a timeout, a 500, a rate limit - is transient by
  * definition and keeps the jittered exponential backoff of ADR-0008.
+ *
+ * ---------------------------------------------------------------------------
+ * THE TWO QUOTA CODES ARE BOTH DELIBERATELY ABSENT, AND THE SECOND ONE IS THE INTERESTING CASE
+ * ---------------------------------------------------------------------------
+ * RATE_LIMITED is obvious: the server closed the connection for going too fast, and a faster
+ * reconnect is the wrong response to that.
+ *
+ * DOCUMENT_TOO_LARGE is the one worth writing down. The refusal genuinely cannot be retried
+ * away - the document is full and stays full - so "a retry cannot fix it, therefore treat it as
+ * permanent" reads as obvious and is wrong. The client's only route out of a full document is to
+ * DELETE from it, and deletion needs a live connection. A client that refused to reconnect would
+ * strand a user who filled a document: the tab could never empty it again.
+ *
+ * So neither code goes in this list. Both are reported to the user through onError, and both
+ * reconnect with backoff. The backoff is what keeps that from being a loop.
  */
 const PERMANENT_ERROR_CODES: Readonly<Record<string, string>> = {
   DOCUMENT_NOT_FOUND:

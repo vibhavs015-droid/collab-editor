@@ -18,6 +18,8 @@ import { Metrics } from './observability/metrics.js';
 import { declareMetrics, M } from './observability/index.js';
 import { openStatic, type StaticOptions } from './static.js';
 import { resolveCspMode } from './securityHeaders.js';
+import { resolveLimits } from './limits.js';
+import { reportWriteFailure } from './writeFailure.js';
 
 /**
  * Open the built client, treating "not built yet" as normal.
@@ -129,6 +131,11 @@ async function main(): Promise<void> {
   // running that looks fine and serves everyone's documents to anyone who asks.
   const { authenticator, summary } = resolveAuthenticator(process.env);
 
+  // Resolved once, here, and handed to each component that enforces one of them. Resolved in
+  // three places instead would be three chances to read a different variable name, and a limit
+  // that one component applies and another ignores is worse than no limit: it looks enforced.
+  const limits = resolveLimits(process.env);
+
   // One registry for the whole process, shared by the API, the relay and the store. A
   // /metrics scrape therefore sees all three. Creating one per component would give
   // three registries, three of which a scraper could reach only by being told about
@@ -142,7 +149,7 @@ async function main(): Promise<void> {
     nodeEnv: process.env['NODE_ENV'] ?? 'development',
   });
 
-  const db = await Database.openAt(DATA_DIR);
+  const db = await Database.openAt(DATA_DIR, { maxDocumentElements: limits.maxDocumentElements });
   logger.info('database ready', { dataDir: DATA_DIR });
 
   /**
@@ -199,6 +206,7 @@ async function main(): Promise<void> {
     // logs, browser history and Referer headers, and a bearer token in any of those
     // is a credential that has already leaked.
     authorize,
+    limits,
     metrics,
     logger: logger.child('relay'),
 
@@ -227,7 +235,7 @@ async function main(): Promise<void> {
     relay.attach(
       socket,
       documentId,
-      (ops) => {
+      (ops, site) => {
         // Fire and forget on purpose. Awaiting here would make one slow database
         // write delay the broadcast of a keystroke to everyone else in the room,
         // which is the opposite of what a relay is for. The write is queued and
@@ -241,21 +249,20 @@ async function main(): Promise<void> {
             store.maybeCompact(documentId);
           })
           .catch((error: unknown) => {
-            logger.error('could not persist', { document: documentId, error });
+            reportWriteFailure(error, documentId, site, relay, metrics, logger);
           });
       },
       // Encrypted frames. Separate callback rather than a branch inside the one above,
       // because the two paths differ in a way that matters: this one stores frames it
       // cannot read, applies no replica, and produces no text. Folding it into the
       // plaintext callback would put that difference somewhere invisible.
-      (frameDocumentId, frames) => {
+      (frameDocumentId, frames, site) => {
         void store.applyEncrypted(frameDocumentId, frames).catch((error: unknown) => {
           // Named explicitly, because "could not persist" on an encrypted document almost
           // always means the mode guard fired, and the log line should say so.
-          logger.error('could not persist encrypted frames', {
-            document: frameDocumentId,
-            frames: frames.length,
-            error,
+          reportWriteFailure(error, frameDocumentId, site, relay, metrics, logger, {
+            label: 'could not persist encrypted frames',
+            extra: { frames: frames.length },
           });
         });
       },
@@ -270,6 +277,7 @@ async function main(): Promise<void> {
   const server = new ApiServer({
     db,
     auth: authenticator,
+    limits,
     observability: { metrics, logger: logger.child('api') },
     // Spread rather than `static: staticFiles`, because `exactOptionalPropertyTypes` is
     // on and a property present with value `undefined` is not the same as an absent one.

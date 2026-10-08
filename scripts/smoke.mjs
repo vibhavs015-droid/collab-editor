@@ -330,6 +330,20 @@ async function httpChecks() {
   const metrics = await fetch(`${base()}/api/metrics`);
 
   check('GET /api/metrics is 200', metrics.status === 200, `got ${metrics.status}`);
+
+  // NOTE: no check here for collab_ops_rate_limited_total or
+  // collab_documents_too_large_total. An earlier version of this file asserted their `# TYPE`
+  // lines were present, and it failed - correctly.
+  //
+  // In this registry a metric renders its HELP and TYPE lines only once it has at least one
+  // SAMPLE, and a counter nothing has incremented has no sample. The whole exposition is 281
+  // characters on a quiet server. So "the counter is declared" is not an observable fact here,
+  // and the only way to make it observable is to trip a limit, which needs 100,000 operations
+  // - a smoke test that spends most of its runtime generating load to prove a string is present.
+  //
+  // Both counters are covered where they can actually be watched: writeFailure.test.ts asserts
+  // the increment renders, and limits.e2e.test.ts asserts the rate-limit series appears on a
+  // real socket.
   check(
     'metrics are Prometheus text',
     (metrics.headers.get('content-type') ?? '').includes('text/plain'),

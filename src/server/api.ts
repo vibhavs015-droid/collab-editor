@@ -16,6 +16,7 @@ import type { Duplex } from 'node:stream';
 import type { Database } from './db.js';
 import type { DocumentRecord } from './db.js';
 import { AuthError, OpenAuthenticator, type Authenticator } from './auth.js';
+import { DEFAULT_LIMITS, titleTooLong, type Limits } from './limits.js';
 import { SUBJECT_RULE_MESSAGE, isValidSubject, newSubject } from '../shared/subject.js';
 import { Logger } from './observability/logger.js';
 import { Metrics } from './observability/metrics.js';
@@ -52,6 +53,14 @@ export interface ApiServerOptions {
   readonly db: Database;
   readonly host?: string;
   readonly port?: number;
+  /**
+   * Write quotas enforced by this server.
+   *
+   * Defaults to {@link DEFAULT_LIMITS} so every existing caller - which is every test - gets a
+   * bounded server without having to know the option exists. The real server passes
+   * {@link resolveLimits} of the process environment.
+   */
+  readonly limits?: Limits;
   /** Escape hatch for tests: called when the server is listening. */
   readonly onListen?: (address: { host: string; port: number }) => void;
   /**
@@ -110,7 +119,15 @@ const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
  */
 const MAX_BODY_BYTES = 1_000_000;
 
-/** Documents a single client may create before being rejected. */
+/**
+ * Documents a single caller may create before being rejected.
+ *
+ * Deliberately NOT in {@link Limits}: this one is keyed to the CALLER rather than to the
+ * server, and it is a sliding window over a list of timestamps rather than a token bucket. 60
+ * events per hour is a counting problem, and a bucket smooths away the very thing being
+ * counted. The per-connection and per-document limits are different shapes of problem and are
+ * configured together in limits.ts.
+ */
 const MAX_CREATE_PER_HOUR = 60;
 
 /**
@@ -139,6 +156,7 @@ export class ApiServer {
   readonly #server: Server;
   /** Built client to serve, when one was provided. Undefined disables static serving. */
   readonly #static: StaticOptions | undefined;
+  readonly #limits: Limits;
   /** Registered upgrade routes, checked before any request is handled. */
   readonly #upgrades: UpgradeHandler[] = [];
   #createTimestamps: number[] = [];
@@ -149,6 +167,7 @@ export class ApiServer {
     this.#port = options.port ?? 3001;
     this.#onListen = options.onListen;
     this.#auth = options.auth ?? new OpenAuthenticator();
+    this.#limits = options.limits ?? DEFAULT_LIMITS;
     this.#static = options.static;
     this.#obs = observability(options.observability);
     declareMetrics(this.#obs.metrics);
@@ -719,6 +738,16 @@ export class ApiServer {
       return;
     }
 
+    if (title !== undefined && titleTooLong(title, this.#limits.maxTitleLength)) {
+      sendError(
+        res,
+        400,
+        'TITLE_TOO_LONG',
+        `Title exceeds ${this.#limits.maxTitleLength} characters.`,
+      );
+      return;
+    }
+
     const existing = await this.#db.getDocument(id);
     if (existing) {
       // 409 rather than an overwrite: silently replacing a document would
@@ -788,6 +817,19 @@ export class ApiServer {
     }
 
     if (typeof payload['title'] === 'string') {
+      // Same limit as create, and for the same reason: a title is one column on one row, but it
+      // is also what a user sees in a document list, and the create route being bounded is no
+      // help if the rename route is not.
+      if (titleTooLong(payload['title'], this.#limits.maxTitleLength)) {
+        sendError(
+          res,
+          400,
+          'TITLE_TOO_LONG',
+          `Title exceeds ${this.#limits.maxTitleLength} characters.`,
+        );
+        return;
+      }
+
       const result = await this.#db.renameDocument(id, payload['title']);
 
       if (!result) {
