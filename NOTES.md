@@ -922,6 +922,63 @@ specific access shapes, so a computed `env[name]` is invisible to it and the gat
 reported four documented-but-unread variables. Naming each one literally is worth the four
 repetitions.
 
+## "Synced" was a claim about the local socket
+
+`SyncTransport` emptied its outbox the moment `ws.send()` returned, and nothing in the protocol
+ever confirmed a write. `send()` returning says the operating system accepted the bytes. It says
+nothing about the server having read them, and less about the server having stored them.
+
+So a frame written to a socket that then died was gone from memory and had arrived nowhere.
+Measured, not hypothesised, with a real relay and a real database and the shipped client, killing
+the socket between "frame received" and "frame committed":
+
+```
+AssertionError: the resend never reached the server, so the edits were lost: expected '' to be 'xx'
+```
+
+An empty document, and an indicator reading `Synced` - because `Synced` was derived from the outbox
+being empty, and the outbox had just been emptied. That is the whole bug in one line: a UI state
+defined in terms of an event that had already happened locally.
+
+**The fix.** A client that wants confirmation puts a `batchId` on its frame. The server sends
+`{type:'ack', batchId}` after the store settles, and sends nothing if the store failed. The client
+keeps an in-flight list beside the outbox: an operation leaves the outbox when it is WRITTEN and
+leaves the in-flight list when it is ACKNOWLEDGED. On reconnect, in-flight frames go back to the
+front of the outbox in order and are replayed. `Synced` now means both lists are empty.
+
+Three things in there are not obvious:
+
+1. **The ack follows the store, not the socket.** An ack sent when the frame is read would fix
+   nothing at all - the failure being fixed is precisely a frame the relay had in hand and lost -
+   and it would make every other test pass while leaving the data loss intact. `relayAck.test.ts`
+   asserts on ordering, not on presence, for exactly this reason.
+
+2. **`batchId` is optional, and that is why no version bump.** An old client sends no id, so the
+   server acknowledges nothing and it never receives an `ack`. Had the server acknowledged
+   unconditionally, every deployed client would have hit its "unrecognised frame" handler and
+   shown an error on every keystroke. Bumping `PROTOCOL_VERSION` instead would have failed every
+   deployed client's `hello` outright - trading silent data loss for a total outage.
+
+3. **Encrypted frames are replayed verbatim, never re-encrypted.** The nonce is already committed
+   to; encrypting again would produce a different ciphertext for the same elements and the server
+   would store both. So the in-flight list holds whole frames, not operations.
+
+What this costs, recorded because it is real: a lost _ack_ causes a redundant write, because the
+client cannot tell "stored" from "stored but unacknowledged" and has to assume the worst. That is
+only safe because persistence is idempotent, which `writeDurability.test.ts` measures rather than
+assumes - it produces the stored-but-unacknowledged case on purpose and checks the document still
+holds two characters and not four.
+
+Still not fixed, and it is the next thing that matters: the protocol has **no application-level
+ping**. Everything above depends on the socket's `close` event arriving. A half-open connection
+that silently drops packets is not noticed by either side, and no amount of resend helps a client
+that does not know it is stuck.
+
+Also of note, from building the tests: the first version of the integration test asserted the
+_buggy_ behaviour, on the reasoning that documenting the current state has some value. It would
+have broken the moment the bug was fixed, at which point it would have been arguing with the fix
+instead of guarding it. The proof is the failing output, not a test that enshrines it.
+
 ## Log
 
 - **Phase 4** — Offline-first. 397 tests. Two ADRs. The headline claim is now

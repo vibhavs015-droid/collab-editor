@@ -86,10 +86,24 @@ export interface HelloMessage {
   readonly lastAppliedSeq: number;
 }
 
+/**
+ * Client-chosen identity for one outbound frame, used to acknowledge it.
+ *
+ * OPTIONAL, and that is the load-bearing word. A client that omits it gets exactly the
+ * behaviour that shipped before acknowledgements existed, and never receives an `ack` - which is
+ * what makes the whole feature additive rather than a version break. See ADR-0015.
+ *
+ * A string rather than a number because the value is chosen by the client and must be
+ * recognisable after a reconnect, and because the relay treats it as opaque.
+ */
+export type BatchId = string;
+
 export interface SubmitOpsMessage {
   readonly type: 'ops';
   readonly documentId: string;
   readonly ops: readonly Operation[];
+  /** Omit to opt out of acknowledgement. See {@link BatchId}. */
+  readonly batchId?: BatchId;
 }
 
 /**
@@ -140,6 +154,32 @@ export interface SubmitEncryptedOpsMessage {
   readonly type: 'ops-enc';
   readonly documentId: string;
   readonly frames: readonly EncryptedOperationFrame[];
+  /** Omit to opt out of acknowledgement. See {@link BatchId}. */
+  readonly batchId?: BatchId;
+}
+
+/**
+ * The server has processed one outbound frame: it is durably stored, not merely received.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY "PROCESSED" AND NOT "RECEIVED"
+ * ---------------------------------------------------------------------------
+ * An acknowledgement that fires when the frame is read rather than when it is stored would fix
+ * nothing. The failure T4 measures is precisely a frame the relay had in hand and then lost -
+ * the process died between reading the socket and committing - and an ack sent on receipt would
+ * tell the client its edit was safe at exactly that moment.
+ *
+ * So the relay sends this after the store has settled, and sends nothing at all if the store
+ * failed. The client resends, which is safe because persistence is idempotent.
+ *
+ * Sent only in response to a frame that carried a {@link BatchId}, so a client from before this
+ * message existed never sees a frame it does not understand. A client that does not recognise
+ * `ack` calls its "unrecognised frame" handler, which would otherwise surface to the user as an
+ * error on every keystroke.
+ */
+export interface AckMessage {
+  readonly type: 'ack';
+  readonly batchId: BatchId;
 }
 
 export interface PresenceMessage {
@@ -293,6 +333,7 @@ export type ServerMessage =
   | SnapshotMessage
   | PresenceMessageServer
   | SyncStateMessage
+  | AckMessage
   | ErrorMessage;
 
 // ── Runtime validation ───────────────────────────────────────────────────
@@ -487,18 +528,33 @@ export function parseClientMessage(raw: string): ClientMessage | null {
 
     case 'ops': {
       const ops = parsed['ops'];
+      const batchId = parsed['batchId'];
 
       if (typeof documentId !== 'string' || !Array.isArray(ops)) {
         return null;
       }
 
-      return { type, documentId, ops: ops as Operation[] };
+      // Optional, but if it is present it must be a string. A number, or an object, would be
+      // echoed back verbatim in the `ack`, so the type has to be checked rather than trusted -
+      // and the length is bounded because the relay stores nothing but does echo it.
+      if (batchId !== undefined && (typeof batchId !== 'string' || batchId.length > 128)) {
+        return null;
+      }
+
+      return batchId === undefined
+        ? { type, documentId, ops: ops as Operation[] }
+        : { type, documentId, ops: ops as Operation[], batchId };
     }
 
     case 'ops-enc': {
       const frames = parsed['frames'];
+      const batchId = parsed['batchId'];
 
       if (typeof documentId !== 'string' || !Array.isArray(frames)) {
+        return null;
+      }
+
+      if (batchId !== undefined && (typeof batchId !== 'string' || batchId.length > 128)) {
         return null;
       }
 
@@ -518,7 +574,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
         validated.push(frame);
       }
 
-      return { type, documentId, frames: validated };
+      return batchId === undefined
+        ? { type, documentId, frames: validated }
+        : { type, documentId, frames: validated, batchId };
     }
 
     case 'presence': {

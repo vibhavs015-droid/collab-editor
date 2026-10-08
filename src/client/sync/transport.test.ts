@@ -614,6 +614,22 @@ describe('SyncTransport', () => {
       ]);
       expect(frames.flat()).toEqual(chain(2_500).map((op) => op.id.clock));
       expect(h.transport.queuedOperationCount).toBe(0);
+
+      // CHANGED BY T4, and the change is the point.
+      //
+      // This used to assert `synced` here, on the strength of the frames having been
+      // written. That was the bug: `send()` returning says the local socket accepted bytes,
+      // and nothing more. The indicator now reports `pending` until the server acknowledges
+      // each frame, and the loop below delivers those acknowledgements - so the test covers
+      // both halves of the new contract rather than quietly one of them.
+      expect(h.pending.at(-1)).toEqual({ state: 'pending', count: 2_500 });
+
+      for (const frame of FakeSocket.last().parsedSent()) {
+        if (frame['type'] === 'ops' && typeof frame['batchId'] === 'string') {
+          FakeSocket.last().deliver({ type: 'ack', batchId: frame['batchId'] });
+        }
+      }
+
       expect(h.pending.at(-1)).toEqual({ state: 'synced', count: 0 });
     });
 
@@ -1107,6 +1123,152 @@ describe('SyncTransport', () => {
           .parsedSent()
           .some((m) => m['type'] === 'resync'),
       ).toBe(true);
+    });
+  });
+
+  /**
+   * T4 STEP 1: do writes survive a socket that dies after `send()`?
+   *
+   * ---------------------------------------------------------------------------
+   * THE SCENARIO, AND WHY IT IS THE INTERESTING ONE
+   * ---------------------------------------------------------------------------
+   * The window this tests is: the frame was written to a socket the OS still considered open,
+   * and then the connection died before the server processed it. Nothing here is exotic. It is
+   * a deploy, a laptop lid, a NAT timeout, a proxy that dropped the connection - every one of
+   * them closes a socket that already accepted bytes.
+   *
+   * Two properties make it survivable, and both are already in place for other reasons:
+   * server persistence is idempotent (`ON CONFLICT DO NOTHING` on the element key), so a
+   * duplicate frame is a no-op rather than a corruption; and the transport already refuses a
+   * `snapshot` baseline while the outbox is non-empty, so a reconnect cannot paper over a lost
+   * edit by replacing the document.
+   *
+   * So the only question is whether the operations are still QUEUED when the socket dies. If
+   * they are not, nothing resends them, the server never had them, and the peer converges on a
+   * document missing this user's edits - with the sender's indicator reading "Synced".
+   */
+  describe('a socket that dies after the write (T4)', () => {
+    /** Admit the current socket, as the relay's `welcome` does. */
+    async function admit(socket: FakeSocket): Promise<void> {
+      socket.deliver({
+        type: 'welcome',
+        protocolVersion: 1,
+        site: 'server-site',
+        documentId: 'doc-1',
+        snapshot: [],
+        seq: 0,
+      });
+      await Promise.resolve();
+    }
+
+    /** Every `ops` frame sent on a socket, flattened. */
+    function opsSentOn(socket: FakeSocket): unknown[] {
+      return socket
+        .parsedSent()
+        .filter((f) => f['type'] === 'ops')
+        .flatMap((f) => (f['ops'] as unknown[] | undefined) ?? []);
+    }
+
+    it('RESENDS operations that were written but never acknowledged', async () => {
+      // The test that decides whether T4's hypothesis is true or false.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      const first = FakeSocket.last();
+
+      h.transport.send(sampleOps);
+
+      // Written, and immediately forgotten: the outbox is emptied on the strength of
+      // `send()` returning, with nothing from the server saying it arrived.
+      expect(opsSentOn(first)).toHaveLength(1);
+      expect(h.transport.queuedOperationCount).toBe(0);
+
+      // The connection dies before the server could have processed it. No server frame at all.
+      first.triggerClose();
+
+      // Reconnect, and complete the handshake again.
+      vi.advanceTimersByTime(500);
+
+      expect(FakeSocket.instances.length).toBeGreaterThan(1);
+
+      const second = FakeSocket.last();
+
+      second.triggerOpen();
+      await Promise.resolve();
+      await admit(second);
+
+      // The operations must be written again on the new connection.
+      expect(
+        opsSentOn(second),
+        'operations written to a dead socket were never resent, and the server never had them',
+      ).toHaveLength(1);
+    });
+
+    it('reports pending rather than synced while those operations are unacknowledged', async () => {
+      // The indicator is the only thing telling the user their edit is safe. A state machine
+      // that reads "synced" the instant `send()` returns is asserting something it does not
+      // know.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      h.transport.send(sampleOps);
+
+      // The outbox is empty, because the frame was written - but nothing has confirmed it.
+      expect(h.transport.queuedOperationCount).toBe(0);
+      expect(h.pending.at(-1)).toEqual({ state: 'pending', count: 1 });
+
+      // And it only reaches "synced" when the server says so.
+      const batchId = FakeSocket.last()
+        .parsedSent()
+        .find((f) => f['type'] === 'ops')?.['batchId'];
+
+      expect(typeof batchId).toBe('string');
+
+      FakeSocket.last().deliver({ type: 'ack', batchId: String(batchId) });
+
+      expect(h.pending.at(-1)).toEqual({ state: 'synced', count: 0 });
+    });
+
+    it('resends BOTH an unacknowledged batch and one that was never written', async () => {
+      // Two batches, then a death.
+      //
+      // The first was written to a socket that then died, so only an acknowledgement could say
+      // whether it landed. The second was never written at all. Both are unsent as far as the
+      // user is concerned, and both have to come back - which is why the expected count is two
+      // and not one.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      const first = FakeSocket.last();
+
+      h.transport.send(sampleOps);
+
+      // Force the socket to refuse the next write, which is what leaves the second batch
+      // queued rather than written.
+      first.readyState = 3;
+      h.transport.send(sampleOps);
+      expect(h.transport.queuedOperationCount).toBe(1);
+
+      first.triggerClose();
+      vi.advanceTimersByTime(500);
+
+      const second = FakeSocket.last();
+
+      second.triggerOpen();
+      await Promise.resolve();
+      await admit(second);
+
+      expect(h.transport.queuedOperationCount).toBe(0);
+      expect(opsSentOn(second)).toHaveLength(2);
     });
   });
 

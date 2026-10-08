@@ -109,6 +109,18 @@ export interface TransportOptions {
   readonly initialSeq?: number;
 }
 
+/**
+ * One outbound frame that has been written but not acknowledged.
+ *
+ * The message is held whole, rather than just the operations, so that a resend is byte-identical
+ * to the original. That matters for the encrypted path: re-encrypting would produce a new
+ * nonce for the same element, and the server would store two elements for one keystroke.
+ */
+interface InflightFrame {
+  readonly batchId: string;
+  readonly message: ClientMessage;
+}
+
 export class SyncTransport {
   readonly #url: string;
   readonly #documentId: string;
@@ -146,6 +158,36 @@ export class SyncTransport {
 
   /** Deliberately not cleared on disconnect: these are local edits awaiting relay. */
   #outbox: Operation[] = [];
+  /**
+   * Frames written to a socket the server has not yet acknowledged.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THIS IS SEPARATE FROM THE OUTBOX
+   * ---------------------------------------------------------------------------
+   * Before this existed, the outbox was emptied the moment `send()` returned, which is a claim
+   * about the local socket and not about the server. A frame written to a socket that then died
+   * was gone from memory and never arrived anywhere: measured in
+   * src/server/writeDurability.test.ts, where a real relay and a real database ended up with an
+   * empty document while the indicator read "Synced".
+   *
+   * So an operation leaves the outbox when it is WRITTEN and leaves this list when it is
+   * ACKNOWLEDGED. On reconnect the two are prepended back together, in order, and resent -
+   * duplicates are harmless because server persistence is idempotent, and losing an edit is not.
+   *
+   * The whole frame is kept, not just the operations, because the encrypted path has to resend
+   * the ciphertext it actually sent. Re-encrypting would mint a fresh nonce for an operation
+   * that is already in flight, and the two would be stored as two different elements.
+   */
+  #inflight: readonly InflightFrame[] = [];
+  /**
+   * Monotonic source of batch ids.
+   *
+   * A counter rather than a random token because the id only has to be unique within this
+   * transport, and the transport is the only thing that ever sends it. It must NOT restart on
+   * reconnect, because inflight frames are resent carrying their ORIGINAL ids: a counter that
+   * reset would reissue an id that the server may already have acknowledged on the old socket.
+   */
+  #nextBatchId = 1;
   /**
    * Highest server sequence this client holds.
    *
@@ -289,6 +331,11 @@ export class SyncTransport {
       // authorised yet.
       this.#admitted = false;
       this.#helloSent = false;
+
+      // Anything the server never acknowledged goes back into the send path, because the
+      // socket it was written to is gone. Without this, operations that reached a socket which
+      // then died are lost silently - measured in src/server/writeDurability.test.ts.
+      this.#requeueInflight();
 
       if (this.#disposed || this.#closedByUser) {
         this.#setState('closed');
@@ -493,20 +540,27 @@ export class SyncTransport {
             return;
           }
 
-          // Write first, remove second. The batch used to be removed before the write, so
+          // Write first, promote second. The batch used to be removed before the write, so
           // a socket that dropped while encryption was running took the batch with it:
           // the comment said "left queued" and the code had already dequeued it.
-          if (!this.#send({ type: 'ops-enc', documentId: this.#documentId, frames })) {
+          const batchId = `b${String(this.#nextBatchId)}`;
+          this.#nextBatchId += 1;
+
+          const message: ClientMessage = {
+            type: 'ops-enc',
+            documentId: this.#documentId,
+            frames,
+            batchId,
+          };
+
+          if (!this.#send(message)) {
             writeFailed = true;
 
             // Left queued. The reconnect path flushes it.
             return;
           }
 
-          // Remove exactly what this batch covered. Re-reading the length rather than
-          // trusting the captured array is what keeps an edit queued mid-encryption from
-          // being sent twice or dropped.
-          this.#outbox.splice(0, batch.length);
+          this.#promote(batchId, message, batch.length);
         })
         .catch((error: unknown) => {
           // Left in the outbox, still plaintext, and retried on the next flush. The user
@@ -528,10 +582,7 @@ export class SyncTransport {
             this.#flushOutbox();
           }
 
-          this.#handlers.onSyncState(
-            this.#outbox.length > 0 ? 'pending' : 'synced',
-            this.#outbox.length,
-          );
+          this.#reportPending();
         });
 
       return;
@@ -542,17 +593,145 @@ export class SyncTransport {
     // `queuedOperations` is not emptied underneath it.
     while (this.#outbox.length > 0) {
       const chunk = this.#outbox.slice(0, MAX_OPS_PER_FRAME);
+      const batchId = `b${String(this.#nextBatchId)}`;
 
-      if (!this.#send({ type: 'ops', documentId: this.#documentId, ops: chunk })) {
+      this.#nextBatchId += 1;
+
+      const message: ClientMessage = {
+        type: 'ops',
+        documentId: this.#documentId,
+        ops: chunk,
+        batchId,
+      };
+
+      if (!this.#send(message)) {
         // Kept queued. The reconnect path flushes it, and the indicator keeps
         // reporting them as pending.
         return;
       }
 
-      this.#outbox = this.#outbox.slice(chunk.length);
+      this.#promote(batchId, message, chunk.length);
     }
 
-    this.#handlers.onSyncState('synced', 0);
+    this.#reportPending();
+  }
+
+  /**
+   * Move a written batch from the outbox to the in-flight list.
+   *
+   * @param count how many operations left the outbox. Re-read from the captured length rather
+   *   than trusting the array, so an edit queued mid-encryption is neither sent twice nor lost.
+   */
+  #promote(batchId: string, message: ClientMessage, count: number): void {
+    this.#outbox.splice(0, count);
+    this.#inflight = [...this.#inflight, { batchId, message }];
+  }
+
+  /**
+   * Operations the server has not confirmed, in flight and still queued.
+   *
+   * Both lists, because both are unsent as far as the user is concerned: an operation sitting in
+   * memory because the server has not acknowledged it is exactly as unsafe as one that was never
+   * written.
+   */
+  #unacknowledged(): number {
+    let inFlight = 0;
+
+    for (const frame of this.#inflight) {
+      const ops =
+        frame.message.type === 'ops'
+          ? frame.message.ops
+          : frame.message.type === 'ops-enc'
+            ? frame.message.frames
+            : [];
+
+      inFlight += ops.length;
+    }
+
+    return this.#outbox.length + inFlight;
+  }
+
+  /**
+   * Tell the UI what is actually outstanding.
+   *
+   * "Synced" means BOTH lists are empty. Reporting synced on the strength of `send()` returning
+   * was the reason this bug was silent: the application asserted something it could not know,
+   * at the exact moment the user's work was least safe.
+   */
+  #reportPending(): void {
+    const outstanding = this.#unacknowledged();
+
+    this.#handlers.onSyncState(outstanding > 0 ? 'pending' : 'synced', outstanding);
+  }
+
+  /**
+   * A batch the server has confirmed.
+   *
+   * An id this client does not recognise is ignored rather than treated as an error: the server
+   * is a different version, or a frame was duplicated in transit, and neither is something the
+   * user can act on.
+   */
+  #acknowledge(batchId: string): void {
+    const before = this.#inflight.length;
+
+    this.#inflight = this.#inflight.filter((frame) => frame.batchId !== batchId);
+
+    if (this.#inflight.length === before) {
+      return;
+    }
+
+    this.#reportPending();
+  }
+
+  /**
+   * Put unacknowledged batches back at the FRONT of the outbox.
+   *
+   * Front, and in order, because these were written before everything still queued. Replaying
+   * them after later edits would give the server operations whose causal anchors have not
+   * arrived yet - which it tolerates, and which the CRDT then has to repair.
+   */
+  #requeueInflight(): void {
+    if (this.#inflight.length === 0) {
+      return;
+    }
+
+    const recovered: Operation[] = [];
+
+    for (const frame of this.#inflight) {
+      if (frame.message.type === 'ops') {
+        recovered.push(...(frame.message.ops as Operation[]));
+      } else if (frame.message.type === 'ops-enc') {
+        // An encrypted batch cannot go back through the plaintext outbox: the outbox is
+        // deliberately plaintext (see #flushOutbox), and putting ciphertext in it would make
+        // the next flush re-encrypt already-encrypted frames. They are resent verbatim as
+        // their own frame instead.
+        this.#resendEncrypted(frame);
+        continue;
+      }
+    }
+
+    this.#inflight = [];
+    this.#outbox = [...recovered, ...this.#outbox];
+  }
+
+  /**
+   * Resend an encrypted frame exactly as it was written.
+   *
+   * Verbatim rather than re-encrypted, because the ciphertext already exists and its nonce is
+   * already committed to. Encrypting again would produce a different frame for the same
+   * elements, and the server would store both.
+   *
+   * Failure here is not an error: it means the socket died again, and the frame is still in the
+   * in-flight list because the promotion only happens on a successful write.
+   */
+  #resendEncrypted(frame: InflightFrame): void {
+    if (this.#state !== 'open' || !this.#admitted) {
+      return;
+    }
+
+    if (this.#send(frame.message)) {
+      this.#inflight = [...this.#inflight, frame];
+    }
   }
 
   #receive(raw: string): void {
@@ -578,6 +757,20 @@ export class SyncTransport {
         this.#handlers.onWelcome(parsed.site);
         this.#flushOutbox();
         return;
+      case 'ack': {
+        // The server has stored a batch. Only now does the client stop owing it.
+        //
+        // Validated here rather than trusted because `parsed` is `JSON.parse` output and the
+        // protocol type is erased at runtime - exactly the boundary protocol.ts exists to
+        // police, and the one direction it does not police.
+        if (typeof parsed.batchId !== 'string') {
+          this.#handlers.onError('BAD_RESPONSE', 'Server sent a malformed acknowledgement.');
+          return;
+        }
+
+        this.#acknowledge(parsed.batchId);
+        return;
+      }
       case 'ops':
         // Operations arrive as opaque JSON. parseOperations is the real narrowing
         // step; a cast here would be a lie the compiler is right to reject.

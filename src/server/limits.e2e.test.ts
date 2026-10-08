@@ -290,8 +290,16 @@ describe('per-connection operation rate', () => {
       clock += FRAME_OPS;
     }
 
-    await h.settle(1_000);
-
+    // NOT `h.settle()`. Settling waits for all twelve store writes, which is twelve thousand
+    // sequential PGlite inserts - over a minute on this machine - and it is not the claim under
+    // test. What is being asserted is that the RELAY refused nothing: it accepted every
+    // operation, broadcast every frame, and closed nothing. Whether the disk has finished
+    // chewing is a separate fact, and the document-complete case is covered by the browser
+    // suite's 6,000-character paste.
+    //
+    // This used to settle, and passed in 22 seconds. T4 made the store callbacks return a
+    // promise so the relay could acknowledge after them, and this test then blew its 30-second
+    // budget - a real slowdown, but the wrong thing to fix by making the test wait longer.
     expect(errorsOf(socket)).toEqual([]);
     expect(closesOf(socket)).toEqual([]);
     expect(socket.readyState).toBe(WebSocket.OPEN);

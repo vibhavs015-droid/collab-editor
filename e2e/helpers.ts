@@ -179,7 +179,17 @@ export async function waitForBothToAgree(a: Page, b: Page): Promise<string> {
       },
       // `message` must be a plain string, so it cannot report the latest lengths. The failure
       // text below therefore carries them, which is where a reader looks anyway.
-      { timeout: 45_000, message: `the two pages never converged; last lengths ${last}` },
+      //
+      // 90 seconds, raised from 45. Measured on this machine: a 6,000-character paste takes
+      // about 24 seconds to arrive on a second client, at roughly 1,000 operations every three
+      // to four seconds. That is a real and pre-existing limit - replaying N operations is O(n^2)
+      // in this CRDT, which is what T5 is about - and 45 seconds left no margin at all on a
+      // loaded machine. Raising the timeout records the honest cost rather than hiding it.
+      //
+      // Before T4 this test could finish sooner, because the SENDER reported "Synced" as soon
+      // as it had written the frames. It was not actually faster; it was less honest, and the
+      // time it appeared to save was the time the peer was still spending.
+      { timeout: 90_000, message: `the two pages never converged; last lengths ${last}` },
     )
     .not.toMatch(/^differing/u);
 

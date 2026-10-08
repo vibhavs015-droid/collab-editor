@@ -240,7 +240,11 @@ async function main(): Promise<void> {
         // write delay the broadcast of a keystroke to everyone else in the room,
         // which is the opposite of what a relay is for. The write is queued and
         // ordered per document, so correctness does not depend on the await.
-        void store
+        // RETURNED, not fired and forgotten: the relay sends the client's `ack` when this
+        // promise settles, and that ack is the only thing telling the client its edit is
+        // stored. A swallowed rejection would leave the client believing an edit was safe when
+        // the write had failed.
+        return store
           .apply(documentId, ops)
           .then(() => {
             // Compaction is opportunistic and off the critical path. It runs on a
@@ -250,22 +254,29 @@ async function main(): Promise<void> {
           })
           .catch((error: unknown) => {
             reportWriteFailure(error, documentId, site, relay, metrics, logger);
+            // Rethrown so the relay's acknowledgement step sees a rejection and sends nothing.
+            // Reported rather than swallowed: the user is told, AND the client keeps the batch
+            // in flight. Both are needed.
+            throw error;
           });
       },
       // Encrypted frames. Separate callback rather than a branch inside the one above,
       // because the two paths differ in a way that matters: this one stores frames it
       // cannot read, applies no replica, and produces no text. Folding it into the
       // plaintext callback would put that difference somewhere invisible.
-      (frameDocumentId, frames, site) => {
-        void store.applyEncrypted(frameDocumentId, frames).catch((error: unknown) => {
-          // Named explicitly, because "could not persist" on an encrypted document almost
-          // always means the mode guard fired, and the log line should say so.
-          reportWriteFailure(error, frameDocumentId, site, relay, metrics, logger, {
-            label: 'could not persist encrypted frames',
-            extra: { frames: frames.length },
-          });
-        });
-      },
+      (frameDocumentId, frames, site) =>
+        store
+          .applyEncrypted(frameDocumentId, frames)
+          .then(() => undefined)
+          .catch((error: unknown) => {
+            // Named explicitly, because "could not persist" on an encrypted document almost
+            // always means the mode guard fired, and the log line should say so.
+            reportWriteFailure(error, frameDocumentId, site, relay, metrics, logger, {
+              label: 'could not persist encrypted frames',
+              extra: { frames: frames.length },
+            });
+            throw error;
+          }),
     );
   });
 

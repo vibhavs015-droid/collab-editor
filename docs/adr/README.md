@@ -40,6 +40,7 @@ infer from code.
 | [0012](./0012-authentication-and-ownership.md)            | Auth: anonymous sessions and ownership  | Accepted |
 | [0013](./0013-client-log-compaction.md)                   | Client compaction by snapshot           | Accepted |
 | [0014](./0014-end-to-end-encryption.md)                   | E2EE: the server sees ciphertext        | Accepted |
+| [0015](./0015-acknowledged-writes.md)                     | Acknowledged writes                     | Accepted |
 
 ## Planned
 

@@ -369,12 +369,12 @@ export class Relay {
   attach(
     socket: WebSocket,
     documentId: string,
-    onOps?: (ops: readonly JsonValue[], site: string) => void,
+    onOps?: (ops: readonly JsonValue[], site: string) => void | Promise<void>,
     onEncryptedOps?: (
       documentId: string,
       frames: readonly EncryptedOperationFrame[],
       site: string,
-    ) => void,
+    ) => void | Promise<void>,
   ): void {
     const requiresAuth = this.#authorize !== undefined;
 
@@ -763,15 +763,90 @@ export class Relay {
     return false;
   }
 
+  /**
+   * Hand a batch to the store, then acknowledge it - in that order.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THE ACK FOLLOWS THE STORE AND NOT THE SOCKET
+   * ---------------------------------------------------------------------------
+   * Acknowledging on receipt would fix nothing. The failure this exists for is a frame the relay
+   * had in hand and then lost - the process died between reading the socket and committing - and
+   * an ack sent at receipt time tells the client its edit is safe at exactly that instant. The
+   * test in src/server/writeDurability.test.ts kills the socket at precisely this point, and it
+   * is green only because the ack is downstream of the write.
+   *
+   * So: a store call that rejects produces NO acknowledgement. The client keeps the batch in
+   * flight and resends it on reconnect, which is safe because persistence is idempotent.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY A CALLBACK RATHER THAN AWAITING INLINE
+   * ---------------------------------------------------------------------------
+   * The broadcast has already happened synchronously. Nothing here delays it. A slow database
+   * write costs this client an ack and costs nobody else anything - the same reason the relay
+   * does not await persistence before relaying in the first place.
+   *
+   * A store call that returns nothing is treated as synchronously complete, so an existing
+   * void-returning caller behaves exactly as it did before.
+   */
+  #persistThenAcknowledge(
+    client: Client,
+    batchId: string | undefined,
+    persist: () => void | Promise<void>,
+  ): void {
+    const settled = persist();
+
+    // Attach a handler to the rejection UNCONDITIONALLY, before deciding whether there is
+    // anything to acknowledge.
+    //
+    // This is not defensive noise. Returning early for a frame with no `batchId` while leaving
+    // `settled` unhandled means any store rejection becomes an unhandled promise rejection, and
+    // Node 24 terminates the process for those by default. The production smoke test found it:
+    // its raw WebSocket client sends no batchId, so the encrypted path hit exactly that branch,
+    // the store rejected, and the server exited 1 in the middle of a passing run.
+    //
+    // The rejection is not swallowed - the caller's own error path reports it to the user and to
+    // the log before it rethrows. This handler exists so the process survives the rethrow.
+    if (settled !== undefined) {
+      void settled.catch(() => undefined);
+    }
+
+    if (batchId === undefined) {
+      // Nothing to acknowledge: the caller is a client that does not know this message exists.
+      // The frame was still persisted. See ADR-0015.
+      return;
+    }
+
+    if (settled === undefined) {
+      this.#send(client, { type: 'ack', batchId });
+      return;
+    }
+
+    // TWO arguments, deliberately. `settled.then(onOk)` propagates a rejection onto the promise
+    // it returns, and that derived promise would then be unhandled - which is the same crash by
+    // a different route. Passing a rejection handler makes the derived promise resolve.
+    //
+    // This one was found by the test in relayAck.test.ts that sends a rejecting frame WITH a
+    // batchId. The first fix, which attached a `catch` and then returned early for frames with
+    // no batchId, left this path still leaking.
+    void settled.then(
+      () => {
+        this.#send(client, { type: 'ack', batchId });
+      },
+      () => {
+        // Already reported by the caller. Its absence is the signal, and nothing is sent.
+      },
+    );
+  }
+
   #handle(
     client: Client,
     message: ClientMessage,
-    onOps?: (ops: readonly JsonValue[], site: string) => void,
+    onOps?: (ops: readonly JsonValue[], site: string) => void | Promise<void>,
     onEncryptedOps?: (
       documentId: string,
       frames: readonly EncryptedOperationFrame[],
       site: string,
-    ) => void,
+    ) => void | Promise<void>,
   ): void {
     // Nothing but `hello` is accepted from a client that has not been authorised.
     //
@@ -825,7 +900,9 @@ export class Relay {
         // belongs to the CRDT rather than here. Narrowing the type is therefore a
         // cast, justified by that boundary: the relay genuinely has no opinion
         // about what an operation contains.
-        onOps?.(message.ops, client.site);
+        this.#persistThenAcknowledge(client, message.batchId, () =>
+          onOps?.(message.ops, client.site),
+        );
         return;
       }
 
@@ -858,7 +935,9 @@ export class Relay {
           frames: message.frames,
         });
 
-        onEncryptedOps?.(message.documentId, message.frames, client.site);
+        this.#persistThenAcknowledge(client, message.batchId, () =>
+          onEncryptedOps?.(message.documentId, message.frames, client.site),
+        );
         return;
       }
 
