@@ -863,6 +863,36 @@ likely thing to be wrong. Verify the harness before changing the code.
   **The lesson is not "always upgrade".** It is that a dependency can be fixed into a new
   vulnerability, and that a red security gate is only noticed by running the gate.
 
+- **The first CI run ever found a bug the local suite could not.**
+  `npx playwright install --with-deps --no-shell chromium` installs the full
+  Chromium and _excludes_ `chromium_headless_shell` - which is what
+  Playwright's default `headless: true` launches since 1.49. All six browser
+  tests failed in CI with `Executable doesn't exist at
+.../chromium_headless_shell-1243/chrome-headless-shell`.
+
+  **The local suite could not have caught this, and that is the point.** A
+  developer machine that has ever run a plain `npx playwright install` has
+  both binaries. It passes whichever one the config picks. CI installs one.
+  The local green and the CI red were both correct about their own machine;
+  there was no bug to reproduce until the two environments were made to
+  differ deliberately.
+
+  Reproduced before fixing, by renaming the local `chromium_headless_shell`
+  directory so the machine matched CI exactly. Confirmed the failure, then
+  added `channel: 'chromium'` to `playwright.config.ts` and confirmed all six
+  pass in that same state.
+
+  Chose `channel: 'chromium'` over removing `--no-shell` from CI: CI's
+  installed browser then matches what the tests launch, no ~50 MB binary is
+  downloaded that nothing runs, and the full build is real headless Chrome
+  rather than a stripped harness - so the CI run is closer to what a user's
+  browser does.
+
+  **The generalisable mistake: a passing local suite proves the code works on
+  the machine it ran on.** It says nothing about whether the _declared_
+  environment can run it. T1 shipped a browser job that had never executed,
+  and the reason it looked green is that the job did not exist yet.
+
 ### Test suite
 
 106 tests, ~2 minutes. The runtime is dominated by Postgres initialisation
