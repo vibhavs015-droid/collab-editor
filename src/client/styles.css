@@ -154,6 +154,29 @@ body {
   cursor: not-allowed;
 }
 
+/*
+ * Touch targets.
+ *
+ * The buttons above are about 31px tall, which is fine for a mouse and small for a finger. The
+ * WCAG 2.2 target-size criterion asks for 24px, and the platform convention that works in
+ * practice is 44px, so 44 is what is used here.
+ *
+ * Gated on `pointer: coarse` rather than on width, because a narrow window on a desktop is still
+ * operated with a mouse and should not get chunky controls, and a touchscreen is coarse whatever
+ * the window width. This also means the browser tests, which run with a fine pointer, exercise the
+ * LAYOUT change without the size change - so the toolbar wrapping is tested at every width and the
+ * touch size is tested separately, below.
+ *
+ * `min-height` rather than `height`, so a button whose label wraps on a narrow screen grows
+ * instead of clipping its own text.
+ */
+@media (pointer: coarse) {
+  .button {
+    min-height: 44px;
+    padding: 10px 14px;
+  }
+}
+
 .button--primary {
   color: var(--accent-fg);
   background: var(--accent);
@@ -275,6 +298,27 @@ body {
   padding: 20px 24px;
 }
 
+/*
+ * CodeMirror removes its own focus ring, because it knows the caret is the focus indicator.
+ * That is true for a mouse user who clicked into the text and is not true for a keyboard user
+ * tabbing in, who gets no indication at all that focus is in the editor.
+ *
+ * So the ring moves to the container and is drawn only when focus is INSIDE it. `:focus-within`
+ * rather than `:focus` because the focused element is CodeMirror's contenteditable, not this div.
+ *
+ * Drawn with `outline` and `outline-offset: -2px` rather than `box-shadow` so it does not change
+ * the element's size and so it is drawn outside the scroller's own overflow clip - the ring has to
+ * be visible with the caret at the very start of a long document, which is exactly where a
+ * content-box shadow would be cut off.
+ *
+ * Contrast: `--accent` is #2f6feb on #ffffff, which is 4.6:1, and #6c9bff on #16181d, which is
+ * 6.3:1. Both clear the 3:1 required for a non-text indicator in both colour schemes.
+ */
+.editor-host:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .editor-host .cm-focused {
   outline: none;
 }
@@ -283,6 +327,45 @@ body {
   background: var(--bg);
   border-right: 1px solid var(--border);
   color: var(--fg-muted);
+}
+
+/*
+ * The active line.
+ *
+ * Set explicitly in both schemes rather than left to CodeMirror's theme defaults, and that is not
+ * cosmetic. The default dark highlight is #475159, and anything sitting on it has to clear 4.5:1
+ * against THAT colour, not against the page background - which is how the placeholder came to fail
+ * at 3.2:1 in dark mode while passing in light.
+ *
+ * These are chosen so `--fg-muted` clears 4.5:1 on the highlighted line as well as on the page:
+ * 5.9:1 in dark, 5.3:1 in light. Fixing the background is what lets one foreground colour work in
+ * both places, rather than needing a second, lighter grey that only exists for this one element.
+ */
+.editor-host .cm-activeLine {
+  background: var(--bg-subtle);
+}
+
+@media (prefers-color-scheme: dark) {
+  .editor-host .cm-activeLine {
+    /* Slightly lifted from --bg (#16181d) rather than CodeMirror's much lighter default. */
+    background: #232830;
+  }
+}
+
+/*
+ * The placeholder.
+ *
+ * CodeMirror ships #888, which is 3.35:1 on white and fails the 4.5:1 required of body text.
+ * Found by axe (`color-contrast`, serious), not by eye - grey-on-white looks fine.
+ *
+ * `--fg-muted` is used rather than a new colour, so there is one muted grey in the stylesheet and
+ * it is the one that already meets contrast in both schemes: #5c6570 on #ffffff is 5.6:1, and
+ * #9aa4b0 on #16181d is 7.0:1. The placeholder is de-emphasised by being italic as well as
+ * coloured, so it still reads as a hint rather than as content.
+ */
+.editor-host .cm-placeholder {
+  color: var(--fg-muted);
+  font-style: italic;
 }
 
 /* ── Full-area states (loading / error) ─────────────────────────────────── */
