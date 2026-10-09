@@ -418,11 +418,34 @@ export class RgaDocument {
     element.deleted = true;
   }
 
+  /**
+   * Position of the element with this id.
+   *
+   * The id is compared FIELD BY FIELD, deliberately, rather than by building `site@clock` for
+   * this element and for every element inspected. The string version allocated one string per
+   * comparison, so an N-element document cost O(N) allocations for a single lookup, and replaying N
+   * operations cost O(N^2) of them. Measured: 20,000 operations spent 13% of their time here and
+   * in `elementIdKey` alone, before counting what the allocator did with the garbage.
+   *
+   * The comparison is exactly equivalent. `elementIdKey` produced `${site}@${clock}`, which is
+   * injective over `(string, number)` pairs because `@` cannot appear in a site id - and a
+   * field-by-field comparison is injective over the pair itself, which is stronger. There is no
+   * shape of input where the two disagree, which is why
+   * src/core/crdt/elementResolution.test.ts can compare the old algorithm against this one on
+   * seeded random operation sequences.
+   *
+   * Still a linear scan. This is the cheap half of the fix; the cost that remains is the scan
+   * itself, not the key building.
+   */
   #indexOfElement(id: ElementId): number {
-    const key = elementIdKey(id);
+    const elements = this.#elements;
 
-    for (let i = 0; i < this.#elements.length; i += 1) {
-      if (elementIdKey(this.#elements[i]?.id ?? { site: '', clock: 0 }) === key) {
+    for (let i = 0; i < elements.length; i += 1) {
+      const candidate = elements[i]?.id;
+
+      // `candidate` can only be undefined when `i` is out of bounds, which the loop condition
+      // already prevents. The check is here because `?.` makes that not obvious to a reader.
+      if (candidate !== undefined && candidate.site === id.site && candidate.clock === id.clock) {
         return i;
       }
     }
