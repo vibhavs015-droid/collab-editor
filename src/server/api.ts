@@ -3,7 +3,7 @@
  *
  * Node's built-in `http` server, no framework. Phase 1 routes are simple enough
  * that Express would add a dependency and a layer of indirection to express one
- * function. If routing grows genuinely complex, this is the file to revisit â€”
+ * function. If routing grows genuinely complex, this is the file to revisit Ã¢â‚¬â€
  * not before.
  *
  * Every handler is a plain `(req, res) => Promise<void>`, so each one is directly
@@ -17,6 +17,13 @@ import type { Database } from './db.js';
 import type { DocumentRecord } from './db.js';
 import { AuthError, OpenAuthenticator, type Authenticator } from './auth.js';
 import { DEFAULT_LIMITS, titleTooLong, type Limits } from './limits.js';
+import { DOCUMENT_ID_PATTERN as SHARED_DOCUMENT_ID_PATTERN } from './documentIdPattern.js';
+import {
+  MAX_PAGE_SIZE,
+  MIN_PAGE_SIZE,
+  decodeDocumentCursor,
+  parsePageSize,
+} from './documentCursor.js';
 import { SUBJECT_RULE_MESSAGE, isValidSubject, newSubject } from '../shared/subject.js';
 import { Logger } from './observability/logger.js';
 import { Metrics } from './observability/metrics.js';
@@ -108,8 +115,13 @@ export function observability(overrides: Partial<Observability> = {}): Observabi
   };
 }
 
-/** Documents are addressed by a URL-safe id. */
-const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+/**
+ * Documents are addressed by a URL-safe id.
+ *
+ * The pattern itself lives in its own module so the pagination cursor can validate the id it
+ * carries without importing this file. See documentIdPattern.ts.
+ */
+const DOCUMENT_ID_PATTERN = SHARED_DOCUMENT_ID_PATTERN;
 
 /**
  * Hard ceiling on request body size.
@@ -381,8 +393,7 @@ export class ApiServer {
         // Scoped to the caller. The global list would disclose every title in the
         // database to anyone who asked, which is a leak created by adding
         // authentication rather than closed by it.
-        const documents = await this.#db.listDocumentsFor(identity.subject, 50);
-        sendJson(res, 200, { documents });
+        await this.#listDocuments(req, res, identity.subject, url);
         return;
       }
 
@@ -753,6 +764,62 @@ export class ApiServer {
     sendJson(res, 200, { claimed: true, documentId: id });
   }
 
+  /**
+   * One page of the caller's documents.
+   *
+   * `limit` (1..100, default 50) and `cursor` are optional, and the response shape is unchanged for
+   * a client that sends neither: `documents` is still an array of the same records. `nextCursor` is
+   * added alongside it and is absent on the last page, so an old client reading `.documents` is
+   * unaffected and a new one can page.
+   *
+   * Both parameters are refused rather than clamped when out of range. A client that asked for 500
+   * and silently received 100 cannot tell that its pagination is wrong, and would carry on
+   * believing it had seen everything.
+   */
+  async #listDocuments(
+    req: IncomingMessage,
+    res: ServerResponse,
+    subject: string,
+    url: URL,
+  ): Promise<void> {
+    const requestedLimit = url.searchParams.get('limit');
+    const limit = parsePageSize(requestedLimit);
+
+    if (limit === null) {
+      sendError(
+        res,
+        400,
+        'INVALID_LIMIT',
+        `limit must be an integer between ${String(MIN_PAGE_SIZE)} and ${String(MAX_PAGE_SIZE)}.`,
+      );
+      return;
+    }
+
+    const rawCursor = url.searchParams.get('cursor');
+    // Absent means "start at the beginning". Present but unparseable is an error, because a client
+    // holding a cursor this server cannot read has a bug or a stale value, and quietly treating it
+    // as page one would show the user a list they have already seen with no indication of it.
+    const decoded = rawCursor === null ? null : decodeDocumentCursor(rawCursor);
+
+    if (rawCursor !== null && decoded === null) {
+      sendError(res, 400, 'INVALID_CURSOR', 'cursor is not a cursor this server issued.');
+      return;
+    }
+
+    const cursor = decoded ?? undefined;
+
+    const page = await this.#db.listDocumentsFor(subject, limit, cursor);
+
+    // `nextCursor` is omitted rather than null on the last page, so a client can test for it.
+    if (page.nextCursor === null) {
+      sendJson(res, 200, { documents: page.documents });
+    } else {
+      sendJson(res, 200, { documents: page.documents, nextCursor: page.nextCursor });
+    }
+
+    void req;
+  }
+
   async #createDocument(req: IncomingMessage, res: ServerResponse, subject: string): Promise<void> {
     if (!this.#allowCreate()) {
       sendError(res, 429, 'RATE_LIMITED', 'Too many documents created. Try again later.');
@@ -938,13 +1005,13 @@ async function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
 /**
  * Write a JSON response.
  *
- * Synchronous by design â€” `res.end()` on an in-memory payload returns
+ * Synchronous by design Ã¢â‚¬â€ `res.end()` on an in-memory payload returns
  * immediately. Returning a promise anyway would let handlers `await` it and keep
  * one uniform shape, but it would also imply a real async boundary that does not
  * exist, which is how `async` functions with no `await` end up hiding errors.
  *
  * `charset=utf-8` is not optional. Without it, HTTP clients are free to guess the
- * encoding, and several guess Latin-1 â€” silently corrupting any non-ASCII
+ * encoding, and several guess Latin-1 Ã¢â‚¬â€ silently corrupting any non-ASCII
  * document text. Caught by the byte-level assertions in `e2e.test.ts`.
  */
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {

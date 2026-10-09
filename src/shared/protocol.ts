@@ -359,6 +359,8 @@ export type ErrorCode =
   | 'DOCUMENT_NOT_FOUND'
   | 'DOCUMENT_TOO_LARGE'
   | 'TITLE_TOO_LONG'
+  | 'INVALID_LIMIT'
+  | 'INVALID_CURSOR'
   | 'INTERNAL';
 
 export interface ErrorMessage {

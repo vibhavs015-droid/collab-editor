@@ -37,6 +37,7 @@ import {
 } from '../core/crdt/snapshot.js';
 import { isValidSubject } from '../shared/subject.js';
 import type { EncryptedOperationFrame } from '../shared/protocol.js';
+import { encodeDocumentCursor, type DocumentCursor } from './documentCursor.js';
 import { DEFAULT_LIMITS } from './limits.js';
 
 /** One saved document. */
@@ -75,6 +76,19 @@ export interface CreateDocumentInput {
    * which anyone may then read and write.
    */
   readonly owner?: string | null;
+  /**
+   * Explicit `updated_at`, or omitted to take the column default of `now()`.
+   *
+   * Present for importing a document that keeps its original timestamp, and because the pagination
+   * tests need documents that share a timestamp ON PURPOSE - the list orders by
+   * `(updated_at, id)` and the id tiebreaker is only exercised when two rows really do tie. Waiting
+   * for PGlite to batch two writes into one transaction would make that test pass or fail at
+   * random, which is worse than no test.
+   *
+   * Omitted rather than defaulted to `new Date()` in code, because the column's DEFAULT is part of
+   * the schema and duplicating it here would be a second place for it to drift.
+   */
+  readonly updatedAt?: Date;
 }
 
 export interface SaveResult {
@@ -443,15 +457,34 @@ export class Database {
   }
 
   async createDocument(input: CreateDocumentInput): Promise<DocumentRecord> {
-    const result = await this.#pg.query<DocumentRow>(
-      `INSERT INTO documents (id, title, content, owner)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, title, content, clock, updated_at, owner, encrypted`,
-      // Explicit fallbacks rather than relying on column DEFAULT. Postgres
-      // applies a DEFAULT only when the column is *omitted* from the INSERT;
-      // binding NULL passes a real NULL through, which violates NOT NULL.
-      [input.id, input.title ?? 'Untitled', input.content ?? '', input.owner ?? null],
-    );
+    // Two statements rather than one with a nullable column, because of the trap the comment below
+    // describes in reverse: Postgres applies a DEFAULT only when a column is OMITTED, so passing
+    // `COALESCE($5, now())` would silently replace the schema's DEFAULT with a value computed here.
+    // Omitting the column is the only way to keep `now()` owned by the schema.
+    const sql =
+      input.updatedAt === undefined
+        ? `INSERT INTO documents (id, title, content, owner)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, title, content, clock, updated_at, owner, encrypted`
+        : `INSERT INTO documents (id, title, content, owner, updated_at)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, title, content, clock, updated_at, owner, encrypted`;
+
+    // Explicit fallbacks rather than relying on column DEFAULT. Postgres
+    // applies a DEFAULT only when the column is *omitted* from the INSERT;
+    // binding NULL passes a real NULL through, which violates NOT NULL.
+    const params: unknown[] = [
+      input.id,
+      input.title ?? 'Untitled',
+      input.content ?? '',
+      input.owner ?? null,
+    ];
+
+    if (input.updatedAt !== undefined) {
+      params.push(input.updatedAt);
+    }
+
+    const result = await this.#pg.query<DocumentRow>(sql, params);
 
     const row = result.rows[0];
     if (!row) {
@@ -527,22 +560,85 @@ export class Database {
    * same reason: without the tiebreaker the order silently changes between
    * identical calls and the endpoint cannot be paginated against.
    */
-  async listDocumentsFor(subject: string, limit = 50): Promise<DocumentRecord[]> {
-    const result = await this.#pg.query<DocumentRow>(
-      `SELECT d.id, d.title, d.content, d.clock, d.updated_at, d.owner
+  /**
+   * One page of the documents `subject` may reach.
+   *
+   * Ordering is `updated_at DESC, id DESC`, and the cursor predicate is a row-wise comparison on
+   * that same pair, which is what makes paging exact when timestamps tie:
+   *
+   *     (d.updated_at, d.id) < ($at::timestamptz, $id)
+   *
+   * Two things here are load-bearing and easy to get wrong by accident:
+   *
+   *   - The id is in the predicate, not just the ORDER BY. With only `updated_at < $at`, every row
+   *     sharing the cursor's timestamp would be skipped - and this column ties in practice, because
+   *     `now()` is the transaction timestamp and PGlite batches writes enough that three sequential
+   *     calls can share one. See the tiebreaker note on {@link listDocuments}.
+   *
+   *   - The timestamp travels as text with its six fractional digits and an explicit `Z`, rather
+   *     than through a JavaScript `Date`, which holds milliseconds. Rounding to milliseconds would
+   *     merge rows that differ in the 4th microsecond and drop or repeat one at the boundary.
+   *
+   *     The `Z` is not decoration either. `to_char(updated_at AT TIME ZONE 'UTC', ...)` yields a
+   *     NAIVE wall time in UTC, and casting that back with `::timestamptz` reinterprets it in the
+   *     *session* timezone - so on a server not running UTC the cursor pointed at a different
+   *     instant than the row it came from, and the page boundary moved. Measured: with the `Z`
+   *     omitted, paging over documents that shared a timestamp returned only the first page and no
+   *     `nextCursor`. See documentCursor.ts.
+   *
+   * `limit + 1` rows are fetched so the caller can tell whether a further page exists without a
+   * second COUNT query, and the extra row is dropped here. The extra row is never returned, so a
+   * caller cannot tell from the response that it was fetched.
+   *
+   * The visibility predicate is untouched by `cursor`. A cursor is a position in the ORDER, not a
+   * filter, and its contents are attacker-controlled; authorisation stays entirely in the WHERE
+   * clause below.
+   */
+  async listDocumentsFor(
+    subject: string,
+    limit = 50,
+    cursor?: DocumentCursor,
+  ): Promise<{ documents: DocumentRecord[]; nextCursor: string | null }> {
+    const params: unknown[] = [subject, limit + 1];
+    let after = '';
+
+    if (cursor !== undefined) {
+      // Parameterised and cast. The cast is what makes the text comparable to the column; the
+      // value is never interpolated into the statement.
+      after = 'AND (d.updated_at, d.id) < ($3::timestamptz, $4)';
+      params.push(cursor.at, cursor.id);
+    }
+
+    const result = await this.#pg.query<DocumentRow & { cursor_at: string }>(
+      `SELECT d.id, d.title, d.content, d.clock, d.updated_at, d.owner,
+              to_char(d.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || 'Z' AS cursor_at
        FROM documents d
-       WHERE d.owner IS NULL
+       WHERE (d.owner IS NULL
           OR d.owner = $1
           OR EXISTS (
             SELECT 1 FROM document_collaborators c
              WHERE c.document_id = d.id AND c.subject = $1
-          )
+          ))
+         ${after}
        ORDER BY d.updated_at DESC, d.id DESC
        LIMIT $2`,
-      [subject, limit],
+      params,
     );
 
-    return result.rows.map(toRecord);
+    const rows = result.rows;
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+
+    return {
+      documents: page.map(toRecord),
+      // Absent rather than null on the last page, so a client can test for it directly. Encoded
+      // from the row Postgres formatted, not from the JS Date, to keep the microseconds.
+      nextCursor:
+        hasMore && last !== undefined
+          ? encodeDocumentCursor({ at: last.cursor_at, id: last.id })
+          : null,
+    };
   }
 
   /**
