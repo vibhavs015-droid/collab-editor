@@ -34,6 +34,16 @@ export const M = {
   opsBroadcast: 'collab_operations_broadcast_total',
   opsRejected: 'collab_operations_rejected_total',
   opsUnplaced: 'collab_operations_unplaced_total',
+  /**
+   * Connections closed for exceeding the per-connection write rate.
+   *
+   * Counts CONNECTIONS, not operations. The server refuses a whole connection rather than the
+   * individual frame, so an operation count here would be a number nobody could reproduce from
+   * the log and would move by whatever batch size happened to be refused.
+   */
+  opsRateLimited: 'collab_ops_rate_limited_total',
+  /** Documents that refused a write because they are at the element cap. */
+  documentsTooLarge: 'collab_documents_too_large_total',
   replayOps: 'collab_replay_operations_total',
   replayDuration: 'collab_replay_duration_seconds',
 
@@ -104,6 +114,16 @@ const METRICS: readonly {
     name: M.opsUnplaced,
     type: 'counter',
     help: 'Operations that could not be placed in the CRDT. Non-zero means peers are diverging.',
+  },
+  {
+    name: M.opsRateLimited,
+    type: 'counter',
+    help: 'Connections closed for exceeding the per-connection write rate. Zero in normal use.',
+  },
+  {
+    name: M.documentsTooLarge,
+    type: 'counter',
+    help: 'Writes refused because a document is at its element cap.',
   },
   { name: M.replayOps, type: 'counter', help: 'Operations replayed to catch a client up.' },
   { name: M.replayDuration, type: 'histogram', help: 'Time to catch a client up, in seconds.' },

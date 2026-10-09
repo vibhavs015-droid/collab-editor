@@ -47,6 +47,30 @@ export type Operation = JsonValue;
 /** Wire protocol version. Bumped when the envelope shape changes. */
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Most operations a client puts in one `ops` or `ops-enc` frame.
+ *
+ * A client that has queued more than this sends several frames in order. One frame per
+ * flush would be simpler, but then the largest legitimate frame grows with the length of
+ * the offline session, and no frame-size limit on the server could be set that did not
+ * eventually reject an honest client. Chunking is what makes MAX_FRAME_BYTES enforceable.
+ *
+ * Measured with 4-byte characters: about 163 KiB per frame as plaintext and about 386 KiB
+ * encrypted.
+ */
+export const MAX_OPS_PER_FRAME = 1_000;
+
+/**
+ * Largest WebSocket message the relay will buffer, in bytes.
+ *
+ * Without an explicit limit the `ws` library accepts 100 MiB per message and the relay
+ * parses it before it knows who sent it. Four MiB is more than twice the largest frame
+ * any released client could produce (a full 5,000-operation outbox, encrypted, was about
+ * 1.9 MiB) and about ten times a MAX_OPS_PER_FRAME chunk, so no honest client is refused.
+ * The relay closes an oversized connection with code 1009.
+ */
+export const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+
 // ── Client → Server ──────────────────────────────────────────────────────
 
 export interface HelloMessage {
@@ -60,12 +84,66 @@ export interface HelloMessage {
    * Lets the server decide between sending a delta and a full snapshot.
    */
   readonly lastAppliedSeq: number;
+  /**
+   * Optional server-to-client frames this client understands.
+   *
+   * The same opt-in idea as {@link BatchId}, for the same reason: a client that does not
+   * recognise a message type falls through to its "unrecognised frame" handler, so sending an
+   * unfamiliar frame is a user-visible error, not a no-op. An absent list means "send me
+   * nothing the protocol did not already require", which is what a client from before
+   * acknowledgements sent.
+   *
+   * `ack` is NOT listed here even though new clients support it. It is gated on the client
+   * sending a `batchId` instead, because the id IS the thing being acknowledged - asking for one
+   * is the opt-in, and it needs no separate declaration to go out of sync.
+   */
+  readonly capabilities?: readonly Capability[];
 }
+
+/** Server-to-client frames a client can declare support for in its `hello`. */
+export type Capability = 'ping';
+
+/** Every capability this server knows how to honour. Anything else is dropped on arrival. */
+const KNOWN_CAPABILITIES: readonly Capability[] = ['ping'];
+
+/**
+ * The server's liveness check.
+ *
+ * `t` is a token the client must echo. Without it a `pong` that was delayed in a buffer for
+ * three minutes would satisfy today's check, and the server would conclude a dead client is
+ * alive - which is the exact failure this frame exists to catch. The token makes each pong
+ * attributable to a specific ping.
+ */
+export interface PingMessage {
+  readonly type: 'ping';
+  readonly t: number;
+}
+
+/** The client's answer to a {@link PingMessage}. */
+export interface PongMessage {
+  readonly type: 'pong';
+  /** Echoed verbatim from the ping being answered. */
+  readonly t: number;
+}
+
+/**
+ * Client-chosen identity for one outbound frame, used to acknowledge it.
+ *
+ * OPTIONAL, and that is the load-bearing word. A client that omits it gets exactly the
+ * behaviour that shipped before acknowledgements existed, and never receives an `ack` - which is
+ * what makes the whole feature additive rather than a version break. See ADR-0015.
+ *
+ * A string rather than a number because the value is chosen by the client and must be
+ * recognisable after a reconnect, and because the relay treats it as opaque.
+ */
+export type BatchId = string;
 
 export interface SubmitOpsMessage {
   readonly type: 'ops';
   readonly documentId: string;
   readonly ops: readonly Operation[];
+  /** Omit to opt out of acknowledgement. See {@link BatchId}. */
+  readonly batchId?: BatchId;
 }
 
 /**
@@ -116,6 +194,32 @@ export interface SubmitEncryptedOpsMessage {
   readonly type: 'ops-enc';
   readonly documentId: string;
   readonly frames: readonly EncryptedOperationFrame[];
+  /** Omit to opt out of acknowledgement. See {@link BatchId}. */
+  readonly batchId?: BatchId;
+}
+
+/**
+ * The server has processed one outbound frame: it is durably stored, not merely received.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY "PROCESSED" AND NOT "RECEIVED"
+ * ---------------------------------------------------------------------------
+ * An acknowledgement that fires when the frame is read rather than when it is stored would fix
+ * nothing. The failure T4 measures is precisely a frame the relay had in hand and then lost -
+ * the process died between reading the socket and committing - and an ack sent on receipt would
+ * tell the client its edit was safe at exactly that moment.
+ *
+ * So the relay sends this after the store has settled, and sends nothing at all if the store
+ * failed. The client resends, which is safe because persistence is idempotent.
+ *
+ * Sent only in response to a frame that carried a {@link BatchId}, so a client from before this
+ * message existed never sees a frame it does not understand. A client that does not recognise
+ * `ack` calls its "unrecognised frame" handler, which would otherwise surface to the user as an
+ * error on every keystroke.
+ */
+export interface AckMessage {
+  readonly type: 'ack';
+  readonly batchId: BatchId;
 }
 
 export interface PresenceMessage {
@@ -145,7 +249,8 @@ export type ClientMessage =
   | SubmitOpsMessage
   | SubmitEncryptedOpsMessage
   | PresenceMessage
-  | ResyncRequestMessage;
+  | ResyncRequestMessage
+  | PongMessage;
 
 // ── Server → Client ──────────────────────────────────────────────────────
 
@@ -240,9 +345,23 @@ export interface SyncStateMessage {
  * reason instead of parsing a sentence. The wire protocol and the HTTP API share
  * it: the same condition produces the same code on both, which is what lets the
  * client handle one failure the same way regardless of transport.
+ *
+ * The two quota codes are here rather than being HTTP-only, because they are the ones a client
+ * has to be able to REASON about rather than just display. `RATE_LIMITED` means "you are going
+ * too fast; back off", which is actionable and transient. `DOCUMENT_TOO_LARGE` means "this
+ * document cannot grow any further", which is permanent for that document but still leaves
+ * deletion working. A client that cannot tell those two apart will retry the second forever.
  */
 export type ErrorCode =
-  'BAD_MESSAGE' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'DOCUMENT_NOT_FOUND' | 'INTERNAL';
+  | 'BAD_MESSAGE'
+  | 'UNAUTHORIZED'
+  | 'RATE_LIMITED'
+  | 'DOCUMENT_NOT_FOUND'
+  | 'DOCUMENT_TOO_LARGE'
+  | 'TITLE_TOO_LONG'
+  | 'INVALID_LIMIT'
+  | 'INVALID_CURSOR'
+  | 'INTERNAL';
 
 export interface ErrorMessage {
   readonly type: 'error';
@@ -257,11 +376,13 @@ export type ServerMessage =
   | SnapshotMessage
   | PresenceMessageServer
   | SyncStateMessage
+  | AckMessage
+  | PingMessage
   | ErrorMessage;
 
 // ── Runtime validation ───────────────────────────────────────────────────
 
-const CLIENT_MESSAGE_TYPES = new Set(['hello', 'ops', 'ops-enc', 'presence', 'resync']);
+const CLIENT_MESSAGE_TYPES = new Set(['hello', 'ops', 'ops-enc', 'presence', 'resync', 'pong']);
 
 /**
  * Envelope version the server speaks.
@@ -430,6 +551,7 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       const protocolVersion = parsed['protocolVersion'];
       const token = parsed['token'];
       const lastAppliedSeq = parsed['lastAppliedSeq'];
+      const capabilities = parsed['capabilities'];
 
       if (
         typeof documentId !== 'string' ||
@@ -446,23 +568,61 @@ export function parseClientMessage(raw: string): ClientMessage | null {
         return null;
       }
 
-      return { type, protocolVersion, token, documentId, lastAppliedSeq };
+      // Optional, but every element has to be a known capability. An unrecognised one is
+      // dropped rather than refused: a newer client may declare capabilities this server does
+      // not implement, and refusing the handshake over that would make the two versions
+      // incompatible rather than merely less capable. This is the same rule as `batchId` -
+      // accept the shape, keep only what is understood.
+      const known = KNOWN_CAPABILITIES.filter((capability) =>
+        Array.isArray(capabilities) ? capabilities.includes(capability) : false,
+      );
+
+      return known.length > 0
+        ? { type, protocolVersion, token, documentId, lastAppliedSeq, capabilities: known }
+        : { type, protocolVersion, token, documentId, lastAppliedSeq };
+    }
+
+    case 'pong': {
+      const t = parsed['t'];
+
+      // A `pong` the client cannot be matched to a `ping` is not a liveness signal, so an
+      // unparseable one is refused rather than treated as an answer.
+      if (typeof t !== 'number' || !Number.isFinite(t)) {
+        return null;
+      }
+
+      return { type, t };
     }
 
     case 'ops': {
       const ops = parsed['ops'];
+      const batchId = parsed['batchId'];
 
       if (typeof documentId !== 'string' || !Array.isArray(ops)) {
         return null;
       }
 
-      return { type, documentId, ops: ops as Operation[] };
+      // Optional, but if it is present it must be a string. A number, or an object, would be
+      // echoed back verbatim in the `ack`, so the type has to be checked rather than trusted -
+      // and the length is bounded because the relay stores nothing but does echo it.
+      if (batchId !== undefined && (typeof batchId !== 'string' || batchId.length > 128)) {
+        return null;
+      }
+
+      return batchId === undefined
+        ? { type, documentId, ops: ops as Operation[] }
+        : { type, documentId, ops: ops as Operation[], batchId };
     }
 
     case 'ops-enc': {
       const frames = parsed['frames'];
+      const batchId = parsed['batchId'];
 
       if (typeof documentId !== 'string' || !Array.isArray(frames)) {
+        return null;
+      }
+
+      if (batchId !== undefined && (typeof batchId !== 'string' || batchId.length > 128)) {
         return null;
       }
 
@@ -482,7 +642,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
         validated.push(frame);
       }
 
-      return { type, documentId, frames: validated };
+      return batchId === undefined
+        ? { type, documentId, frames: validated }
+        : { type, documentId, frames: validated, batchId };
     }
 
     case 'presence': {

@@ -3,7 +3,7 @@
  *
  * Node's built-in `http` server, no framework. Phase 1 routes are simple enough
  * that Express would add a dependency and a layer of indirection to express one
- * function. If routing grows genuinely complex, this is the file to revisit â€”
+ * function. If routing grows genuinely complex, this is the file to revisit Ã¢â‚¬â€
  * not before.
  *
  * Every handler is a plain `(req, res) => Promise<void>`, so each one is directly
@@ -16,6 +16,14 @@ import type { Duplex } from 'node:stream';
 import type { Database } from './db.js';
 import type { DocumentRecord } from './db.js';
 import { AuthError, OpenAuthenticator, type Authenticator } from './auth.js';
+import { DEFAULT_LIMITS, titleTooLong, type Limits } from './limits.js';
+import { DOCUMENT_ID_PATTERN as SHARED_DOCUMENT_ID_PATTERN } from './documentIdPattern.js';
+import {
+  MAX_PAGE_SIZE,
+  MIN_PAGE_SIZE,
+  decodeDocumentCursor,
+  parsePageSize,
+} from './documentCursor.js';
 import { SUBJECT_RULE_MESSAGE, isValidSubject, newSubject } from '../shared/subject.js';
 import { Logger } from './observability/logger.js';
 import { Metrics } from './observability/metrics.js';
@@ -52,6 +60,14 @@ export interface ApiServerOptions {
   readonly db: Database;
   readonly host?: string;
   readonly port?: number;
+  /**
+   * Write quotas enforced by this server.
+   *
+   * Defaults to {@link DEFAULT_LIMITS} so every existing caller - which is every test - gets a
+   * bounded server without having to know the option exists. The real server passes
+   * {@link resolveLimits} of the process environment.
+   */
+  readonly limits?: Limits;
   /** Escape hatch for tests: called when the server is listening. */
   readonly onListen?: (address: { host: string; port: number }) => void;
   /**
@@ -99,8 +115,13 @@ export function observability(overrides: Partial<Observability> = {}): Observabi
   };
 }
 
-/** Documents are addressed by a URL-safe id. */
-const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+/**
+ * Documents are addressed by a URL-safe id.
+ *
+ * The pattern itself lives in its own module so the pagination cursor can validate the id it
+ * carries without importing this file. See documentIdPattern.ts.
+ */
+const DOCUMENT_ID_PATTERN = SHARED_DOCUMENT_ID_PATTERN;
 
 /**
  * Hard ceiling on request body size.
@@ -110,7 +131,15 @@ const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
  */
 const MAX_BODY_BYTES = 1_000_000;
 
-/** Documents a single client may create before being rejected. */
+/**
+ * Documents a single caller may create before being rejected.
+ *
+ * Deliberately NOT in {@link Limits}: this one is keyed to the CALLER rather than to the
+ * server, and it is a sliding window over a list of timestamps rather than a token bucket. 60
+ * events per hour is a counting problem, and a bucket smooths away the very thing being
+ * counted. The per-connection and per-document limits are different shapes of problem and are
+ * configured together in limits.ts.
+ */
 const MAX_CREATE_PER_HOUR = 60;
 
 /**
@@ -139,6 +168,7 @@ export class ApiServer {
   readonly #server: Server;
   /** Built client to serve, when one was provided. Undefined disables static serving. */
   readonly #static: StaticOptions | undefined;
+  readonly #limits: Limits;
   /** Registered upgrade routes, checked before any request is handled. */
   readonly #upgrades: UpgradeHandler[] = [];
   #createTimestamps: number[] = [];
@@ -149,6 +179,7 @@ export class ApiServer {
     this.#port = options.port ?? 3001;
     this.#onListen = options.onListen;
     this.#auth = options.auth ?? new OpenAuthenticator();
+    this.#limits = options.limits ?? DEFAULT_LIMITS;
     this.#static = options.static;
     this.#obs = observability(options.observability);
     declareMetrics(this.#obs.metrics);
@@ -218,10 +249,32 @@ export class ApiServer {
     return bound;
   }
 
+  /**
+   * How long an HTTP connection is given to end before its socket is destroyed.
+   *
+   * Not a keep-alive problem: Node has closed idle keep-alive sockets on `server.close()` since
+   * v19, and that was measured rather than assumed. What does block is a connection that never sent
+   * a request at all - Chromium's speculative preconnect does exactly that - which is not idle by
+   * Node's definition, so it is waited on forever. See src/server/apiClose.test.ts.
+   *
+   * Five seconds sits well inside the 10 seconds Docker allows before SIGKILL, so the rest of the
+   * shutdown, including db.close(), still gets to run.
+   */
+  static readonly CLOSE_GRACE_MS = 5_000;
+
   async close(): Promise<void> {
     // Drain in-flight requests before closing, otherwise a test can finish with
     // a half-written response and a hanging socket.
-    await new Promise<void>((resolve, reject) => {
+    //
+    // The bound is the point. `server.close(callback)` does not fire until every connection has
+    // ended, and a peer that never ends one holds this open indefinitely - which blocks every
+    // step after it, including `db.close()`. Measured on CI: the server logged `shutting down`
+    // and was still alive 45 seconds later.
+    //
+    // Being patient first and forceful second, so a well-behaved client still gets a clean
+    // shutdown and only a socket that will not finish is destroyed. Any request genuinely in
+    // flight has already had 5 seconds; anything slower than that is not going to arrive.
+    const closed = new Promise<void>((resolve, reject) => {
       this.#server.close((error) => {
         if (error) {
           reject(error);
@@ -230,6 +283,25 @@ export class ApiServer {
         }
       });
     });
+
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const grace = new Promise<void>((resolve) => {
+      graceTimer = setTimeout(() => {
+        // Destroys idle keep-alive sockets and sockets that never sent a request. Already-closed
+        // connections are not in the set, so this cannot throw.
+        this.#server.closeAllConnections();
+        resolve();
+      }, ApiServer.CLOSE_GRACE_MS);
+
+      graceTimer.unref?.();
+    });
+
+    await Promise.race([closed, grace]);
+
+    if (graceTimer !== undefined) {
+      clearTimeout(graceTimer);
+    }
   }
 
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -321,8 +393,7 @@ export class ApiServer {
         // Scoped to the caller. The global list would disclose every title in the
         // database to anyone who asked, which is a leak created by adding
         // authentication rather than closed by it.
-        const documents = await this.#db.listDocumentsFor(identity.subject, 50);
-        sendJson(res, 200, { documents });
+        await this.#listDocuments(req, res, identity.subject, url);
         return;
       }
 
@@ -693,6 +764,62 @@ export class ApiServer {
     sendJson(res, 200, { claimed: true, documentId: id });
   }
 
+  /**
+   * One page of the caller's documents.
+   *
+   * `limit` (1..100, default 50) and `cursor` are optional, and the response shape is unchanged for
+   * a client that sends neither: `documents` is still an array of the same records. `nextCursor` is
+   * added alongside it and is absent on the last page, so an old client reading `.documents` is
+   * unaffected and a new one can page.
+   *
+   * Both parameters are refused rather than clamped when out of range. A client that asked for 500
+   * and silently received 100 cannot tell that its pagination is wrong, and would carry on
+   * believing it had seen everything.
+   */
+  async #listDocuments(
+    req: IncomingMessage,
+    res: ServerResponse,
+    subject: string,
+    url: URL,
+  ): Promise<void> {
+    const requestedLimit = url.searchParams.get('limit');
+    const limit = parsePageSize(requestedLimit);
+
+    if (limit === null) {
+      sendError(
+        res,
+        400,
+        'INVALID_LIMIT',
+        `limit must be an integer between ${String(MIN_PAGE_SIZE)} and ${String(MAX_PAGE_SIZE)}.`,
+      );
+      return;
+    }
+
+    const rawCursor = url.searchParams.get('cursor');
+    // Absent means "start at the beginning". Present but unparseable is an error, because a client
+    // holding a cursor this server cannot read has a bug or a stale value, and quietly treating it
+    // as page one would show the user a list they have already seen with no indication of it.
+    const decoded = rawCursor === null ? null : decodeDocumentCursor(rawCursor);
+
+    if (rawCursor !== null && decoded === null) {
+      sendError(res, 400, 'INVALID_CURSOR', 'cursor is not a cursor this server issued.');
+      return;
+    }
+
+    const cursor = decoded ?? undefined;
+
+    const page = await this.#db.listDocumentsFor(subject, limit, cursor);
+
+    // `nextCursor` is omitted rather than null on the last page, so a client can test for it.
+    if (page.nextCursor === null) {
+      sendJson(res, 200, { documents: page.documents });
+    } else {
+      sendJson(res, 200, { documents: page.documents, nextCursor: page.nextCursor });
+    }
+
+    void req;
+  }
+
   async #createDocument(req: IncomingMessage, res: ServerResponse, subject: string): Promise<void> {
     if (!this.#allowCreate()) {
       sendError(res, 429, 'RATE_LIMITED', 'Too many documents created. Try again later.');
@@ -716,6 +843,16 @@ export class ApiServer {
 
     if (!DOCUMENT_ID_PATTERN.test(id)) {
       sendError(res, 400, 'INVALID_ID', 'Document id contains unsupported characters.');
+      return;
+    }
+
+    if (title !== undefined && titleTooLong(title, this.#limits.maxTitleLength)) {
+      sendError(
+        res,
+        400,
+        'TITLE_TOO_LONG',
+        `Title exceeds ${this.#limits.maxTitleLength} characters.`,
+      );
       return;
     }
 
@@ -788,6 +925,19 @@ export class ApiServer {
     }
 
     if (typeof payload['title'] === 'string') {
+      // Same limit as create, and for the same reason: a title is one column on one row, but it
+      // is also what a user sees in a document list, and the create route being bounded is no
+      // help if the rename route is not.
+      if (titleTooLong(payload['title'], this.#limits.maxTitleLength)) {
+        sendError(
+          res,
+          400,
+          'TITLE_TOO_LONG',
+          `Title exceeds ${this.#limits.maxTitleLength} characters.`,
+        );
+        return;
+      }
+
       const result = await this.#db.renameDocument(id, payload['title']);
 
       if (!result) {
@@ -855,13 +1005,13 @@ async function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
 /**
  * Write a JSON response.
  *
- * Synchronous by design â€” `res.end()` on an in-memory payload returns
+ * Synchronous by design Ã¢â‚¬â€ `res.end()` on an in-memory payload returns
  * immediately. Returning a promise anyway would let handlers `await` it and keep
  * one uniform shape, but it would also imply a real async boundary that does not
  * exist, which is how `async` functions with no `await` end up hiding errors.
  *
  * `charset=utf-8` is not optional. Without it, HTTP clients are free to guess the
- * encoding, and several guess Latin-1 â€” silently corrupting any non-ASCII
+ * encoding, and several guess Latin-1 Ã¢â‚¬â€ silently corrupting any non-ASCII
  * document text. Caught by the byte-level assertions in `e2e.test.ts`.
  */
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {

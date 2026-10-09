@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Operation } from '../../core/crdt/rga.js';
+import { generateDocumentKey } from '../../core/crypto/documentKey.js';
+import { MAX_OPS_PER_FRAME } from '../../shared/protocol.js';
 import {
   SyncTransport,
   type Baseline,
@@ -304,6 +306,27 @@ const sampleOps: Operation[] = [
   { type: 'insert', id: { site: 'a', clock: 1 }, origin: null, value: 'x' },
 ];
 
+/** Admit the current socket, as the relay's `welcome` does. */
+async function admit(socket: FakeSocket): Promise<void> {
+  socket.deliver({
+    type: 'welcome',
+    protocolVersion: 1,
+    site: 'server-site',
+    documentId: 'doc-1',
+    snapshot: [],
+    seq: 0,
+  });
+  await Promise.resolve();
+}
+
+/** Every `ops` frame sent on a socket, flattened. */
+function opsSentOn(socket: FakeSocket): unknown[] {
+  return socket
+    .parsedSent()
+    .filter((f) => f['type'] === 'ops')
+    .flatMap((f) => (f['ops'] as unknown[] | undefined) ?? []);
+}
+
 describe('SyncTransport', () => {
   beforeEach(() => {
     FakeSocket.reset();
@@ -564,11 +587,107 @@ describe('SyncTransport', () => {
       expect(sent.map((op) => op.id.clock)).toEqual([1, 2, 3]);
     });
 
-    it('drops the oldest operations past the queue cap', () => {
-      // Built directly rather than via the harness so the queue cap can be set.
+    /**
+     * Typed text is a chain: each character is anchored to the one before it. The
+     * outbox used to keep only its newest 5,000 operations, which left every survivor
+     * anchored to an operation the relay never received. The relay then accepted the
+     * batch, could not place it, and peers saw an empty document while this client
+     * reported itself synced. Hence these tests are about the head of the queue, not
+     * its size.
+     */
+    const chain = (count: number): Extract<Operation, { type: 'insert' }>[] =>
+      Array.from({ length: count }, (_unused, index) => ({
+        type: 'insert' as const,
+        id: { site: 'a', clock: index + 1 },
+        origin: index === 0 ? null : { site: 'a', clock: index },
+        value: 'x',
+      }));
+
+    const sentClocks = (socket: FakeSocket): number[][] =>
+      socket
+        .parsedSent()
+        .filter((m) => m['type'] === 'ops')
+        .map((m) => (m['ops'] as { id: { clock: number } }[]).map((op) => op.id.clock));
+
+    it('never drops queued operations, however many are queued', () => {
+      const h = harness();
+
+      h.transport.send(chain(12_000));
+
+      expect(h.transport.queuedOperationCount).toBe(12_000);
+      expect(h.transport.queuedOperations[0]).toEqual(chain(1)[0]);
+    });
+
+    it('sends a large backlog in bounded frames, in order, starting from the first operation', async () => {
+      const h = harness();
+      h.transport.send(chain(2_500));
+
+      h.transport.connect();
+      FakeSocket.last().admit();
+      await Promise.resolve();
+
+      const frames = sentClocks(FakeSocket.last());
+
+      expect(frames.map((clocks) => clocks.length)).toEqual([
+        MAX_OPS_PER_FRAME,
+        MAX_OPS_PER_FRAME,
+        500,
+      ]);
+      expect(frames.flat()).toEqual(chain(2_500).map((op) => op.id.clock));
+      expect(h.transport.queuedOperationCount).toBe(0);
+
+      // CHANGED BY T4, and the change is the point.
+      //
+      // This used to assert `synced` here, on the strength of the frames having been
+      // written. That was the bug: `send()` returning says the local socket accepted bytes,
+      // and nothing more. The indicator now reports `pending` until the server acknowledges
+      // each frame, and the loop below delivers those acknowledgements - so the test covers
+      // both halves of the new contract rather than quietly one of them.
+      expect(h.pending.at(-1)).toEqual({ state: 'pending', count: 2_500 });
+
+      for (const frame of FakeSocket.last().parsedSent()) {
+        if (frame['type'] === 'ops' && typeof frame['batchId'] === 'string') {
+          FakeSocket.last().deliver({ type: 'ack', batchId: frame['batchId'] });
+        }
+      }
+
+      expect(h.pending.at(-1)).toEqual({ state: 'synced', count: 0 });
+    });
+
+    it('sends a single paste larger than the frame size without losing its head', async () => {
+      const h = harness();
+      h.transport.connect();
+      FakeSocket.last().admit();
+      await Promise.resolve();
+
+      h.transport.send(chain(6_000));
+
+      const frames = sentClocks(FakeSocket.last());
+
+      expect(frames.flat()).toHaveLength(6_000);
+      expect(frames[0]?.[0]).toBe(1);
+      expect(Math.max(...frames.map((clocks) => clocks.length))).toBeLessThanOrEqual(
+        MAX_OPS_PER_FRAME,
+      );
+    });
+
+    /**
+     * A transport that encrypts, plus the socket IT created. Taken from the factory
+     * rather than `FakeSocket.last()`, so a socket left over from another test cannot be
+     * mistaken for this one. Real timers: encryption completes on the real event loop,
+     * and polling for it under fake timers would advance the transport's own timers.
+     */
+    const encryptedTransport = async (): Promise<{
+      transport: SyncTransport;
+      socket: () => FakeSocket;
+    }> => {
+      vi.useRealTimers();
+      FakeSocket.reset();
+      let created: FakeSocket | null = null;
       const transport = new SyncTransport({
         documentId: 'doc-1',
         url: 'ws://x',
+        key: await generateDocumentKey(),
         handlers: {
           onOps: () => undefined,
           onBaseline: () => undefined,
@@ -578,17 +697,62 @@ describe('SyncTransport', () => {
           onError: () => undefined,
           onStateChange: () => undefined,
         },
-        socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
-        maxQueuedOps: 3,
+        socketFactory: (url) => {
+          created = new FakeSocket(url);
+          return created as unknown as WebSocket;
+        },
+      });
+      return {
+        transport,
+        socket: () => {
+          if (created === null) {
+            throw new Error('the transport has not created a socket');
+          }
+          return created;
+        },
+      };
+    };
+
+    it('sends an encrypted backlog in bounded frames, in order', async () => {
+      const { transport, socket } = await encryptedTransport();
+      transport.send(chain(2_500));
+
+      transport.connect();
+      socket().admit();
+
+      await vi.waitFor(() => {
+        expect(transport.queuedOperationCount).toBe(0);
       });
 
-      for (let clock = 1; clock <= 6; clock += 1) {
-        transport.send([{ type: 'insert', id: { site: 'a', clock }, origin: null, value: 'x' }]);
-      }
+      const frames = socket()
+        .parsedSent()
+        .filter((m) => m['type'] === 'ops-enc')
+        .map((m) => (m['frames'] as unknown[]).length);
 
-      // Bounded, not unbounded. An unbounded queue is a memory leak waiting for
-      // a user who edits for an hour on a train.
-      expect(transport.queuedOperationCount).toBe(3);
+      expect(frames).toEqual([MAX_OPS_PER_FRAME, MAX_OPS_PER_FRAME, 500]);
+      transport.dispose();
+    });
+
+    it('keeps an encrypted batch queued when the socket cannot take it', async () => {
+      const { transport, socket } = await encryptedTransport();
+
+      transport.connect();
+      socket().admit();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // The socket stops being writable before the batch is sent, which is what a
+      // dropped connection looks like from inside the transport.
+      socket().readyState = 3;
+      transport.send(chain(5));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(
+        socket()
+          .parsedSent()
+          .filter((m) => m['type'] === 'ops-enc'),
+      ).toHaveLength(0);
+      expect(transport.queuedOperationCount).toBe(5);
+      transport.dispose();
     });
 
     it('ignores an empty send', () => {
@@ -731,6 +895,137 @@ describe('SyncTransport', () => {
       vi.restoreAllMocks();
     });
 
+    it('backs off after a RATE_LIMITED refusal rather than spinning', () => {
+      // ---------------------------------------------------------------------------
+      // WHY THIS TEST EXISTS
+      // ---------------------------------------------------------------------------
+      // The server answers an over-rate connection with an `error` frame carrying code
+      // RATE_LIMITED, then closes with 1008. Both halves of that are a contract, and the client
+      // is the only party that can break it:
+      //
+      //   - If RATE_LIMITED were treated as PERMANENT, the client would give up and the user's
+      //     queued edits would sit in memory until the tab closed. The document is full of
+      //     nothing; a slower connection works.
+      //   - If the close were treated as an ordinary transient drop with a flat retry, the
+      //     client would reconnect, be refused again, and loop at the backoff rate - which for
+      //     a server that just refused it is the worst possible response.
+      //
+      // So the assertion is on both: the refusal is reported, and the reconnect still happens
+      // with GROWING delay.
+      //
+      // Jitter is pinned at 1.0 so the delay is exactly half the exponential value and the
+      // measurement is not flaky; two adjacent attempts can otherwise jitter to nearly the
+      // same delay.
+      vi.spyOn(Math, 'random').mockReturnValue(1);
+
+      const h = harness({ baseRetryMs: 100, maxRetryMs: 100_000 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      const delays: number[] = [];
+
+      for (let round = 0; round < 4; round += 1) {
+        const socket = FakeSocket.last();
+
+        // Exactly what the server sends before closing: the error frame, then the close.
+        socket.deliver({
+          type: 'error',
+          code: 'RATE_LIMITED',
+          message: 'Over 5000 operations/second. Reconnect to continue.',
+        });
+        socket.triggerClose();
+
+        let elapsed = 0;
+
+        while (FakeSocket.instances.length === round + 1) {
+          vi.advanceTimersByTime(10);
+          elapsed += 10;
+          if (elapsed > 200_000) break;
+        }
+
+        delays.push(elapsed);
+      }
+
+      // The user is told, every time, rather than left watching "Offline" with no explanation.
+      const rateLimits = h.errors.filter((e) => e.code === 'RATE_LIMITED');
+      expect(rateLimits.length).toBeGreaterThan(0);
+
+      // Not a tight loop: the first retry is not immediate, and the delay grows.
+      expect(delays[0] ?? 0).toBeGreaterThan(0);
+
+      for (let i = 1; i < delays.length; i += 1) {
+        expect(delays[i] ?? 0).toBeGreaterThan(delays[i - 1] ?? 0);
+      }
+
+      vi.restoreAllMocks();
+    });
+
+    it('does NOT give up permanently on RATE_LIMITED', () => {
+      // The complement of the test above, and the one that would catch the mistake of adding
+      // RATE_LIMITED to PERMANENT_ERROR_CODES. That list exists to stop a client hammering a
+      // server that will never answer; a rate limit is precisely the case where the server
+      // WILL answer, just not immediately.
+      const h = harness({ baseRetryMs: 100, maxRetryMs: 100_000 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      FakeSocket.last().deliver({
+        type: 'error',
+        code: 'RATE_LIMITED',
+        message: 'Reconnect to continue.',
+      });
+      FakeSocket.last().triggerClose();
+
+      expect(h.transport.state).not.toBe('closed-permanently');
+
+      vi.advanceTimersByTime(200);
+
+      // A second socket exists: the client tried again rather than reporting a dead end.
+      expect(FakeSocket.instances.length).toBeGreaterThan(1);
+    });
+
+    it('keeps a full document recoverable, rather than giving up on it', () => {
+      // The other quota code, and the one where the obvious answer is wrong.
+      //
+      // DOCUMENT_TOO_LARGE says the document cannot GROW. It does not say the connection is
+      // dead, and the server does not close the socket when it refuses a write. So the client
+      // stays connected, the user is told, and the only way forward - deleting from the
+      // document - still needs a live connection.
+      //
+      // Treating it as permanent would be a trap that looks correct: the refusal genuinely
+      // cannot be retried away, so "do not retry" seems right. But the client cannot tell
+      // "this document is full" from "this document is full AND I have disconnected", and
+      // answering the second by refusing to reconnect is how a user who filled a document ends
+      // up permanently unable to empty it.
+      //
+      // So: reported loudly, reconnected with backoff. Same treatment as RATE_LIMITED, for the
+      // same reason - in both cases the next connection is not futile, it is just not immediate.
+      const h = harness({ baseRetryMs: 100, maxRetryMs: 100_000 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      FakeSocket.last().deliver({
+        type: 'error',
+        code: 'DOCUMENT_TOO_LARGE',
+        message: 'This document is at its 1000000 character limit. Deleting from it still works.',
+      });
+
+      // The socket is NOT closed by this refusal; the client stays usable.
+      expect(FakeSocket.instances.length).toBe(1);
+      expect(h.errors.map((e) => e.code)).toContain('DOCUMENT_TOO_LARGE');
+
+      // And if the connection does drop afterwards, the client comes back - with backoff, so
+      // this is not a retry loop either.
+      vi.spyOn(Math, 'random').mockReturnValue(1);
+
+      FakeSocket.last().triggerClose();
+      vi.advanceTimersByTime(200);
+
+      expect(FakeSocket.instances.length).toBeGreaterThan(1);
+
+      vi.restoreAllMocks();
+    });
+
     it('applies jitter so clients do not return in lockstep', () => {
       // This is the thundering-herd guard. Verified by observing that repeated
       // identical failures produce differing first-retry timings.
@@ -849,6 +1144,247 @@ describe('SyncTransport', () => {
           .parsedSent()
           .some((m) => m['type'] === 'resync'),
       ).toBe(true);
+    });
+  });
+
+  /**
+   * T4 STEP 1: do writes survive a socket that dies after `send()`?
+   *
+   * ---------------------------------------------------------------------------
+   * THE SCENARIO, AND WHY IT IS THE INTERESTING ONE
+   * ---------------------------------------------------------------------------
+   * The window this tests is: the frame was written to a socket the OS still considered open,
+   * and then the connection died before the server processed it. Nothing here is exotic. It is
+   * a deploy, a laptop lid, a NAT timeout, a proxy that dropped the connection - every one of
+   * them closes a socket that already accepted bytes.
+   *
+   * Two properties make it survivable, and both are already in place for other reasons:
+   * server persistence is idempotent (`ON CONFLICT DO NOTHING` on the element key), so a
+   * duplicate frame is a no-op rather than a corruption; and the transport already refuses a
+   * `snapshot` baseline while the outbox is non-empty, so a reconnect cannot paper over a lost
+   * edit by replacing the document.
+   *
+   * So the only question is whether the operations are still QUEUED when the socket dies. If
+   * they are not, nothing resends them, the server never had them, and the peer converges on a
+   * document missing this user's edits - with the sender's indicator reading "Synced".
+   */
+  describe('a socket that dies after the write (T4)', () => {
+    it('RESENDS operations that were written but never acknowledged', async () => {
+      // The test that decides whether T4's hypothesis is true or false.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      const first = FakeSocket.last();
+
+      h.transport.send(sampleOps);
+
+      // Written, and immediately forgotten: the outbox is emptied on the strength of
+      // `send()` returning, with nothing from the server saying it arrived.
+      expect(opsSentOn(first)).toHaveLength(1);
+      expect(h.transport.queuedOperationCount).toBe(0);
+
+      // The connection dies before the server could have processed it. No server frame at all.
+      first.triggerClose();
+
+      // Reconnect, and complete the handshake again.
+      vi.advanceTimersByTime(500);
+
+      expect(FakeSocket.instances.length).toBeGreaterThan(1);
+
+      const second = FakeSocket.last();
+
+      second.triggerOpen();
+      await Promise.resolve();
+      await admit(second);
+
+      // The operations must be written again on the new connection.
+      expect(
+        opsSentOn(second),
+        'operations written to a dead socket were never resent, and the server never had them',
+      ).toHaveLength(1);
+    });
+
+    it('reports pending rather than synced while those operations are unacknowledged', async () => {
+      // The indicator is the only thing telling the user their edit is safe. A state machine
+      // that reads "synced" the instant `send()` returns is asserting something it does not
+      // know.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      h.transport.send(sampleOps);
+
+      // The outbox is empty, because the frame was written - but nothing has confirmed it.
+      expect(h.transport.queuedOperationCount).toBe(0);
+      expect(h.pending.at(-1)).toEqual({ state: 'pending', count: 1 });
+
+      // And it only reaches "synced" when the server says so.
+      const batchId = FakeSocket.last()
+        .parsedSent()
+        .find((f) => f['type'] === 'ops')?.['batchId'];
+
+      expect(typeof batchId).toBe('string');
+
+      FakeSocket.last().deliver({ type: 'ack', batchId: String(batchId) });
+
+      expect(h.pending.at(-1)).toEqual({ state: 'synced', count: 0 });
+    });
+
+    it('resends BOTH an unacknowledged batch and one that was never written', async () => {
+      // Two batches, then a death.
+      //
+      // The first was written to a socket that then died, so only an acknowledgement could say
+      // whether it landed. The second was never written at all. Both are unsent as far as the
+      // user is concerned, and both have to come back - which is why the expected count is two
+      // and not one.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      const first = FakeSocket.last();
+
+      h.transport.send(sampleOps);
+
+      // Force the socket to refuse the next write, which is what leaves the second batch
+      // queued rather than written.
+      first.readyState = 3;
+      h.transport.send(sampleOps);
+      expect(h.transport.queuedOperationCount).toBe(1);
+
+      first.triggerClose();
+      vi.advanceTimersByTime(500);
+
+      const second = FakeSocket.last();
+
+      second.triggerOpen();
+      await Promise.resolve();
+      await admit(second);
+
+      expect(h.transport.queuedOperationCount).toBe(0);
+      expect(opsSentOn(second)).toHaveLength(2);
+    });
+  });
+
+  /**
+   * The client half of liveness: giving up on a socket that never closes.
+   *
+   * A half-open connection fires no `error`, no `close`, and leaves `readyState` at OPEN, so
+   * every recovery path in this class - the reconnect, the in-flight replay, the offline state -
+   * waits for an event that never comes. These are the tests for the deadline that does not.
+   */
+  describe('a socket that never closes (T4 follow-up)', () => {
+    it('gives up on a server that has stopped sending anything', async () => {
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      await admit(FakeSocket.last());
+
+      const before = FakeSocket.instances.length;
+
+      // Nothing wrong with the socket as far as anyone can tell: no error, no close, still OPEN.
+      // Just silence, which is what a dropped-packets connection looks like.
+      vi.advanceTimersByTime(120_000);
+
+      expect(
+        FakeSocket.instances.length,
+        'the client never noticed a server that had gone quiet',
+      ).toBeGreaterThan(before);
+    });
+
+    it('does not give up while the server is still pinging', async () => {
+      // The other half. A watchdog that fired on a fixed timer rather than on silence would
+      // pass the test above and break every healthy connection.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      const before = FakeSocket.instances.length;
+
+      for (let round = 0; round < 20; round += 1) {
+        // Answer every ping, as a live server's client would.
+        FakeSocket.last().deliver({ type: 'ping', t: round + 1 });
+        FakeSocket.last().triggerOpen();
+        vi.advanceTimersByTime(10_000);
+      }
+
+      expect(FakeSocket.instances.length, 'a responsive server was declared dead').toBe(before);
+    });
+
+    it('answers a ping with a pong carrying the same token', () => {
+      const h = harness();
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      FakeSocket.last().deliver({ type: 'ping', t: 4321 });
+
+      const pong = FakeSocket.last()
+        .parsedSent()
+        .find((f) => f['type'] === 'pong');
+
+      expect(pong).toEqual({ type: 'pong', t: 4321 });
+    });
+
+    it('answers immediately, without waiting for a timer', () => {
+      // The reply must not depend on anything throttled, queued or slow: a backgrounded tab that
+      // answers pings late is a tab the server declares dead.
+      const h = harness();
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+
+      FakeSocket.last().deliver({ type: 'ping', t: 1 });
+
+      expect(FakeSocket.last().sent).toContain(JSON.stringify({ type: 'pong', t: 1 }));
+    });
+
+    it('declares itself capable of ping in hello', async () => {
+      // Without this the server never pings, and the whole mechanism is off.
+      const h = harness();
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+
+      const hello = FakeSocket.last()
+        .parsedSent()
+        .find((f) => f['type'] === 'hello');
+
+      expect(hello?.['capabilities']).toEqual(['ping']);
+    });
+
+    it('replays unacknowledged work after the watchdog fires', async () => {
+      // The point of noticing. Recovering the connection is only worth doing if the edits
+      // written to the dead socket come back with it.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      h.transport.send(sampleOps);
+
+      expect(opsSentOn(FakeSocket.last())).toHaveLength(1);
+
+      // Silence. No close, no error.
+      vi.advanceTimersByTime(120_000);
+
+      expect(FakeSocket.instances.length).toBeGreaterThan(1);
+
+      const second = FakeSocket.last();
+
+      second.triggerOpen();
+      await Promise.resolve();
+      await admit(second);
+
+      expect(opsSentOn(second)).toHaveLength(1);
     });
   });
 

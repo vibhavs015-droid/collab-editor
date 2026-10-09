@@ -325,12 +325,21 @@ describe('claimOwnership', () => {
   });
 });
 
+/**
+ * Visibility of the document list.
+ *
+ * These call sites read `.documents` off the result because T6 changed the return type from
+ * `DocumentRecord[]` to `{ documents, nextCursor }` so a page can carry the cursor for the next one.
+ * The assertions are unchanged - only the unwrapping is new - and the ordering guarantees these
+ * tests were written for still hold, because the cursor predicate is `(updated_at, id)` and the
+ * ORDER BY is the same pair.
+ */
 describe('listDocumentsFor', () => {
   it('returns owned documents', async () => {
     const id = nextId();
     await db.createDocument({ id, owner: 'alice' });
 
-    const mine = await db.listDocumentsFor('alice');
+    const mine = (await db.listDocumentsFor('alice')).documents;
 
     expect(mine.map((document) => document.id)).toContain(id);
   });
@@ -339,7 +348,7 @@ describe('listDocumentsFor', () => {
     const id = nextId();
     await db.createDocument({ id, owner: 'alice' });
 
-    const mine = await db.listDocumentsFor('mallory');
+    const mine = (await db.listDocumentsFor('mallory')).documents;
 
     expect(mine.map((document) => document.id)).not.toContain(id);
   });
@@ -349,7 +358,7 @@ describe('listDocumentsFor', () => {
     await db.createDocument({ id, owner: 'alice' });
     await db.grantAccess(id, 'bob', 'alice');
 
-    const mine = await db.listDocumentsFor('bob');
+    const mine = (await db.listDocumentsFor('bob')).documents;
 
     expect(mine.map((document) => document.id)).toContain(id);
   });
@@ -358,7 +367,7 @@ describe('listDocumentsFor', () => {
     const id = nextId();
     await db.createDocument({ id });
 
-    const mine = await db.listDocumentsFor('anyone');
+    const mine = (await db.listDocumentsFor('anyone')).documents;
 
     // Consistent with canAccess: reachable by everyone, so listed for everyone.
     expect(mine.map((document) => document.id)).toContain(id);
@@ -371,7 +380,7 @@ describe('listDocumentsFor', () => {
     // naive UNION would return the row twice.
     await db.grantAccess(id, 'alice', 'alice');
 
-    const mine = await db.listDocumentsFor('alice');
+    const mine = (await db.listDocumentsFor('alice')).documents;
     const matches = mine.filter((document) => document.id === id);
 
     expect(matches).toHaveLength(1);
@@ -387,14 +396,14 @@ describe('listDocumentsFor', () => {
       await db.createDocument({ id, owner: 'alice', title: 'same title' });
     }
 
-    const first = await db.listDocumentsFor('alice');
-    const second = await db.listDocumentsFor('alice');
+    const first = (await db.listDocumentsFor('alice')).documents;
+    const second = (await db.listDocumentsFor('alice')).documents;
 
     expect(first.map((document) => document.id)).toEqual(second.map((document) => document.id));
   });
 
   it('honours the limit', async () => {
-    const mine = await db.listDocumentsFor('alice', 1);
+    const mine = (await db.listDocumentsFor('alice', 1)).documents;
 
     expect(mine.length).toBeLessThanOrEqual(1);
   });
@@ -411,7 +420,7 @@ describe('listDocumentsFor', () => {
     const theirs = nextId();
     await db.createDocument({ id: theirs, owner: 'somebody-else' });
 
-    const listed = await db.listDocumentsFor(subject);
+    const listed = (await db.listDocumentsFor(subject)).documents;
     const listedIds = listed.map((document) => document.id);
 
     for (const id of mine) {

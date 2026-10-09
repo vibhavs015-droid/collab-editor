@@ -18,6 +18,21 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    /**
+     * Transformed modules are cached inside the repository, not in the OS temp directory.
+     *
+     * Observed twice on this machine: something outside the project - Storage Sense, or a
+     * scheduled cleanup - deletes `%TEMP%\<random>\ssr\` while a full suite is running, and
+     * every file not yet imported fails with
+     *
+     *     ENOENT: no such file or directory, open '...\ssr\<hash>'
+     *
+     * which looks exactly like forty simultaneous code failures and is not one. The path is
+     * random per run, so it cannot be pre-cleaned. Pointing the cache at `.tools/` makes the
+     * suite independent of whatever is managing the temp directory, and `.tools` is already
+     * gitignored and already skipped by the line-endings gate.
+     */
+    cache: { dir: '.tools/vitest-cache' },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],

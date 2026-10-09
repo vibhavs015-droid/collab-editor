@@ -1,304 +1,183 @@
 # Benchmarks
 
-Measured, not estimated. Every number below came from a run whose raw output is committed
-alongside it, and every run's method is stated so it can be repeated or disputed.
+Measured numbers, with the machine and the shape stated, so a reader can tell whether a change
+helped or whether the measurement moved.
 
-Reproduce with:
+Every figure here was produced by running the script named beside it. Nothing is estimated.
 
-```bash
-node scripts/load/run.mjs connect      --vus 50 --repeat 3
-node scripts/load/run.mjs edit         --vus 20 --duration 20s --repeat 3
-node scripts/load/run.mjs reconnect    --vus 10 --duration 15s --repeat 3
-node scripts/load/run.mjs divergence   --vus 25 --duration 20s --repeat 3
+---
+
+## Element resolution — BEFORE
+
+**Script:** `node --expose-gc --import tsx scripts/bench-replay.ts`
+**Machine:** Windows 11 build 26200, Node v24.16.0, x64
+**GC:** forced between samples via `--expose-gc`
+
+| operations | build  | replay      | `Replica.init` | adopt snapshot |
+| ---------- | ------ | ----------- | -------------- | -------------- |
+| 2,000      | 0.1 ms | 118.1 ms    | 118.1 ms       | 115.5 ms       |
+| 5,000      | 0.2 ms | 1,214.4 ms  | 1,557.9 ms     | 1,652.4 ms     |
+| 10,000     | 0.1 ms | 7,360.6 ms  | 6,932.3 ms     | 5,766.5 ms     |
+| 20,000     | 1.5 ms | 17,192.8 ms | 17,372.9 ms    | 17,676.3 ms    |
+
+Scaling from 2k to 20k — ten times the work:
+
+| stage          | factor | verdict            |
+| -------------- | ------ | ------------------ |
+| build          | 19.5×  | roughly linear     |
+| replay         | 145.6× | quadratic or worse |
+| `Replica.init` | 147.1× | quadratic or worse |
+| adopt          | 153.0× | quadratic or worse |
+
+### Against T5's targets
+
+| target                       | required       | measured  | verdict                  |
+| ---------------------------- | -------------- | --------- | ------------------------ |
+| `Replica.init` on 20,000 ops | under 1,500 ms | 17,373 ms | **NOT MET** — 11.6× over |
+| `Replica.init` on 10,000 ops | under 500 ms   | 6,932 ms  | **NOT MET** — 13.9× over |
+
+(Superseded by the AFTER table below. Both targets are now met.)
+
+### The shape is deliberately the worst case, and it matters
+
+The document is built as a single typing chain: every insert anchors to the insert before it.
+That is what a paste or a fast typist produces, and it is the _worst_ case for element
+resolution, because the anchor sits at the **end** of the element array and the lookup is a linear
+scan from the front.
+
+A document built from concurrent inserts at scattered positions resolves much faster, because the
+anchor is usually found early in the scan. Measuring only that shape would understate the cost real
+typing actually pays.
+
+**This is why these numbers are worse than the 5.9 s quoted for 20,000 operations in the review.**
+That figure was not accompanied by its shape, and this benchmark measures the pessimistic end of
+the range. The ratio between rows is the reliable part: roughly **quadratic**, which no choice of
+shape changes.
+
+### What the user experiences
+
+At 1,000 operations per 3–4 seconds end to end, a 6,000-character paste takes 11–24 seconds to
+appear on a second client. That is the same cost, felt.
+
+A separate open question, recorded here so it is not lost: `e2e/editor.spec.ts` scenario (d) — this
+same paste — is flaky. When it fails the peer holds a _prefix_ of the document (4,000 of 6,000
+characters observed), which is what slow catch-up looks like rather than data loss. No backpressure
+event and no disconnection occurred in any observed failure, and it passed 5 of 5 in isolation.
+Measured after the change below, the scenario converges in ~12 s against a 90 s budget, so **the
+quadratic cost is not what makes it flaky**, and that remains unexplained.
+
+---
+
+## Element resolution — AFTER
+
+**Change:** `RgaDocument.#indexOfElement` compares `site` and `clock` as fields instead of building
+`elementIdKey(id)` — the string `` `${site}@${clock}` `` — for the target and for every element it
+inspects.
+
+**Why that was the cost** (from `node --cpu-prof`, self time, 20,000 operations):
+
+| function          | self time | share |
+| ----------------- | --------- | ----- |
+| `#indexOfElement` | 255.6 ms  | 6.9%  |
+| `elementIdKey`    | 231.8 ms  | 6.2%  |
+
+Together 13% of sampled time before counting what the allocator did with 200 million short-lived
+strings. `#applyInsert` and `applyInAnyOrder` carried larger self times still, because V8 attributes
+inlined callee time to the caller — so the real share of the insert path was higher than these two
+lines suggest.
+
+| operations | build  | replay     | `Replica.init` | adopt snapshot |
+| ---------- | ------ | ---------- | -------------- | -------------- |
+| 2,000      | 0.1 ms | 6.6 ms     | 6.7 ms         | 6.4 ms         |
+| 5,000      | 0.2 ms | 44.4 ms    | 39.0 ms        | 38.7 ms        |
+| 10,000     | 0.1 ms | 261.2 ms   | 258.1 ms       | 232.9 ms       |
+| 20,000     | 0.3 ms | 1,173.6 ms | 1,543.9 ms     | 1,676.9 ms     |
+
+### Before → after, `Replica.init`
+
+| operations | before      | after     | speed-up |
+| ---------- | ----------- | --------- | -------- |
+| 2,000      | 118.1 ms    | ~6.7 ms   | 17.6×    |
+| 5,000      | 1,557.9 ms  | ~39 ms    | 40×      |
+| 10,000     | 6,932.3 ms  | ~255 ms   | 27×      |
+| 20,000     | 17,372.9 ms | ~1,440 ms | 12×      |
+
+### Against T5's targets
+
+Three consecutive runs of the 20,000 and 10,000 rows:
+
+| run | 20,000 ops | 10,000 ops |
+| --- | ---------- | ---------- |
+| 1   | 1,442 ms   | 262 ms     |
+| 2   | 1,441 ms   | 259 ms     |
+| 3   | 1,437 ms   | 249 ms     |
+
+| target                       | required       | measured  | verdict |
+| ---------------------------- | -------------- | --------- | ------- |
+| `Replica.init` on 20,000 ops | under 1,500 ms | ~1,440 ms | **MET** |
+| `Replica.init` on 10,000 ops | under 500 ms   | ~255 ms   | **MET** |
+
+The first run after the change measured 1,544 ms and the next three measured ~1,440 ms. Reporting
+the first would have said "3% over target" and pointed at a further optimisation; the spread says
+the first run was the outlier, and that the real figure sits comfortably inside the target. T5 says
+to stop when the target is met and not to chase more, so **step 4 — an id→index map — was not done.**
+
+### It is still quadratic, and that is now the whole remaining cost
+
+| stage          | scaling, 2k → 20k |
+| -------------- | ----------------- |
+| replay         | 176.9×            |
+| `Replica.init` | 231.6×            |
+| adopt          | 263.8×            |
+
+The algorithm is unchanged in shape: `#indexOfElement` is still a linear scan. What changed is that
+each step of the scan no longer allocates. The remaining quadratic term is the scan itself.
+
+Making it linear means not asking for an _index_ at all. `#applyInsert` needs the position of its
+anchor and then walks forward over greater-id siblings; a linked list would start at the anchor in
+O(1) and walk only the siblings it must skip, which for ordinary typing is none. That is the
+correct fix and it is a rewrite of the CRDT's core data structure, not an optimisation of it — a
+different piece of work, with a real risk of subtle divergence, for a target that is already met.
+
+### What the user experiences now — measured, and less dramatic than expected
+
+The 6,000-character paste in `e2e/editor.spec.ts` scenario (d) exercises the same path in a real
+browser, over the wire, between two replicas. Two runs after the change:
+
+|                                | before                     | after          |
+| ------------------------------ | -------------------------- | -------------- |
+| paste scenario (d), end to end | 11–24 s (recorded earlier) | 12.2 s, 12.5 s |
+
+**So at 6,000 operations this change bought very little**, and the honest reading is that 6,000 was
+already small enough that the quadratic term was not yet dominant. The 12–27× wins are at 10,000
+and 20,000 operations, which is where a large document actually lives.
+
+### This does not explain the flaky paste test
+
+It is tempting to conclude the fix removed the flake. It does not, and the arithmetic says so: the
+scenario converges in ~12 s against a 90 s budget, so the budget was never tight, before or after.
+The flake remains unexplained. Its observed shape - the peer holding a _prefix_ of the document,
+with no backpressure event and no disconnection - is consistent with a slow machine rather than with
+this cost, and it passed 5 of 5 in isolation.
+
+So: a real and worthwhile speed-up, and a separate still-open question. They are not the same
+finding, and merging them would have made the docs confidently wrong.
+
+---
+
+## How to reproduce
+
+```sh
+npm run build          # not required by the script, but keeps dist/ honest
+node --expose-gc --import tsx scripts/bench-replay.ts
 ```
 
-Raw output for each run is in [`benchmarks/`](./benchmarks/).
-
----
-
-## Why every scenario runs three times
-
-The first version of this file reported one run per scenario. Running each scenario three
-times instead, on the same machine in the same session, produced this:
-
-| Metric                   | Single run | Three runs | Spread    |
-| ------------------------ | ---------- | ---------- | --------- |
-| `connect` handshake p95  | 212 ms     | 245 ms     | **±3%**   |
-| `reconnect` catch-up p95 | 31.1 ms    | 25.3 ms    | **±22%**  |
-| `edit` send rate         | 1,411/s    | 1,282/s    | **±19%**  |
-| `edit` fan-out rate      | 17,876/s   | 5,214/s    | **±120%** |
-
-Latency percentiles are stable. Throughput is not — and the fan-out figure moved by more
-than a factor of two between runs.
-
-So the rule here is: **never quote one run.** Every table below reports the **median of
-three runs with the observed min–max range**, and the range is part of the claim, not
-noise to be hidden. A figure with no range attached is not a measurement; it is a story
-about one afternoon.
-
-The `edit` fan-out spread is worth understanding rather than shrugging at. Fan-out is
-`operations × (clients − 1)`, so it depends on how many clients happen to be connected at
-the same moment during a 20-second window. k6 starts and stops sessions as iterations
-complete; if a run happens to hold 20 clients concurrently it broadcasts ~12× more
-operations than a run whose clients stagger. That is a property of the workload, not a bug
-in the relay, and it is why fan-out is reported as a ratio range rather than a headline
-number.
-
----
-
-## Read this before the numbers
-
-**These are not production-representative throughput figures, and presenting them as such
-would be dishonest.** Four specific reasons:
-
-1. **The database is PGlite**, an in-process WASM build of PostgreSQL running on the same
-   thread as the server. There is no network hop to a separate database, and no connection
-   pool. Real deployments use a networked Postgres or Supabase, which changes both latency
-   and the cost of a write by an order of magnitude.
-2. **One server process, one Node thread.** The relay and the CRDT share an event loop with
-   the database. Nothing here measures horizontal scaling, and the single-process design
-   (ADR-0007) means there is no fan-out across instances to measure yet.
-3. **The machine is shared.** A laptop also running a browser, several chat clients and a
-   media player. The runs below were taken with roughly 3 GB of 16 GB free. During an
-   earlier attempt the machine had 700 MB free and the server could not start at all. These
-   numbers are not corrected for contention and should not be treated as a ceiling.
-4. **No network latency between client and server.** Both run on loopback. A real
-   deployment adds round-trip time to every operation, and websocket fan-out cost changes
-   character entirely at 50 ms RTT.
-
-What these numbers _are_ good for: showing the relay, the CRDT and the compaction path
-behave correctly under concurrency, and giving a baseline to detect regressions against.
-
----
-
-## Environment
-
-|          |                                          |
-| -------- | ---------------------------------------- |
-| CPU      | Intel Core i5-12500H, 16 logical cores   |
-| RAM      | 15.6 GB (shared with other applications) |
-| OS       | Windows 11 Home                          |
-| Node     | v24.16.0                                 |
-| k6       | v2.3.0                                   |
-| Database | PGlite 0.5.8, in-process WASM            |
-| Runs     | 3 per scenario, 12 total                 |
-
-**Authentication was required for every run.** The harness refuses to measure a server that
-reports `"auth": "open"`, and k6 mints real HS256 tokens with
-[`scripts/load/lib/auth.js`](../scripts/load/lib/auth.js). A benchmark against an
-unauthenticated server measures a different system than the deployed one.
-
-**Server-side counters are cumulative** across the three runs, because one server process
-serves all of them. Figures quoted as a single run's value are the difference between the
-third run's snapshot and the second's.
-
----
-
-## Results
-
-### 1. `connect` — handshake under a connection ramp
-
-50 concurrent connections ramping over 20 s, three times.
-
-| Metric               | Median     | Range       |
-| -------------------- | ---------- | ----------- |
-| Handshakes completed | 3,732      | 3,532–3,778 |
-| Throughput           | 187/s      | —           |
-| Duration avg         | 131 ms     | —           |
-| Duration p50         | 133 ms     | —           |
-| Duration p95         | **245 ms** | 237–252 ms  |
-| Refusals             | **0**      | —           |
-| Failed checks        | **0**      | —           |
-
-In the final run the server independently recorded `ws_connections_opened_total 3778` — the
-identical number the client counted. That cross-check is the reason to trust any of this: a
-load generator that merely believed its own handshakes succeeded would agree with itself
-just as happily.
-
-Handshake latency includes the server's authorisation check, because that check _is_ the
-handshake. Timing from TCP open instead would report the connection setup and call it a
-result.
-
-The p95 spread of 15 ms across three runs of a 245 ms measurement is the best evidence in
-this file that the latency figures mean something.
-
-### 2. `edit` — sustained concurrent typing
-
-20 clients in one room, each typing in bursts. Every operation one client sends is fanned
-out to the others, so this measures relay fan-out, not just throughput.
-
-| Metric                        | Median                    | Range              |
-| ----------------------------- | ------------------------- | ------------------ |
-| Sessions                      | 307                       | 239–356            |
-| Operations sent               | **38,465**                | 29,975–44,605      |
-| Send rate                     | **1,282 ops/s**           | 999–1,485 ops/s    |
-| Operations received (fan-out) | 156,470                   | 93,795–602,992     |
-| Fan-out rate                  | 5,214 ops/s               | 3,126–20,081 ops/s |
-| Deletes                       | 7,827 (20% of operations) | —                  |
-| Unplaced operations           | **0**                     | —                  |
-| Malformed frames              | **0**                     | —                  |
-| Failed checks                 | **0**                     | —                  |
-
-Compaction in the final run, under real concurrent load:
-
-|                                                  |        |
-| ------------------------------------------------ | ------ |
-| Operations pruned                                | 6,879  |
-| Refused: **snapshot would drop live operations** | **12** |
-| Refused: log too small                           | 4      |
-
-Catch-up during that run: 308 clients replayed the log, mean 19.1 ms.
-
-That last row is ADR-0011 working. Twelve times the server wanted to compact and refused,
-because connected peers had not yet caught up and pruning below them would have forced a
-full-baseline resync. The floor held under load.
-
-### 3. `reconnect` — churn
-
-10 clients that connect, write, vanish abruptly, wait a second, then return declaring a zero
-cursor — the worst case a real client can present.
-
-| Metric        | Median         | Range        |
-| ------------- | -------------- | ------------ |
-| Reconnects    | **150**        | 149–150      |
-| Readmitted    | **149 (100%)** | —            |
-| Refusals      | **0**          | —            |
-| Catch-up avg  | 10.2 ms        | —            |
-| Catch-up p50  | 4 ms           | —            |
-| Catch-up p95  | **25.3 ms**    | 22.0–35.6 ms |
-| Failed checks | **0**          | —            |
-
-A client that cannot get back in after a blip is a data-loss bug wearing a latency costume,
-so this scenario asserts a 100% readmission rate rather than reporting one as a percentage.
-
-Reconnects are 150, 149 and 150 — deterministic, because the scenario dictates them
-(10 VUs × 15 s, one reconnect per second) rather than letting load decide. That
-determinism is the point: a benchmark whose own schedule drifts is measuring its scheduler.
-
-### 4. `divergence` — correctness under contention
-
-25 clients, 30% deletes, every client deleting elements it has _observed from other
-clients_. That is what produces genuine ordering conflicts rather than each client tidying
-up after itself.
-
-| Metric                                            | Median          | Range             |
-| ------------------------------------------------- | --------------- | ----------------- |
-| Sessions                                          | 216             | 175–384           |
-| Operations sent                                   | **43,360**      | 35,200–76,870     |
-| Send rate                                         | **1,398 ops/s** | 1,135–2,477 ops/s |
-| Deletes                                           | 10,491 (30%)    | —                 |
-| **Unplaced operations**                           | **0**           | —                 |
-| Malformed frames                                  | **0**           | —                 |
-| Highest element clock observed by any client, p95 | 200             | —                 |
-| Failed checks                                     | **0**           | —                 |
-
-`collab_operations_unplaced_total` is the number this whole file exists for. An operation
-that cannot be placed is an operation some peer is still waiting for; if it never arrives
-that peer stays silently behind. A latency benchmark reports success while documents
-quietly diverge underneath it. This one cannot.
-
-**But k6 cannot verify convergence, and that is deliberate.**
-
-k6 runs on its own JavaScript runtime and cannot import this package's TypeScript. Checking
-convergence inside k6 would mean writing a second RGA in JavaScript — a second, separately
-wrong implementation of the algorithm under test, disagreeing for reasons that have nothing
-to do with the real CRDT. That mistake has been avoided throughout this project, including
-in one test that hand-derived CRDT ordering and was wrong.
-
-So the work is split:
-
-- `divergence.js` generates contention and reads the server's verdict.
-- [`loadConvergence.test.ts`](../src/server/loadConvergence.test.ts) verifies convergence
-  using the **real** `Replica` class, over a real relay, with real authorisation.
-
-### 5. Convergence, verified properly
-
-24 replicas, each inserting and deleting simultaneously for 60 rounds, every operation
-travelling through authorisation, the relay, the broadcast path, the durable log and the
-store's validation.
-
-| Metric                 | Value            |
-| ---------------------- | ---------------- |
-| Replicas contending    | **24**           |
-| Rounds each            | 60               |
-| Replicas that diverged | **0**            |
-| Invariant violations   | **0**            |
-| Final document length  | > 100 characters |
-
-Plus an order-independence check: the same 200-operation set applied in four deterministic
-shuffles produced one identical document.
-
-This is the claim that matters. The seeded fuzzer proves convergence for random operation
-sets; this proves it for operations that actually crossed every stage that could drop or
-reorder them.
-
----
-
-## What is not measured
-
-Stated rather than left to be discovered:
-
-- **Database performance.** PGlite in-process, no network hop. See above.
-- **Horizontal scaling.** One process, one thread. The single-process design means there is
-  nothing to scale out yet; that is Phase 6 work.
-- **Network conditions.** Loopback only. No packet loss, no latency, no reordering.
-- **Large documents.** Every run starts from an empty document. A 200,000-character document
-  would exercise the RGA's tree structure, which short documents never touch.
-- **Compaction at steady state.** Compaction runs on a write counter, so these runs
-  exercised it opportunistically. A long soak would show whether the log stays bounded over
-  hours rather than seconds.
-- **Client-side rendering.** The load suite measures the server. CodeMirror's cost per
-  keystroke is not in any of these numbers.
-- **Slow or hostile networks.** Jittered backoff (ADR-0008) is unit-tested against a fake
-  clock. It has never been observed against a real one losing packets.
-
----
-
-## Reproducing, and the traps
-
-`scripts/load/README.md` documents the k6-specific pitfalls found while building this
-suite. They are recorded because each one produced a **plausible, wrong benchmark** rather
-than an obvious failure:
-
-- k6's `sleep` takes **seconds**, so `sleep(1000)` is a thousand seconds and a teardown that
-  used it timed out looking like a measured failure.
-- `WebSocket.open` no longer exists in k6 v2; the export is a bare `connect`.
-- `k6/ws` sockets have no `readyState`, so a `readyState === 1` guard silently dropped every
-  operation and the run reported one burst per client.
-- Timers registered inside a k6 websocket callback do not fire, and `sleep()` inside one
-  stops after a single iteration. Bursts are driven by incoming frames instead.
-- **`K6_*` is k6's configuration namespace.** A custom `K6_DURATION` silently overrode the
-  scenario's own duration and produced a run of the wrong length.
-- `connect()` blocks for the socket's lifetime, so any scenario that does not close
-  explicitly hangs its VU, and everything recorded after the call records nothing.
-
-### The harness refuses to report a number it cannot justify
-
-Three checks run after every scenario, and each exists because its absence produced a clean
-exit and a meaningless number:
-
-1. **Samples were recorded.** A k6 script whose default function throws on every iteration
-   exits 0, because thresholds on an absent metric are silently ignored.
-2. **Iterations completed.** `setup()` runs its own checks, and those alone were enough to
-   satisfy the first guard while every scenario iteration hung.
-3. **Every expected artifact exists.** Added after restructuring the harness for `--repeat`
-   silently dropped the server-metrics write. All four runs still printed
-   `[load] k6 exit code 0` and wrote a result JSON that referenced a file which was never
-   created. A run that reports success while losing its own evidence is worse than one that
-   fails, because the documentation goes on citing the missing file.
-
-### Two bugs this suite found in the product
-
-The load suite is not only a measurement tool. Twice it has found real defects that unit
-tests missed:
-
-- **`grantAccess` reported a repeated grant as a failure.** The database returned a boolean,
-  and `ON CONFLICT DO NOTHING` returns no row, so a grant that already existed looked
-  exactly like a grant that was refused. The API mapped both to 400. Running `setup()`
-  against a warm database — which `--repeat` does — re-granted access that was already
-  there and failed a check. A client retrying a grant because it never saw the response hit
-  the identical case and was told its successful request was malformed. Now a
-  [`GrantResult`](../../src/server/db.ts) union distinguishes `granted`, `already-granted`,
-  `no-document`, `invalid-subject` and `not-owner`, and the endpoint is idempotent.
-- **Compaction refusals were invisible.** Nothing asserted the stability floor held, so the
-  metric that matters most under load was only ever read by eye.
+`--expose-gc` is what makes the numbers mean anything: without it, garbage collection from the
+previous sample lands inside the next one. The script prints `NOT AVAILABLE` in its header if the
+flag is missing, so a run without it cannot be mistaken for a clean one.
+
+### Reading the scaling table
+
+The ratio between the smallest and largest row is the finding. Any single absolute number can be
+moved by a faster machine or a quieter one; a ratio cannot, and a factor near `n²` for `n` = 10
+means the algorithm is quadratic.

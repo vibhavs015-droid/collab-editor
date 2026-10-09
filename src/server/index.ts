@@ -5,8 +5,9 @@
  * server never accepts a request against a schema that does not exist yet.
  */
 
-import { WebSocketServer } from 'ws';
+import type { WebSocketServer } from 'ws';
 
+import { createRelaySocketServer, drainRelaySocketServer } from './socketServer.js';
 import { ApiServer } from './api.js';
 import { AuthError, resolveAuthenticator } from './auth.js';
 import { Database } from './db.js';
@@ -16,6 +17,9 @@ import { Logger } from './observability/logger.js';
 import { Metrics } from './observability/metrics.js';
 import { declareMetrics, M } from './observability/index.js';
 import { openStatic, type StaticOptions } from './static.js';
+import { resolveCspMode } from './securityHeaders.js';
+import { resolveLimits } from './limits.js';
+import { reportWriteFailure } from './writeFailure.js';
 
 /**
  * Open the built client, treating "not built yet" as normal.
@@ -27,7 +31,7 @@ import { openStatic, type StaticOptions } from './static.js';
  */
 async function openClient(root: string, logger: Logger): Promise<StaticOptions | undefined> {
   try {
-    return await openStatic(root);
+    return await openStatic(root, resolveCspMode(process.env['CSP_MODE']));
   } catch {
     if (process.env['NODE_ENV'] === 'production') {
       // In production a missing bundle means a broken image, and serving nothing while
@@ -102,14 +106,12 @@ async function shutdown(
     await server.close();
     relay.close();
 
-    for (const client of wss.clients) {
-      client.close(1001, 'Server shutting down');
-    }
-
-    await new Promise<void>((resolve) => {
-      wss.close(() => {
-        resolve();
-      });
+    // Bounded, because `wss.close()` waits for every peer to complete the WebSocket close
+    // handshake and a peer that never answers - a frozen tab, a lid-closed laptop - holds this
+    // open forever. Everything after it, including db.close(), is queued behind that wait.
+    // Measured in src/server/socketServer.test.ts.
+    await drainRelaySocketServer(wss, SHUTDOWN_DRAIN_MS, (count) => {
+      logger.warn('destroyed unresponsive sockets', { count });
     });
 
     await db.close();
@@ -121,11 +123,25 @@ async function shutdown(
   }
 }
 
+/**
+ * How long a peer gets to complete the close handshake before its socket is destroyed.
+ *
+ * Short on purpose. A container runtime allows 10 seconds before SIGKILL, so a drain that can
+ * outlast that guarantees the database is never closed cleanly. Five seconds is enough for a real
+ * browser on a real network and far shorter than the budget it has to fit in.
+ */
+const SHUTDOWN_DRAIN_MS = 5_000;
+
 async function main(): Promise<void> {
   // Resolved before anything else opens, because it can throw. A misconfigured
   // authentication setup must stop the process at startup rather than leave a server
   // running that looks fine and serves everyone's documents to anyone who asks.
   const { authenticator, summary } = resolveAuthenticator(process.env);
+
+  // Resolved once, here, and handed to each component that enforces one of them. Resolved in
+  // three places instead would be three chances to read a different variable name, and a limit
+  // that one component applies and another ignores is worse than no limit: it looks enforced.
+  const limits = resolveLimits(process.env);
 
   // One registry for the whole process, shared by the API, the relay and the store. A
   // /metrics scrape therefore sees all three. Creating one per component would give
@@ -140,7 +156,7 @@ async function main(): Promise<void> {
     nodeEnv: process.env['NODE_ENV'] ?? 'development',
   });
 
-  const db = await Database.openAt(DATA_DIR);
+  const db = await Database.openAt(DATA_DIR, { maxDocumentElements: limits.maxDocumentElements });
   logger.info('database ready', { dataDir: DATA_DIR });
 
   /**
@@ -197,6 +213,7 @@ async function main(): Promise<void> {
     // logs, browser history and Referer headers, and a bearer token in any of those
     // is a credential that has already leaked.
     authorize,
+    limits,
     metrics,
     logger: logger.child('relay'),
 
@@ -216,7 +233,7 @@ async function main(): Promise<void> {
 
   // noServer: the socket is handed over by the ApiServer's upgrade handler,
   // so WebSocket and HTTP share one port and the browser sees a single origin.
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = createRelaySocketServer();
 
   wss.on('connection', (socket, request) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -225,12 +242,16 @@ async function main(): Promise<void> {
     relay.attach(
       socket,
       documentId,
-      (ops) => {
+      (ops, site) => {
         // Fire and forget on purpose. Awaiting here would make one slow database
         // write delay the broadcast of a keystroke to everyone else in the room,
         // which is the opposite of what a relay is for. The write is queued and
         // ordered per document, so correctness does not depend on the await.
-        void store
+        // RETURNED, not fired and forgotten: the relay sends the client's `ack` when this
+        // promise settles, and that ack is the only thing telling the client its edit is
+        // stored. A swallowed rejection would leave the client believing an edit was safe when
+        // the write had failed.
+        return store
           .apply(documentId, ops)
           .then(() => {
             // Compaction is opportunistic and off the critical path. It runs on a
@@ -239,24 +260,30 @@ async function main(): Promise<void> {
             store.maybeCompact(documentId);
           })
           .catch((error: unknown) => {
-            logger.error('could not persist', { document: documentId, error });
+            reportWriteFailure(error, documentId, site, relay, metrics, logger);
+            // Rethrown so the relay's acknowledgement step sees a rejection and sends nothing.
+            // Reported rather than swallowed: the user is told, AND the client keeps the batch
+            // in flight. Both are needed.
+            throw error;
           });
       },
       // Encrypted frames. Separate callback rather than a branch inside the one above,
       // because the two paths differ in a way that matters: this one stores frames it
       // cannot read, applies no replica, and produces no text. Folding it into the
       // plaintext callback would put that difference somewhere invisible.
-      (frameDocumentId, frames) => {
-        void store.applyEncrypted(frameDocumentId, frames).catch((error: unknown) => {
-          // Named explicitly, because "could not persist" on an encrypted document almost
-          // always means the mode guard fired, and the log line should say so.
-          logger.error('could not persist encrypted frames', {
-            document: frameDocumentId,
-            frames: frames.length,
-            error,
-          });
-        });
-      },
+      (frameDocumentId, frames, site) =>
+        store
+          .applyEncrypted(frameDocumentId, frames)
+          .then(() => undefined)
+          .catch((error: unknown) => {
+            // Named explicitly, because "could not persist" on an encrypted document almost
+            // always means the mode guard fired, and the log line should say so.
+            reportWriteFailure(error, frameDocumentId, site, relay, metrics, logger, {
+              label: 'could not persist encrypted frames',
+              extra: { frames: frames.length },
+            });
+            throw error;
+          }),
     );
   });
 
@@ -268,6 +295,7 @@ async function main(): Promise<void> {
   const server = new ApiServer({
     db,
     auth: authenticator,
+    limits,
     observability: { metrics, logger: logger.child('api') },
     // Spread rather than `static: staticFiles`, because `exactOptionalPropertyTypes` is
     // on and a property present with value `undefined` is not the same as an absent one.

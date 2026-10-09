@@ -37,6 +37,8 @@ import {
 } from '../core/crdt/snapshot.js';
 import { isValidSubject } from '../shared/subject.js';
 import type { EncryptedOperationFrame } from '../shared/protocol.js';
+import { encodeDocumentCursor, type DocumentCursor } from './documentCursor.js';
+import { DEFAULT_LIMITS } from './limits.js';
 
 /** One saved document. */
 export interface DocumentRecord {
@@ -74,6 +76,19 @@ export interface CreateDocumentInput {
    * which anyone may then read and write.
    */
   readonly owner?: string | null;
+  /**
+   * Explicit `updated_at`, or omitted to take the column default of `now()`.
+   *
+   * Present for importing a document that keeps its original timestamp, and because the pagination
+   * tests need documents that share a timestamp ON PURPOSE - the list orders by
+   * `(updated_at, id)` and the id tiebreaker is only exercised when two rows really do tie. Waiting
+   * for PGlite to batch two writes into one transaction would make that test pass or fail at
+   * random, which is worse than no test.
+   *
+   * Omitted rather than defaulted to `new Date()` in code, because the column's DEFAULT is part of
+   * the schema and duplicating it here would be a second place for it to drift.
+   */
+  readonly updatedAt?: Date;
 }
 
 export interface SaveResult {
@@ -304,8 +319,21 @@ export type GrantResult =
 export class Database {
   readonly #pg: PGlite;
 
-  private constructor(pg: PGlite) {
+  /**
+   * Rows a document's log may hold before new elements are refused, or null for no cap.
+   *
+   * Null rather than Infinity because a test can then say "no cap" by passing `null` and mean
+   * it, while `Number.POSITIVE_INFINITY` would make every comparison a NaN-adjacent special case.
+   *
+   * Set at open time rather than read from the environment here, because this class is also
+   * constructed directly by tests with a deliberate small cap; a cap that could only arrive from
+   * `process.env` would be untestable at any size small enough to reach.
+   */
+  readonly #maxDocumentElements: number | null;
+
+  private constructor(pg: PGlite, maxDocumentElements: number | null) {
     this.#pg = pg;
+    this.#maxDocumentElements = maxDocumentElements;
   }
 
   /**
@@ -314,14 +342,25 @@ export class Database {
    * @param dataDir persistence location. Omit for a throwaway in-memory
    *   database, which is what the tests use — it is discarded on close, so tests
    *   cannot leak state into one another.
+   * @param options.maxDocumentElements element cap per document. Omitted means the shipped
+   *   default; pass `null` for no cap, which is only for tests that need to build a document
+   *   past a million rows. The real server passes the value it resolved from the environment,
+   *   so this class never reads `process.env` itself.
    */
-  static async open(dataDir?: string): Promise<Database> {
+  static async open(
+    dataDir?: string,
+    options: { readonly maxDocumentElements?: number | null } = {},
+  ): Promise<Database> {
     // Note: PGlite has no ':memory:' pseudo-path. Undefined selects its
     // internal in-memory filesystem; any string is treated as a real directory
     // and created on disk, so passing ':memory:' silently wrote a directory
     // literally named ':memory:'.
     const pg = dataDir === undefined ? new PGlite() : new PGlite(dataDir);
-    const db = new Database(pg);
+    const cap =
+      options.maxDocumentElements === undefined
+        ? DEFAULT_LIMITS.maxDocumentElements
+        : options.maxDocumentElements;
+    const db = new Database(pg, cap);
     await db.#migrate();
     return db;
   }
@@ -334,9 +373,12 @@ export class Database {
    * at the wrong thing entirely. Creating the parent up front turns a
    * confusing runtime crash into a non-event.
    */
-  static async openAt(dataDir: string): Promise<Database> {
+  static async openAt(
+    dataDir: string,
+    options: { readonly maxDocumentElements?: number | null } = {},
+  ): Promise<Database> {
     await mkdir(dirname(resolve(dataDir)), { recursive: true });
-    return Database.open(dataDir);
+    return Database.open(dataDir, options);
   }
 
   async #migrate(): Promise<void> {
@@ -415,15 +457,34 @@ export class Database {
   }
 
   async createDocument(input: CreateDocumentInput): Promise<DocumentRecord> {
-    const result = await this.#pg.query<DocumentRow>(
-      `INSERT INTO documents (id, title, content, owner)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, title, content, clock, updated_at, owner, encrypted`,
-      // Explicit fallbacks rather than relying on column DEFAULT. Postgres
-      // applies a DEFAULT only when the column is *omitted* from the INSERT;
-      // binding NULL passes a real NULL through, which violates NOT NULL.
-      [input.id, input.title ?? 'Untitled', input.content ?? '', input.owner ?? null],
-    );
+    // Two statements rather than one with a nullable column, because of the trap the comment below
+    // describes in reverse: Postgres applies a DEFAULT only when a column is OMITTED, so passing
+    // `COALESCE($5, now())` would silently replace the schema's DEFAULT with a value computed here.
+    // Omitting the column is the only way to keep `now()` owned by the schema.
+    const sql =
+      input.updatedAt === undefined
+        ? `INSERT INTO documents (id, title, content, owner)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, title, content, clock, updated_at, owner, encrypted`
+        : `INSERT INTO documents (id, title, content, owner, updated_at)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, title, content, clock, updated_at, owner, encrypted`;
+
+    // Explicit fallbacks rather than relying on column DEFAULT. Postgres
+    // applies a DEFAULT only when the column is *omitted* from the INSERT;
+    // binding NULL passes a real NULL through, which violates NOT NULL.
+    const params: unknown[] = [
+      input.id,
+      input.title ?? 'Untitled',
+      input.content ?? '',
+      input.owner ?? null,
+    ];
+
+    if (input.updatedAt !== undefined) {
+      params.push(input.updatedAt);
+    }
+
+    const result = await this.#pg.query<DocumentRow>(sql, params);
 
     const row = result.rows[0];
     if (!row) {
@@ -499,22 +560,85 @@ export class Database {
    * same reason: without the tiebreaker the order silently changes between
    * identical calls and the endpoint cannot be paginated against.
    */
-  async listDocumentsFor(subject: string, limit = 50): Promise<DocumentRecord[]> {
-    const result = await this.#pg.query<DocumentRow>(
-      `SELECT d.id, d.title, d.content, d.clock, d.updated_at, d.owner
+  /**
+   * One page of the documents `subject` may reach.
+   *
+   * Ordering is `updated_at DESC, id DESC`, and the cursor predicate is a row-wise comparison on
+   * that same pair, which is what makes paging exact when timestamps tie:
+   *
+   *     (d.updated_at, d.id) < ($at::timestamptz, $id)
+   *
+   * Two things here are load-bearing and easy to get wrong by accident:
+   *
+   *   - The id is in the predicate, not just the ORDER BY. With only `updated_at < $at`, every row
+   *     sharing the cursor's timestamp would be skipped - and this column ties in practice, because
+   *     `now()` is the transaction timestamp and PGlite batches writes enough that three sequential
+   *     calls can share one. See the tiebreaker note on {@link listDocuments}.
+   *
+   *   - The timestamp travels as text with its six fractional digits and an explicit `Z`, rather
+   *     than through a JavaScript `Date`, which holds milliseconds. Rounding to milliseconds would
+   *     merge rows that differ in the 4th microsecond and drop or repeat one at the boundary.
+   *
+   *     The `Z` is not decoration either. `to_char(updated_at AT TIME ZONE 'UTC', ...)` yields a
+   *     NAIVE wall time in UTC, and casting that back with `::timestamptz` reinterprets it in the
+   *     *session* timezone - so on a server not running UTC the cursor pointed at a different
+   *     instant than the row it came from, and the page boundary moved. Measured: with the `Z`
+   *     omitted, paging over documents that shared a timestamp returned only the first page and no
+   *     `nextCursor`. See documentCursor.ts.
+   *
+   * `limit + 1` rows are fetched so the caller can tell whether a further page exists without a
+   * second COUNT query, and the extra row is dropped here. The extra row is never returned, so a
+   * caller cannot tell from the response that it was fetched.
+   *
+   * The visibility predicate is untouched by `cursor`. A cursor is a position in the ORDER, not a
+   * filter, and its contents are attacker-controlled; authorisation stays entirely in the WHERE
+   * clause below.
+   */
+  async listDocumentsFor(
+    subject: string,
+    limit = 50,
+    cursor?: DocumentCursor,
+  ): Promise<{ documents: DocumentRecord[]; nextCursor: string | null }> {
+    const params: unknown[] = [subject, limit + 1];
+    let after = '';
+
+    if (cursor !== undefined) {
+      // Parameterised and cast. The cast is what makes the text comparable to the column; the
+      // value is never interpolated into the statement.
+      after = 'AND (d.updated_at, d.id) < ($3::timestamptz, $4)';
+      params.push(cursor.at, cursor.id);
+    }
+
+    const result = await this.#pg.query<DocumentRow & { cursor_at: string }>(
+      `SELECT d.id, d.title, d.content, d.clock, d.updated_at, d.owner,
+              to_char(d.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || 'Z' AS cursor_at
        FROM documents d
-       WHERE d.owner IS NULL
+       WHERE (d.owner IS NULL
           OR d.owner = $1
           OR EXISTS (
             SELECT 1 FROM document_collaborators c
              WHERE c.document_id = d.id AND c.subject = $1
-          )
+          ))
+         ${after}
        ORDER BY d.updated_at DESC, d.id DESC
        LIMIT $2`,
-      [subject, limit],
+      params,
     );
 
-    return result.rows.map(toRecord);
+    const rows = result.rows;
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+
+    return {
+      documents: page.map(toRecord),
+      // Absent rather than null on the last page, so a client can test for it directly. Encoded
+      // from the row Postgres formatted, not from the JS Date, to keep the microseconds.
+      nextCursor:
+        hasMore && last !== undefined
+          ? encodeDocumentCursor({ at: last.cursor_at, id: last.id })
+          : null,
+    };
   }
 
   /**
@@ -880,6 +1004,13 @@ export class Database {
 
     let seq = await this.#latestSeq(documentId);
 
+    // Cap check before the loop, on the WHOLE batch.
+    //
+    // Checking per row would let a batch half-apply and then throw: the client would lose
+    // some of its edits and be told the batch failed, with no way to know which half landed.
+    // One check, one outcome.
+    this.#assertRoom(documentId, seq, frames.filter((f) => f.type === 'insert').length);
+
     for (const frame of frames) {
       const result = await this.#pg.query<{ seq: string | number }>(
         `INSERT INTO document_ops (document_id, seq, site, op, element_key)
@@ -908,6 +1039,47 @@ export class Database {
 
   /** Tail of the in-process write queue. See {@link Database.appendOps}. */
   #writeQueue: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Refuse growth that would push a document past its element cap.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY `seq` IS A SAFE UPPER BOUND ON STORED ROWS
+   * ---------------------------------------------------------------------------
+   * `seq` is the highest sequence number ever handed out for the document, and it never moves
+   * backwards - not when compaction prunes rows (it keeps the floor, and a snapshot preserves
+   * element ids), and not when a duplicate is deduplicated (`ON CONFLICT DO NOTHING` does not
+   * consume a number). So `seq` is the high-water mark of rows this document has ever held, and
+   * therefore an upper bound on the rows it holds now.
+   *
+   * Over-counting is safe here and under-counting would not be: compaction can only make the
+   * real row count SMALLER than `seq`, never larger, so a check against `seq` can refuse an
+   * append that would technically have fitted. It cannot admit one that would not.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY ONLY INSERTS COUNT
+   * ---------------------------------------------------------------------------
+   * A document at its cap is still editable, and the way to edit it is to delete. Refusing
+   * tombstones as well would leave a full document with no way to become smaller, which turns a
+   * quota into a dead end: the user can neither add nor remove. So `growth` counts inserts only,
+   * and deletions stay available at the cap so compaction can eventually reclaim the space.
+   *
+   * The encrypted frames carry their type in cleartext (`EncryptedOperationFrame.type`), which
+   * is what lets this rule apply identically to a document the server cannot read. The design
+   * would not support a per-element cap otherwise, which is a fair thing to note: this is a
+   * shape that had to be chosen earlier for a rule written later.
+   */
+  #assertRoom(documentId: string, seq: number, growth: number): void {
+    if (this.#maxDocumentElements === null || growth <= 0) {
+      return;
+    }
+
+    if (seq + growth <= this.#maxDocumentElements) {
+      return;
+    }
+
+    throw new DocumentTooLargeError(documentId, this.#maxDocumentElements);
+  }
 
   /**
    * Run a write exclusively, in call order.
@@ -950,6 +1122,14 @@ export class Database {
     await this.#pg.exec('BEGIN');
     try {
       let seq = await this.#latestSeq(documentId);
+
+      // See #appendEncryptedOpsLocked for why the whole batch is checked before any of it is
+      // written. Same rule, same reason.
+      this.#assertRoom(
+        documentId,
+        seq,
+        ops.reduce((count, op) => (op.type === 'insert' ? count + 1 : count), 0),
+      );
 
       for (const op of ops) {
         // ON CONFLICT DO NOTHING rather than an existence check: one round trip
@@ -1279,6 +1459,32 @@ interface DocumentRow {
   updated_at: Date;
   owner: string | null;
   encrypted: boolean;
+}
+
+/**
+ * Raised when a write would push a document past its element cap.
+ *
+ * A named error, for the same reason as {@link EncryptedDocumentError}: the relay has to answer
+ * the client with something it can act on, and "DOCUMENT_TOO_LARGE" is actionable in a way
+ * "append failed" is not. The client can still delete from the document, which is the only way
+ * out of being full, so this is a temporary refusal of GROWTH rather than a lock.
+ *
+ * `documentId` and `limit` are on the error rather than in the message so the caller can decide
+ * what to say without parsing a sentence.
+ */
+export class DocumentTooLargeError extends Error {
+  readonly documentId: string;
+  readonly limit: number;
+
+  constructor(documentId: string, limit: number) {
+    super(
+      `Document ${documentId} is at its ${limit} element limit. It can still be read and ` +
+        'edited by deleting from it.',
+    );
+    this.name = 'DocumentTooLargeError';
+    this.documentId = documentId;
+    this.limit = limit;
+  }
 }
 
 /**

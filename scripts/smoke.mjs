@@ -247,6 +247,33 @@ async function httpChecks() {
   check('GET / is 200', page.status === 200, `got ${page.status}`);
   check('GET / is HTML', (page.headers.get('content-type') ?? '').includes('text/html'));
 
+  // Security headers, on the running production build rather than in a unit test.
+  //
+  // The policy matters because the end-to-end encryption key is in the URL fragment: no script
+  // the browser never sends can be the boundary, because any script in the page reads it out of
+  // location.hash. So `script-src` carrying unsafe-inline would make the encryption decorative.
+  const csp = page.headers.get('content-security-policy') ?? '';
+
+  check('GET / sends a Content-Security-Policy', csp !== '', 'header absent');
+  check(
+    "script-src is 'self' with no unsafe-inline or unsafe-eval",
+    /script-src 'self'/u.test(csp) &&
+      !/script-src [^;]*'unsafe-inline'/u.test(csp) &&
+      !/script-src [^;]*'unsafe-eval'/u.test(csp),
+    csp,
+  );
+  check("frame-ancestors is 'none'", /frame-ancestors 'none'/u.test(csp), csp);
+  check('X-Frame-Options is DENY', page.headers.get('x-frame-options') === 'DENY');
+  check('Referrer-Policy is no-referrer', page.headers.get('referrer-policy') === 'no-referrer');
+
+  // No HSTS from the application. It is a whole-origin promise that only the TLS-terminating
+  // proxy can keep, and this process speaks plain HTTP. See docs/deploy.md.
+  check(
+    'the app sends no HSTS; that belongs to the proxy',
+    page.headers.get('strict-transport-security') === null,
+    `got ${String(page.headers.get('strict-transport-security'))}`,
+  );
+
   const html = await page.text();
 
   check('GET / is the editor, not an error page', html.includes('<html'));
@@ -303,6 +330,20 @@ async function httpChecks() {
   const metrics = await fetch(`${base()}/api/metrics`);
 
   check('GET /api/metrics is 200', metrics.status === 200, `got ${metrics.status}`);
+
+  // NOTE: no check here for collab_ops_rate_limited_total or
+  // collab_documents_too_large_total. An earlier version of this file asserted their `# TYPE`
+  // lines were present, and it failed - correctly.
+  //
+  // In this registry a metric renders its HELP and TYPE lines only once it has at least one
+  // SAMPLE, and a counter nothing has incremented has no sample. The whole exposition is 281
+  // characters on a quiet server. So "the counter is declared" is not an observable fact here,
+  // and the only way to make it observable is to trip a limit, which needs 100,000 operations
+  // - a smoke test that spends most of its runtime generating load to prove a string is present.
+  //
+  // Both counters are covered where they can actually be watched: writeFailure.test.ts asserts
+  // the increment renders, and limits.e2e.test.ts asserts the rate-limit series appears on a
+  // real socket.
   check(
     'metrics are Prometheus text',
     (metrics.headers.get('content-type') ?? '').includes('text/plain'),

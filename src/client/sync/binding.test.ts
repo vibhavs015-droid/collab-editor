@@ -350,6 +350,66 @@ describe('EditorBinding - remote application', () => {
   });
 });
 
+describe('EditorBinding - astral characters', () => {
+  // CodeMirror counts UTF-16 code units and the CRDT counts code points, so an emoji is
+  // two units in the editor and one element in the replica. The binding must translate,
+  // or the replica and the screen drift apart without anything reporting it.
+  const EMOJI = '\u{1F600}';
+
+  it('keeps the CRDT in step when typing after an emoji, mid-text', async () => {
+    harness = await start(`a${EMOJI}b`);
+
+    harness.replaceRange(3, 3, 'X');
+
+    expect(harness.text()).toBe(`a${EMOJI}Xb`);
+    expect(harness.replica.text).toBe(harness.text());
+    expect(harness.anomalies).toEqual([]);
+  });
+
+  it('deletes exactly one emoji and broadcasts exactly one delete', async () => {
+    harness = await start(`${EMOJI}abc`);
+    harness.broadcast.length = 0;
+
+    harness.replaceRange(0, 2, '');
+
+    expect(harness.text()).toBe('abc');
+    expect(harness.replica.text).toBe('abc');
+    expect(harness.broadcast.flat().filter((op) => op.type === 'delete')).toHaveLength(1);
+  });
+
+  it('applies a remote insert after an emoji as a minimal change, not a full replacement', async () => {
+    harness = await start(`a${EMOJI}b`);
+
+    // Elements are a=1, emoji=2, b=3, so anchoring to clock 2 puts X right after the emoji.
+    const result = harness.binding.applyRemote([
+      {
+        type: 'insert',
+        id: { site: 'peer', clock: 40 },
+        origin: { site: 'local', clock: 2 },
+        value: 'X',
+      },
+    ]);
+
+    expect(harness.text()).toBe(`a${EMOJI}Xb`);
+    expect(harness.replica.text).toBe(harness.text());
+    expect(result.usedFallback).toBe(false);
+    expect(harness.anomalies).toEqual([]);
+  });
+
+  it('applies a remote delete of the character after an emoji', async () => {
+    harness = await start(`${EMOJI}abc`);
+
+    // Elements are emoji=1, a=2, b=3, c=4: deleting clock 3 removes b.
+    const result = harness.binding.applyRemote([
+      { type: 'delete', target: { site: 'local', clock: 3 } },
+    ]);
+
+    expect(harness.text()).toBe(`${EMOJI}ac`);
+    expect(harness.replica.text).toBe(harness.text());
+    expect(result.usedFallback).toBe(false);
+  });
+});
+
 describe('EditorBinding - undo and redo', () => {
   it('undoes a local insert', async () => {
     harness = await start();

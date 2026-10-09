@@ -37,7 +37,10 @@ import type { ElementSnapshot } from './element-snapshot.js';
 /**
  * One edit in start-document coordinates.
  *
- * Positions are offsets into the document as it was BEFORE any of these changes.
+ * Positions are editor offsets, in UTF-16 code units, into the document as it was
+ * BEFORE any of these changes. They are NOT element indices: the CRDT keeps one element
+ * per Unicode code point, so an astral character such as an emoji is one element but two
+ * code units, and every position after it differs between the two systems.
  * The editor applies the whole array as one unit, so positions do not need to be
  * adjusted for earlier changes: that is the caller's editor's job, not this
  * function's.
@@ -104,6 +107,16 @@ export function diffVisible(
     }
   }
 
+  // Editor offset of the start of each `before` element, plus the total at the end.
+  // Everything below reasons in element indices; this is applied only when a change
+  // is emitted, which keeps the algorithm itself unchanged and puts the whole
+  // coordinate translation in one place.
+  const offsetBefore: number[] = [0];
+  for (const element of before) {
+    offsetBefore.push((offsetBefore[offsetBefore.length - 1] ?? 0) + (element?.value.length ?? 0));
+  }
+  const at = (elementIndex: number): number => offsetBefore[elementIndex] ?? 0;
+
   const changes: ElementChange[] = [];
 
   /** Start of a run of deletions not yet emitted, or -1. */
@@ -113,7 +126,7 @@ export function diffVisible(
 
   const flushDelete = (upTo: number): void => {
     if (deleteFrom >= 0) {
-      changes.push({ from: deleteFrom, to: upTo });
+      changes.push({ from: at(deleteFrom), to: at(upTo) });
       deleteFrom = -1;
     }
   };
@@ -146,10 +159,10 @@ export function diffVisible(
         // replacement, not two separate edits. CodeMirror renders that as a
         // single change, which keeps the diff readable and avoids a transient
         // empty range.
-        changes.push({ from: deleteFrom, to: beforeIndex, insert: inserted });
+        changes.push({ from: at(deleteFrom), to: at(beforeIndex), insert: inserted });
         deleteFrom = -1;
       } else {
-        changes.push({ from: beforeIndex, insert: inserted });
+        changes.push({ from: at(beforeIndex), insert: inserted });
       }
     } else {
       // Nothing inserted before this element; just close any open deletion run.
@@ -164,12 +177,12 @@ export function diffVisible(
 
   if (deleteFrom >= 0) {
     changes.push({
-      from: deleteFrom,
-      to: before.length,
+      from: at(deleteFrom),
+      to: at(before.length),
       ...(tail === '' ? {} : { insert: tail }),
     });
   } else if (tail !== '') {
-    changes.push({ from: before.length, insert: tail });
+    changes.push({ from: at(before.length), insert: tail });
   }
 
   return changes;

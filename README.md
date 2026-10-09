@@ -21,10 +21,13 @@ implementation correct rather than merely claiming it.
 | 6     | **End-to-end encryption**                         | ✅ Complete |
 
 **Not done:** public launch. The roadmap's phase 6 was "differentiator + public launch";
-end-to-end encryption was chosen as the differentiator and is complete, but nothing has been
-published and the repository is still private. The Docker image has also never been built,
-so the deploy path is documented but unproven — see [docs/deploy.md](docs/deploy.md) for
-exactly what has and has not been verified.
+end-to-end encryption was chosen as the differentiator and is complete, and the repository is
+public, but **nothing is deployed and no real user has used it**. The Docker image has also never
+been built, so the deploy path is documented but unproven — see
+[docs/deploy.md](docs/deploy.md) for exactly what has and has not been verified.
+
+Visibility is a decision, not a milestone, and it can be reversed with one setting. It was made
+public so that other agents could review the code.
 
 ---
 
@@ -352,10 +355,44 @@ committed and must never contain real credentials.
 | `PORT` / `HOST`   | `3001` / `127.0.0.1` | Where the server listens. **`HOST` must be `0.0.0.0` in a container** — see [deploy](docs/deploy.md) |
 | `PGLITE_DATA_DIR` | `./.data/pgdata`     | Where the database lives. Must be a mounted volume in a container                                    |
 | `CLIENT_DIST`     | `./dist/client`      | Where the built client lives, served by the same process                                             |
+| `CSP_MODE`        | `enforce`            | `report-only` to watch for policy violations instead of enforcing them                               |
 
 `.env.example` documents exactly the variables the code reads. A test compares it against
 the source in both directions, so a variable that does nothing — or a variable that does
 something but is undocumented — fails CI rather than misleading the next reader.
+
+### Write quotas
+
+**One row is stored per character**, so a document of N characters is N rows each carrying a
+JSON operation. An anonymous session is obtainable without credentials in open mode. These
+four limits are what stops one client filling a disk.
+
+| Variable                | Default   | What it does                                                               |
+| ----------------------- | --------- | -------------------------------------------------------------------------- |
+| `MAX_TITLE_LENGTH`      | `200`     | Code points, on create **and** rename                                      |
+| `OPS_BURST`             | `100000`  | Operations one connection may send back-to-back before the bucket is empty |
+| `OPS_PER_SECOND`        | `5000`    | Sustained rate per connection, once the burst is spent                     |
+| `MAX_DOCUMENT_ELEMENTS` | `1000000` | Rows in one document's log, past which **new elements** are refused        |
+
+Every default is chosen so that no legitimate session trips it. The burst is 100 full
+`MAX_OPS_PER_FRAME` chunks — 12,000 operations, which is what a long offline session actually
+produces, passes with room to spare — and the gap between the burst and the sustained rate
+gives a reconnecting client 20 seconds of free credit before anything is refused.
+
+Three things worth knowing before you change a number:
+
+- **A bad value falls back to the default, not to zero.** Unparseable, zero, negative and
+  fractional values all use the default. A limit that silently became 0 would refuse every
+  operation while looking configured.
+- **Deletions are still accepted at the document cap.** Refusing tombstones would leave a full
+  document with no way to empty it, turning a quota into a dead end.
+- **A refused connection is closed with `1008` and gets a fresh budget on reconnect.** The
+  client backs off with jittered exponential backoff (ADR-0008) rather than spinning, and
+  `RATE_LIMITED` is deliberately _not_ on its list of permanent refusals.
+
+The two counters to watch are `collab_ops_rate_limited_total` (connections closed for rate) and
+`collab_documents_too_large_total` (writes refused by the cap). Zero in both is the healthy
+state; either being non-zero means a limit is doing its job.
 
 Without `JWT_SECRET`, the server logs a warning on startup and `/api/health` reports
 `"auth": "open"`. It refuses to start that way under `NODE_ENV=production`.

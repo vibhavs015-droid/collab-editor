@@ -131,3 +131,79 @@ describe('parseClientMessage', () => {
     expect(parsed).toEqual({ type: 'ops', documentId: 'd', ops: [{}] });
   });
 });
+
+describe('the optional batchId (ADR-0015)', () => {
+  it('accepts an ops frame with no batchId, and omits the field entirely', () => {
+    // THE compatibility property. A client from before acknowledgements existed sends no id and
+    // must parse to exactly the message it used to, with no `batchId: undefined` key in the way
+    // of a `toEqual` comparison anywhere.
+    const parsed = parseClientMessage(JSON.stringify({ type: 'ops', documentId: 'd', ops: [] }));
+
+    expect(parsed).toEqual({ type: 'ops', documentId: 'd', ops: [] });
+    expect(parsed).not.toHaveProperty('batchId');
+  });
+
+  it('accepts an ops frame that carries one', () => {
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'ops', documentId: 'd', ops: [], batchId: 'b7' })),
+    ).toEqual({ type: 'ops', documentId: 'd', ops: [], batchId: 'b7' });
+  });
+
+  it('accepts an ops-enc frame with and without one', () => {
+    const frame = {
+      v: 1,
+      key: 'i:s@1',
+      type: 'insert',
+      site: 's',
+      iv: 'AAAAAAAAAAAAAAAA',
+      ct: 'AAAAAAAAAAAAAAAAAAAAAA',
+    };
+
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'ops-enc', documentId: 'd', frames: [frame] })),
+    ).toEqual({ type: 'ops-enc', documentId: 'd', frames: [frame] });
+
+    expect(
+      parseClientMessage(
+        JSON.stringify({ type: 'ops-enc', documentId: 'd', frames: [frame], batchId: 'b1' }),
+      ),
+    ).toEqual({ type: 'ops-enc', documentId: 'd', frames: [frame], batchId: 'b1' });
+  });
+
+  it('rejects a batchId that is not a string', () => {
+    // The relay echoes this value back in an `ack`, so it is untrusted text on the way out as
+    // well as on the way in. A number or an object is refused rather than coerced.
+    for (const bad of [7, null, true, { id: 'b1' }, ['b1']]) {
+      expect(
+        parseClientMessage(JSON.stringify({ type: 'ops', documentId: 'd', ops: [], batchId: bad })),
+        `accepted batchId ${JSON.stringify(bad)}`,
+      ).toBeNull();
+    }
+  });
+
+  it('rejects a batchId long enough to be worth bounding', () => {
+    // The relay stores nothing about it and does echo it, so an unbounded string is an
+    // amplification the client gets for free.
+    expect(
+      parseClientMessage(
+        JSON.stringify({ type: 'ops', documentId: 'd', ops: [], batchId: 'x'.repeat(129) }),
+      ),
+    ).toBeNull();
+
+    expect(
+      parseClientMessage(
+        JSON.stringify({ type: 'ops', documentId: 'd', ops: [], batchId: 'x'.repeat(128) }),
+      ),
+    ).not.toBeNull();
+  });
+
+  it('rejects a malformed ops-enc frame even when the batchId is fine', () => {
+    // Otherwise a client could satisfy the new check and slip a bad frame through, which is the
+    // kind of thing that makes a validation branch look covered when it is not.
+    expect(
+      parseClientMessage(
+        JSON.stringify({ type: 'ops-enc', documentId: 'd', frames: [{ v: 2 }], batchId: 'b1' }),
+      ),
+    ).toBeNull();
+  });
+});

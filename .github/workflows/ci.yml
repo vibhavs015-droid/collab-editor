@@ -91,6 +91,61 @@ jobs:
       - name: Production smoke test
         run: npm run smoke
 
+  browser:
+    name: Browser end-to-end tests
+    # Separate from `verify` on purpose. These start a real server, install a browser, and
+    # drive the rendered UI, so they cost minutes rather than seconds and fail for reasons
+    # (a flaky network stack, a runner without the right libraries) that have nothing to do
+    # with the code under test. Folding them into the fast suite would mean a runner problem
+    # blocks every push, which trains people to ignore red.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same single source of truth as every other job: .nvmrc.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `--with-deps` installs the system libraries Chromium needs (libnss3, libatk, and the
+      # rest). Without them the browser launches and then exits with a missing-shared-object
+      # error that reads like a Playwright bug.
+      #
+      # `--no-shell` skips the ~150 MB browser download we do not use: the suite is chromium
+      # only, so firefox and webkit would be dead weight on every run.
+      - name: Install Chromium
+        run: npx playwright install --with-deps --no-shell chromium
+
+      # `npm run test:e2e` builds first. The build is a separate script step so a build failure
+      # is reported as a build failure rather than as six failing browser tests.
+      - name: Build
+        run: npm run build
+
+      # The whole point of this job. 946 source-level tests passed while the application never
+      # once sent a typed character to the server, because nothing rendered the UI. Every real
+      # bug this project has had lived at a seam between two well-tested layers, and a seam is
+      # only observable from above one of them.
+      - name: Run browser tests
+        run: npx playwright test
+
+      # Artefacts, because a failing browser test is close to useless without them: the trace
+      # replays the run and the screenshot shows what the page actually looked like. Only
+      # uploaded on failure, so a green run costs nothing.
+      - name: Upload failure artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+
   security:
     name: Dependency audit
     # Pinned, not `latest`. GitHub migrates the `ubuntu-latest` label to Ubuntu 26 on

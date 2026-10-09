@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { applyLocalEdits, type LocalEdit } from './localEdits.js';
+import { applyLocalEdits, elementCount, elementIndexAt, type LocalEdit } from './localEdits.js';
 import { RgaDocument, type Operation } from './rga.js';
 import { Replica, type LoggedOperation, type OperationLog } from './replica.js';
 
@@ -206,5 +206,110 @@ describe('applyLocalEdits - rejects bad input', () => {
 
     expect(applyLocalEdits([], replica)).toEqual([]);
     expect(replica.text).toBe('a');
+  });
+});
+
+/*
+ * Editor offsets are UTF-16 code units; the CRDT keeps one element per code point.
+ * An emoji is one element and two code units, so every offset after one differs between
+ * the two systems. These tests are written in editor coordinates, the way CodeMirror
+ * reports them, because that is the coordinate system the application actually uses.
+ */
+const EMOJI = '\u{1F600}';
+
+describe('applyLocalEdits - astral characters', () => {
+  it('inserts after an emoji at the position the editor reported', async () => {
+    const replica = await replicaWith('a', `a${EMOJI}b`);
+
+    // a is 0..1, the emoji is 1..3, b is 3..4: typing before b is offset 3.
+    applyLocalEdits([edit(3, 3, 'X')], replica);
+
+    expect(replica.text).toBe(`a${EMOJI}Xb`);
+  });
+
+  it('deletes the character after an emoji, and only that one', async () => {
+    const replica = await replicaWith('a', `${EMOJI}abc`);
+
+    applyLocalEdits([edit(3, 4, '')], replica);
+
+    expect(replica.text).toBe(`${EMOJI}ac`);
+  });
+
+  it('deletes an emoji as a single element, not two', async () => {
+    const replica = await replicaWith('a', `${EMOJI}abc`);
+
+    const ops = applyLocalEdits([edit(0, 2, '')], replica);
+
+    expect(replica.text).toBe('abc');
+    expect(ops).toHaveLength(1);
+  });
+
+  it('replaces an emoji', async () => {
+    const replica = await replicaWith('a', `${EMOJI}abc`);
+
+    applyLocalEdits([edit(0, 2, 'Z')], replica);
+
+    expect(replica.text).toBe('Zabc');
+  });
+
+  it('carries the running offset in elements across a batch that inserts an emoji', async () => {
+    const replica = await replicaWith('a', 'ab');
+
+    // Both edits are in pre-batch coordinates. The first grows the document by ONE
+    // element (two code units), and the second must still land between a and b.
+    applyLocalEdits([edit(0, 0, EMOJI), edit(1, 1, 'X')], replica);
+
+    expect(replica.text).toBe(`${EMOJI}aXb`);
+  });
+
+  it('agrees with a plain string for every edit position in a mixed document', async () => {
+    const start = `a${EMOJI}b${EMOJI}${EMOJI}c`;
+
+    for (let from = 0; from <= start.length; from += 1) {
+      // A caret between the two halves of a surrogate pair cannot occur in CodeMirror.
+      const low = start.charCodeAt(from);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        continue;
+      }
+
+      const replica = await replicaWith('a', start);
+      applyLocalEdits([edit(from, from, '|')], replica);
+
+      expect(replica.text).toBe(`${start.slice(0, from)}|${start.slice(from)}`);
+    }
+  });
+});
+
+describe('elementIndexAt', () => {
+  const text = `a${EMOJI}b`;
+
+  it('is the identity for text without astral characters', () => {
+    expect(elementIndexAt('hello', 0)).toBe(0);
+    expect(elementIndexAt('hello', 3)).toBe(3);
+    expect(elementIndexAt('hello', 5)).toBe(5);
+  });
+
+  it('counts an emoji as one element', () => {
+    expect(elementIndexAt(text, 1)).toBe(1);
+    expect(elementIndexAt(text, 3)).toBe(2);
+    expect(elementIndexAt(text, 4)).toBe(3);
+  });
+
+  it('rounds an offset inside a surrogate pair up to the whole character', () => {
+    expect(elementIndexAt(text, 2)).toBe(2);
+  });
+
+  it('clamps an offset past the end', () => {
+    expect(elementIndexAt(text, 99)).toBe(3);
+    expect(elementIndexAt('', 5)).toBe(0);
+  });
+});
+
+describe('elementCount', () => {
+  it('counts code points, not UTF-16 code units', () => {
+    expect(elementCount('')).toBe(0);
+    expect(elementCount('abc')).toBe(3);
+    expect(elementCount(`a${EMOJI}b`)).toBe(3);
+    expect(`a${EMOJI}b`.length).toBe(4);
   });
 });

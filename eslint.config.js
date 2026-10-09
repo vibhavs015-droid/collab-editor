@@ -31,8 +31,17 @@ export default tseslint.config(
         // exist here sit directly in `scripts/`, so one level of `*` is enough, and if
         // one moves into a subdirectory it should be named explicitly rather than
         // answered by widening the glob.
+        //
+        // `scripts/bench-replay.ts` is named explicitly for the same reason. It produces the
+        // numbers in docs/benchmarks.md, so it is code whose output is trusted; leaving it
+        // unlinted would make it the one script that can quietly rot.
         projectService: {
-          allowDefaultProject: ['*.config.ts', '*.config.js', 'scripts/*.test.ts'],
+          allowDefaultProject: [
+            '*.config.ts',
+            '*.config.js',
+            'scripts/*.test.ts',
+            'scripts/bench-replay.ts',
+          ],
         },
         tsconfigRootDir: import.meta.dirname,
       },
@@ -47,6 +56,47 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/no-non-null-assertion': 'error',
       eqeqeq: ['error', 'smart'],
+    },
+  },
+
+  {
+    // The Playwright specs.
+    //
+    // They need their own entry because they are covered by tsconfig.e2e.json rather than
+    // tsconfig.json. Without a matching project the project service cannot resolve them and
+    // reports "not found by the project service", which surfaces as a parse error rather than
+    // a lint finding.
+    //
+    // Typed linting is kept rather than falling back to allowDefaultProject, because these
+    // specs hold the assertions guarding the two regressions the reviewer found. A spec that
+    // typechecks loosely is a spec that can silently assert the wrong shape.
+    files: ['e2e/**/*.ts', 'playwright.config.ts'],
+    languageOptions: {
+      parserOptions: {
+        // `projectService: false` turns the global project service OFF for these files, which
+        // is what lets the explicit `project` below take effect. The service walks up from a
+        // file looking for the nearest tsconfig, finds tsconfig.json, and cannot place files
+        // outside `include`.
+        //
+        // Note that `allowDefaultProject` and `defaultProject` are NOT scoped by `files` in
+        // flat config - they merge across every matching object. Setting them here emptied the
+        // global list and made eslint.config.js itself unlintable.
+        projectService: false,
+        project: './tsconfig.e2e.json',
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+
+  {
+    // e2e/server.mjs, the harness Playwright starts for the tests. Plain Node ESM like
+    // scripts/**/*.mjs, and like them it must opt out of type-aware linting.
+    files: ['e2e/**/*.mjs'],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { process: 'readonly', console: 'readonly', setTimeout: 'readonly' },
     },
   },
 

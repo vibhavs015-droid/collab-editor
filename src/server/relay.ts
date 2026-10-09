@@ -31,6 +31,7 @@ import {
 } from '../shared/protocol.js';
 import { parseClientMessage } from '../shared/protocol.js';
 import { Logger } from './observability/logger.js';
+import { DEFAULT_LIMITS, TokenBucket, type Limits } from './limits.js';
 import { Metrics } from './observability/metrics.js';
 import { M, declareMetrics } from './observability/index.js';
 
@@ -57,6 +58,30 @@ interface Client {
   admitting: boolean;
   /** When an unauthenticated socket is dropped for never saying hello. */
   helloDeadline: number | null;
+  /**
+   * Per-connection write budget, refilled by elapsed time.
+   *
+   * Per CONNECTION, not per client identity, because a connection is the thing holding a file
+   * descriptor and a place in every room's broadcast set. A subject that reconnects gets a fresh
+   * bucket, which is the same property a reconnecting client needs to recover - see
+   * {@link Limits.opsBurst}.
+   */
+  readonly opsBudget: TokenBucket;
+  /**
+   * Server-to-client frames this client declared it understands.
+   *
+   * Empty for a client that sent no `capabilities`, which is how a client from before this
+   * feature behaves - and it is what stops the relay sending such a client a `ping` it would
+   * report as an unrecognised frame, every 25 seconds, forever.
+   */
+  readonly capabilities: ReadonlySet<string>;
+  /**
+   * The `ping` currently outstanding, if any.
+   *
+   * At most one at a time, which is what makes {@link PONG_DEADLINE_MS} meaningful. Null means
+   * nothing is outstanding: either none has been sent yet, or the last one was answered.
+   */
+  pendingPing: { readonly token: number; readonly sentAt: number } | null;
 }
 
 /**
@@ -87,8 +112,28 @@ const MAX_BACKPRESSURE_FRAMES = 100;
 /** Reap a connection that has sent nothing for this long. */
 const STALE_CONNECTION_MS = 60_000;
 
-/** Heartbeat interval. Must be comfortably under the stale threshold. */
+/**
+ * Heartbeat interval. Must be comfortably under the stale threshold.
+ *
+ * Also the `ping` cadence. 25 seconds is chosen against the cost of getting it wrong in each
+ * direction: too short and a mobile client on a congested link is declared dead and pays a
+ * reconnect, which replays its in-flight batches; too long and a genuinely dead connection
+ * occupies a socket, a room membership and a peer slot for that long before anyone notices.
+ *
+ * It is NOT a detection deadline on its own. Nothing was wrong with this number before; what was
+ * wrong was that nothing was waiting for an answer.
+ */
 const HEARTBEAT_INTERVAL_MS = 25_000;
+
+/**
+ * How long a `ping` may go unanswered before the connection is declared dead.
+ *
+ * Shorter than the interval, deliberately: at most one ping is outstanding at a time, so a client
+ * that has had a full interval plus this grace has had one whole missed round trip. A deadline
+ * LONGER than the interval would let two pings be outstanding at once, and answering either
+ * would then prove the client is alive when the other is still unanswered.
+ */
+const PONG_DEADLINE_MS = 10_000;
 
 /**
  * Operations replayed per round trip when catching a client up.
@@ -216,6 +261,32 @@ export interface RelayOptions {
    */
   readonly metrics?: Metrics;
   readonly logger?: Logger;
+
+  /**
+   * Write quotas enforced per connection.
+   *
+   * Defaults to {@link DEFAULT_LIMITS}, so a relay built in a test without this option is
+   * still bounded - the failure mode being defended against is a socket writing without limit,
+   * and a test-only unbounded relay would let that regress unnoticed.
+   *
+   * Only {@link Limits.opsBurst} and {@link Limits.opsPerSecond} are read here. The title and
+   * document caps belong to the API and the store, which are the components that own those
+   * facts.
+   */
+  readonly limits?: Limits;
+
+  /**
+   * How long a `ping` may go unanswered before the connection is declared dead.
+   *
+   * An option rather than a constant because it is only testable if a test can shorten it, and a
+   * test that has to wait out the production value is a test nobody runs often. It must stay
+   * comfortably below `heartbeatMs`, or two pings end up outstanding at once and answering
+   * either would count as answering both.
+   *
+   * Defaults to {@link PONG_DEADLINE_MS}. A production deployment should not need to set this;
+   * if you find yourself wanting to, the interval above is the number to tune.
+   */
+  readonly pongDeadlineMs?: number;
 }
 
 export class Relay {
@@ -239,7 +310,18 @@ export class Relay {
   readonly #metrics: Metrics;
   readonly #logger: Logger;
   readonly #replayBatchSize: number;
+  readonly #limits: Limits;
+  readonly #pongDeadlineMs: number;
   #siteCounter = 0;
+  /**
+   * Token for the next `ping`.
+   *
+   * Per process rather than per connection, so two connections can never be holding the same
+   * token. That does not actually matter for correctness - each connection matches its own - but
+   * it makes a captured trace unambiguous, which is the sort of thing that is cheap now and
+   * annoying to retrofit.
+   */
+  #pingCounter = 0;
 
   constructor(options: RelayOptions = {}) {
     const heartbeatMs = options.heartbeatMs ?? HEARTBEAT_INTERVAL_MS;
@@ -252,6 +334,8 @@ export class Relay {
     this.#logger = options.logger ?? Logger.silent();
     declareMetrics(this.#metrics);
     this.#replayBatchSize = options.replayBatchSize ?? DEFAULT_REPLAY_BATCH;
+    this.#limits = options.limits ?? DEFAULT_LIMITS;
+    this.#pongDeadlineMs = options.pongDeadlineMs ?? PONG_DEADLINE_MS;
 
     this.#heartbeat =
       heartbeatMs > 0
@@ -334,12 +418,22 @@ export class Relay {
    *   has been broadcast, so a caller can store them without reading them. See
    *   ADR-0014. Separate from `onOps` because a handler that accepts plaintext must not
    *   silently start accepting ciphertext, or the reverse.
+   *
+   *   Both callbacks receive the sending client's `site`. That is what lets a caller report a
+   *   write refusal back to the right socket through {@link Relay.reportRefusal}: the relay
+   *   hands persistence off asynchronously, so by the time the store discovers a document is
+   *   full the frame is long gone, and a caller with no way to name the sender could only log
+   *   the refusal where the user would never see it.
    */
   attach(
     socket: WebSocket,
     documentId: string,
-    onOps?: (ops: readonly JsonValue[]) => void,
-    onEncryptedOps?: (documentId: string, frames: readonly EncryptedOperationFrame[]) => void,
+    onOps?: (ops: readonly JsonValue[], site: string) => void | Promise<void>,
+    onEncryptedOps?: (
+      documentId: string,
+      frames: readonly EncryptedOperationFrame[],
+      site: string,
+    ) => void | Promise<void>,
   ): void {
     const requiresAuth = this.#authorize !== undefined;
 
@@ -355,6 +449,13 @@ export class Relay {
       authenticated: !requiresAuth,
       admitting: false,
       helloDeadline: requiresAuth ? Date.now() + this.#helloTimeoutMs : null,
+      // Born full, and full for THIS connection: see TokenBucket on why an empty bucket
+      // would be the wrong starting state.
+      opsBudget: new TokenBucket(this.#limits.opsBurst, this.#limits.opsPerSecond),
+      // Replaced by the client's `hello` when it declares any. Empty until then, so the first
+      // ping cannot be sent before the client has said whether it understands one.
+      capabilities: new Set<string>(),
+      pendingPing: null,
     };
 
     if (client.authenticated) {
@@ -467,6 +568,74 @@ export class Relay {
    */
   #parse(raw: string): ClientMessage | null {
     return parseClientMessage(raw);
+  }
+
+  /**
+   * Tell a client, by site, that its write was refused downstream.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THIS EXISTS RATHER THAN CHECKING CAPACITY BEFORE BROADCASTING
+   * ---------------------------------------------------------------------------
+   * The obvious design is to ask the store "is there room?" before relaying a batch. It is
+   * wrong here for one reason: the relay broadcasts synchronously and persists
+   * asynchronously, and that asynchrony is load-bearing. Awaiting a database round trip before
+   * broadcasting a keystroke to everyone in the room would make one slow write delay every
+   * reader, which is the opposite of what a relay is for (see the comment at the call site in
+   * index.ts).
+   *
+   * So the frame goes out, and the refusal comes back afterwards by site. The cost is that a
+   * client may briefly see its own operations locally and then be told they were not stored -
+   * which it would see anyway on any store failure, and which is strictly better than the
+   * alternative, which is a silent failure the user never learns about.
+   *
+   * Silently ignores a site that is no longer connected. A client that disconnected before its
+   * write was refused has already gone, and a close frame to a dead socket is noise.
+   */
+  reportRefusal(site: string, code: ErrorCode, message: string): boolean {
+    for (const client of this.#clients()) {
+      if (client.site !== site) {
+        continue;
+      }
+
+      this.#send(client, { type: 'error', code, message });
+      return true;
+    }
+
+    return false;
+  }
+
+  /** Every client the relay currently knows about, in rooms and awaiting hello. */
+  #clients(): Iterable<Client> {
+    const all = new Set<Client>(this.#pending);
+
+    for (const room of this.#rooms.values()) {
+      for (const client of room) {
+        all.add(client);
+      }
+    }
+
+    return all;
+  }
+
+  /**
+   * Record which optional server-to-client frames this client understands.
+   *
+   * Replaces rather than merges, so a `hello` with no `capabilities` on a socket that earlier
+   * declared some means the client no longer wants them - which is the conservative reading, and
+   * the one that cannot result in sending a frame the client will reject.
+   */
+  #adoptCapabilities(client: Client, declared: readonly string[] | undefined): void {
+    const next = new Set<string>();
+
+    for (const capability of declared ?? []) {
+      next.add(capability);
+    }
+
+    // `#capabilities` is readonly on Client, so it is swapped through a cast rather than
+    // mutated. The alternative is making the field mutable, which would allow a code path to
+    // widen a client's declared capabilities at any point in the connection rather than only
+    // in response to a handshake.
+    (client as { capabilities: ReadonlySet<string> }).capabilities = next;
   }
 
   #join(client: Client): void {
@@ -630,11 +799,138 @@ export class Relay {
     }
   }
 
+  /**
+   * Take `amount` from this connection's budget, refusing the connection if it cannot pay.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY CLOSE THE SOCKET RATHER THAN JUST REFUSE THE FRAME
+   * ---------------------------------------------------------------------------
+   * A refused frame leaves the connection alive and the client free to try again immediately,
+   * which means the cost of refusing is paid again on every frame: the server still parses,
+   * validates and measures every one. Closing makes the refusal total, and 1008 is RFC 6455's
+   * "policy violation" - the one code that tells a client this was the server's decision
+   * rather than a network problem.
+   *
+   * The client side of that contract is already written: `SyncTransport` reconnects with
+   * jittered exponential backoff (ADR-0008), and a 1008 is an ordinary close as far as it is
+   * concerned. So the client backs off rather than spinning, and a reconnecting client gets a
+   * fresh bucket - which is what makes this survivable rather than a lockout.
+   *
+   * Returns true when the caller should continue. Nothing is broadcast and nothing is handed
+   * to the log on a refusal, so the operations in the offending frame are dropped, not half
+   * applied.
+   */
+  #chargeOps(client: Client, amount: number): boolean {
+    if (client.opsBudget.take(amount)) {
+      return true;
+    }
+
+    this.#metrics.increment(M.opsRateLimited);
+    this.#logger.warn('connection refused: operation rate exceeded', {
+      site: client.site,
+      documentId: client.documentId,
+      operations: amount,
+      burst: this.#limits.opsBurst,
+      perSecond: this.#limits.opsPerSecond,
+    });
+
+    // Sent before the close so the client learns WHY. The close frame that follows carries its
+    // own code, and a client that reads only one of the two still gets a usable answer.
+    this.#send(client, {
+      type: 'error',
+      code: 'RATE_LIMITED',
+      message: `Over ${this.#limits.opsPerSecond} operations/second. Reconnect to continue.`,
+    });
+
+    this.#close(client, 1008, 'Rate limit exceeded');
+
+    return false;
+  }
+
+  /**
+   * Hand a batch to the store, then acknowledge it - in that order.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THE ACK FOLLOWS THE STORE AND NOT THE SOCKET
+   * ---------------------------------------------------------------------------
+   * Acknowledging on receipt would fix nothing. The failure this exists for is a frame the relay
+   * had in hand and then lost - the process died between reading the socket and committing - and
+   * an ack sent at receipt time tells the client its edit is safe at exactly that instant. The
+   * test in src/server/writeDurability.test.ts kills the socket at precisely this point, and it
+   * is green only because the ack is downstream of the write.
+   *
+   * So: a store call that rejects produces NO acknowledgement. The client keeps the batch in
+   * flight and resends it on reconnect, which is safe because persistence is idempotent.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY A CALLBACK RATHER THAN AWAITING INLINE
+   * ---------------------------------------------------------------------------
+   * The broadcast has already happened synchronously. Nothing here delays it. A slow database
+   * write costs this client an ack and costs nobody else anything - the same reason the relay
+   * does not await persistence before relaying in the first place.
+   *
+   * A store call that returns nothing is treated as synchronously complete, so an existing
+   * void-returning caller behaves exactly as it did before.
+   */
+  #persistThenAcknowledge(
+    client: Client,
+    batchId: string | undefined,
+    persist: () => void | Promise<void>,
+  ): void {
+    const settled = persist();
+
+    // Attach a handler to the rejection UNCONDITIONALLY, before deciding whether there is
+    // anything to acknowledge.
+    //
+    // This is not defensive noise. Returning early for a frame with no `batchId` while leaving
+    // `settled` unhandled means any store rejection becomes an unhandled promise rejection, and
+    // Node 24 terminates the process for those by default. The production smoke test found it:
+    // its raw WebSocket client sends no batchId, so the encrypted path hit exactly that branch,
+    // the store rejected, and the server exited 1 in the middle of a passing run.
+    //
+    // The rejection is not swallowed - the caller's own error path reports it to the user and to
+    // the log before it rethrows. This handler exists so the process survives the rethrow.
+    if (settled !== undefined) {
+      void settled.catch(() => undefined);
+    }
+
+    if (batchId === undefined) {
+      // Nothing to acknowledge: the caller is a client that does not know this message exists.
+      // The frame was still persisted. See ADR-0015.
+      return;
+    }
+
+    if (settled === undefined) {
+      this.#send(client, { type: 'ack', batchId });
+      return;
+    }
+
+    // TWO arguments, deliberately. `settled.then(onOk)` propagates a rejection onto the promise
+    // it returns, and that derived promise would then be unhandled - which is the same crash by
+    // a different route. Passing a rejection handler makes the derived promise resolve.
+    //
+    // This one was found by the test in relayAck.test.ts that sends a rejecting frame WITH a
+    // batchId. The first fix, which attached a `catch` and then returned early for frames with
+    // no batchId, left this path still leaking.
+    void settled.then(
+      () => {
+        this.#send(client, { type: 'ack', batchId });
+      },
+      () => {
+        // Already reported by the caller. Its absence is the signal, and nothing is sent.
+      },
+    );
+  }
+
   #handle(
     client: Client,
     message: ClientMessage,
-    onOps?: (ops: readonly JsonValue[]) => void,
-    onEncryptedOps?: (documentId: string, frames: readonly EncryptedOperationFrame[]) => void,
+    onOps?: (ops: readonly JsonValue[], site: string) => void | Promise<void>,
+    onEncryptedOps?: (
+      documentId: string,
+      frames: readonly EncryptedOperationFrame[],
+      site: string,
+    ) => void | Promise<void>,
   ): void {
     // Nothing but `hello` is accepted from a client that has not been authorised.
     //
@@ -660,11 +956,30 @@ export class Relay {
           // Already admitted: either there is no authoriser, or this is a second
           // hello on a live socket. Either way the client just wants catching up
           // again, which is harmless and cheaper than re-authorising.
+          //
+          // The capabilities are still (re-)read, because a client that sends hello twice with
+          // different ones should get the ones it most recently declared - and because a
+          // reconnect on the same socket is exactly when a client would re-advertise.
+          this.#adoptCapabilities(client, message.capabilities);
+
           void this.#replayFrom(client, message.lastAppliedSeq);
           return;
         }
 
+        this.#adoptCapabilities(client, message.capabilities);
+
         void this.#authenticate(client, message.token, message.lastAppliedSeq);
+        return;
+      }
+
+      case 'pong': {
+        // The answer to a liveness check. Matched against the OUTSTANDING token, so a pong
+        // that was delayed in a buffer for minutes cannot be mistaken for a fresh one - which
+        // is the exact failure the token exists to prevent.
+        if (client.pendingPing !== null && client.pendingPing.token === message.t) {
+          client.pendingPing = null;
+        }
+
         return;
       }
 
@@ -672,6 +987,10 @@ export class Relay {
         // The relay does not interpret operations. It forwards them verbatim.
         // Interpreting them here would duplicate the CRDT and create a second
         // source of truth.
+        if (!this.#chargeOps(client, message.ops.length)) {
+          return;
+        }
+
         this.#metrics.increment(M.opsReceived, { type: 'batch' }, message.ops.length);
 
         this.#broadcast(client.documentId, client.site, {
@@ -684,7 +1003,9 @@ export class Relay {
         // belongs to the CRDT rather than here. Narrowing the type is therefore a
         // cast, justified by that boundary: the relay genuinely has no opinion
         // about what an operation contains.
-        onOps?.(message.ops);
+        this.#persistThenAcknowledge(client, message.batchId, () =>
+          onOps?.(message.ops, client.site),
+        );
         return;
       }
 
@@ -699,6 +1020,16 @@ export class Relay {
         // Separate metrics label, because "accepted" here means stored rather than
         // applied. Counting them in the same series as plaintext operations would let a
         // green `ops_received` stand in for a count of things nobody verified.
+        //
+        // The rate limit is charged BEFORE the encryption branch and per FRAME, not per
+        // operation: an encrypted frame carries one element, so one frame is one unit of
+        // work, and the client already chunks plaintext at MAX_OPS_PER_FRAME. Charging
+        // encrypted traffic by frame means the two modes cost the same to abuse, which a
+        // per-byte or per-byte-of-ciphertext rule would not.
+        if (!this.#chargeOps(client, message.frames.length)) {
+          return;
+        }
+
         this.#metrics.increment(M.opsReceived, { type: 'batch-encrypted' }, message.frames.length);
 
         this.#broadcast(client.documentId, client.site, {
@@ -707,7 +1038,9 @@ export class Relay {
           frames: message.frames,
         });
 
-        onEncryptedOps?.(message.documentId, message.frames);
+        this.#persistThenAcknowledge(client, message.batchId, () =>
+          onEncryptedOps?.(message.documentId, message.frames, client.site),
+        );
         return;
       }
 
@@ -947,13 +1280,26 @@ export class Relay {
    * that does not exist and would make every call site need a floating promise.
    */
   #reapStale(): void {
-    const cutoff = Date.now() - STALE_CONNECTION_MS;
+    const now = Date.now();
+    const cutoff = now - STALE_CONNECTION_MS;
 
     for (const room of [...this.#rooms.values()]) {
       for (const client of [...room]) {
+        // The pong deadline is checked FIRST, and it is strictly tighter than the stale
+        // threshold. A client that has opted into pings and stopped answering is gone, and
+        // waiting the full minute for the `lastSeen` sweep would keep a dead peer in the room
+        // and in everyone's peer count the whole time.
+        if (client.pendingPing !== null && now - client.pendingPing.sentAt > this.#pongDeadlineMs) {
+          this.#close(client, 1001, 'No pong');
+          continue;
+        }
+
         if (client.lastSeen < cutoff) {
           this.#close(client, 1001, 'Stale connection');
+          continue;
         }
+
+        this.#sendPing(client, now);
       }
     }
 
@@ -961,10 +1307,37 @@ export class Relay {
     // cannot see them. They are exactly the connections nobody is waiting for, so
     // they are the ones that must be swept.
     for (const client of [...this.#pending]) {
-      if (client.helloDeadline !== null && Date.now() > client.helloDeadline) {
+      if (client.helloDeadline !== null && now > client.helloDeadline) {
         this.#close(client, 1008, 'No hello');
       }
     }
+  }
+
+  /**
+   * Ping a client that asked to be pinged, unless one is already outstanding.
+   *
+   * The token is a per-connection counter rather than a clock, so it is monotonic even if the
+   * clock moves, and two pings on one connection can never share a token.
+   *
+   * A client that did not declare the capability is never pinged: it would answer with its
+   * unrecognised-frame handler, once per interval, forever.
+   */
+  #sendPing(client: Client, now: number): void {
+    if (!client.capabilities.has('ping')) {
+      return;
+    }
+
+    // One outstanding at a time. Pinging again while waiting would put two tokens in flight,
+    // and answering either would then count as an answer to the other.
+    if (client.pendingPing !== null) {
+      return;
+    }
+
+    this.#pingCounter += 1;
+    const token = this.#pingCounter;
+
+    client.pendingPing = { token, sentAt: now };
+    this.#send(client, { type: 'ping', t: token });
   }
 
   /** Close every socket and stop the heartbeat. Synchronous by design. */

@@ -16,9 +16,13 @@
   // flags, `exactOptionalPropertyTypes`, the lot - is inherited unchanged, which means the
   // build cannot silently compile under different rules than the typecheck.
   //
-  // Deliberately narrow: only `*.test.ts` is excluded. Fuzzers, benchmarks and helper files
+  // `e2e/` is excluded too: Playwright specs run from source under its own runner and must not
+  // be emitted into the image at all. They stay in `tsconfig.json`, so `npm run typecheck`
+  // still covers them, which is the point of the two-config split.
+  //
+  // Deliberately narrow otherwise: only `*.test.ts` is excluded. Fuzzers, benchmarks and helper files
   // that live outside the test naming convention stay in, because they are not what bloats the
   // image and removing them by pattern is how a real file goes missing.
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "e2e"]
 }

@@ -332,6 +332,40 @@ convinces you it took effect.
 
 ---
 
+## TLS and HSTS belong to the proxy, not the app
+
+The application sends **no** `Strict-Transport-Security` header, and that is deliberate.
+
+HSTS is a promise a site makes to browsers about the whole origin, and the only party that can
+keep it is the thing that actually terminates TLS. This process listens on plain HTTP and is
+usually reached through a proxy that terminates TLS in front of it. If the app sent HSTS:
+
+- The header would be attached to HTTP responses too, which is not what the header is for, and
+  a client that reached the origin directly would be told to demand HTTPS from a port that does
+  not offer it — locking itself out until the browser cache expired.
+- Turning it off would mean redeploying the application, rather than changing proxy
+  configuration. Certificates rotate; reverse proxies get rebuilt; neither should need an image
+  release to adjust transport policy.
+
+So: **terminate TLS at the proxy, and send HSTS there.** Fly.io does this with
+`force_https = true` plus its automatic redirect, and adds HSTS itself; on a plain VPS, Caddy
+does it in three lines and enables HSTS by default.
+
+Two things the proxy must get right, both already covered by the headers the application sends
+(see [`securityHeaders.ts`](../src/server/securityHeaders.ts)):
+
+- **WebSocket upgrade.** `connect-src` allows `ws:` and `wss:`. A proxy that does not pass
+  `Upgrade` and `Connection` through will leave the editor permanently "connecting" while every
+  REST call succeeds, which is a confusing failure rather than an obvious one.
+- **Long timeouts on the socket.** The relay holds connections open; a 30-second read timeout is
+  enough to produce a reconnect every 30 seconds on an idle document.
+
+There is also `CSP_MODE`, which is `enforce` by default and takes `report-only` if you want to
+watch for violations before enforcing. The policy is verified to produce **zero** violations
+across all six browser scenarios, so `enforce` is the shipped default rather than a caution.
+
+---
+
 ## Operational notes
 
 **Logs.** JSON lines on stdout, one per line, including the last. Every level is JSON, so
