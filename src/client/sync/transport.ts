@@ -7,7 +7,7 @@
  * those operations mean belongs to the CRDT, which is already proven correct by
  * src/core/crdt/convergence.test.ts.
  *
- * ── Reconnection ─────────────────────────────────────────────────────────
+ * -- Reconnection ---------------------------------------------------------
  * A collaborative editor reconnects constantly: laptops sleep, phones change
  * network, deploys restart the server. The loop here is exponential backoff with
  * jitter, because without jitter every client disconnected by a server restart
@@ -411,6 +411,43 @@ export class SyncTransport {
    * Queued operations are deliberately discarded: the caller owns document
    * persistence, and holding operations in memory after teardown would leak them
    * when the page unloads.
+   */
+  /**
+   * Stop syncing, permanently, and discard anything still queued.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THE OUTBOX IS CLEARED HERE AND NOWHERE ELSE
+   * ---------------------------------------------------------------------------
+   * There are two ways a connection ends here and they are not the same decision.
+   *
+   *   - RECOVERABLE: the socket dies, the server stops answering, the watchdog fires. That path
+   *     runs {@link #onSocketClosed}, which calls {@link #requeueInflight} and KEEPS the outbox. The
+   *     reconnect resends it. This is the path ADR-0008 is about, and it is where any real risk of
+   *     losing work lives.
+   *
+   *   - TERMINAL: this method, which sets `#closedByUser` and suppresses the retry loop. The only
+   *     production caller is {@link dispose}; everything else in the tree that calls it is a test
+   *     simulating a user who pressed "disconnect". There is no code path from a network event to
+   *     here.
+   *
+   * So clearing is a consequence of the terminal decision rather than a second, independent one. The
+   * user asked to stop syncing this document; holding a queue for a transport that has been told it
+   * will never reconnect is a leak, and the retry loop that would have drained it is switched off one
+   * line above.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY NOTHING IS ACTUALLY LOST
+   * ---------------------------------------------------------------------------
+   * The outbox is a DELIVERY queue, not the store of record. Every operation in it was already
+   * applied to the local CRDT and appended to the local `IndexedDbOperationLog` by `Replica` itself,
+   * before the transport ever saw it. The document on this device is correct and survives a reload
+   * either way; what the outbox holds is only the attempt to tell the server about it.
+   *
+   * What is genuinely given up is the ATTEMPT. Once this returns, those operations are not resent by
+   * this transport, and the server cannot learn about them from here - on a later reload the client
+   * announces the sequence it already holds and asks for what comes after it, and a server-side gap
+   * below that point is invisible to both sides. Recovering that needs a reconciliation this project
+   * does not have, which is a further reason not to reach this method by accident.
    */
   disconnect(): void {
     this.#closedByUser = true;
@@ -925,7 +962,7 @@ export class SyncTransport {
    *
    * The refusal is the important part. A baseline REPLACES the document, so
    * applying one while holding unsent operations would discard work the user
-   * believes is saved — and nothing would report it, because the client's own log
+   * believes is saved -- and nothing would report it, because the client's own log
    * would look consistent right up until the next reload.
    *
    * So: flush first, then ask again. The retry is bounded, and a client that

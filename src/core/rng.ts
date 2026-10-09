@@ -1,7 +1,7 @@
 /**
  * Seeded randomness.
  *
- * CRDT correctness is an emergent property — bugs show up as rare orderings of
+ * CRDT correctness is an emergent property -- bugs show up as rare orderings of
  * operations that no human would ever write by hand. Testing this properly
  * means running *thousands* of randomly generated concurrent edits and checking
  * that every replica converges.
@@ -12,7 +12,7 @@
  */
 
 /**
- * Mulberry32 — a small, fast, well-distributed 32-bit PRNG.
+ * Mulberry32 -- a small, fast, well-distributed 32-bit PRNG.
  *
  * Chosen deliberately: it is short enough to read in full and audit, which
  * matters more for a testing tool than raw statistical quality.
@@ -38,7 +38,7 @@ export function mulberry32(seed: number): () => number {
  * This is the workhorse of Phase 2's convergence test: we generate N random
  * operations, deliver them to each replica in a *different* random order, and
  * assert every replica ends up with identical text. If the merge is not
- * associative, some orderings will diverge — which is exactly the bug class
+ * associative, some orderings will diverge -- which is exactly the bug class
  * that hand-written tests never find.
  *
  * Takes `readonly` input and returns a new array; the source is never mutated,
@@ -78,7 +78,7 @@ export function randomInt(random: () => number, min: number, max: number): numbe
 /**
  * Pick a random element.
  *
- * @throws if `items` is empty — a silent undefined here would poison a fuzz
+ * @throws if `items` is empty -- a silent undefined here would poison a fuzz
  * run in a way that is painful to trace later.
  */
 export function pick<T>(items: readonly T[], random: () => number): T {

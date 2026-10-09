@@ -1,7 +1,7 @@
 /**
  * Offline-first replica: a CRDT document plus its durable operation log.
  *
- * ── Why the log is the source of truth ────────────────────────────────────
+ * -- Why the log is the source of truth ------------------------------------
  * The visible text is a *projection* of the operation log. Storing text and
  * hoping it matches the log is how offline-first systems silently diverge.
  * Instead:
@@ -13,7 +13,7 @@
  * That makes the log authoritative, which is what allows a client that has been
  * offline for a week to reconcile by replay rather than by guessing.
  *
- * ── What this file deliberately does not do ────────────────────────────────
+ * -- What this file deliberately does not do --------------------------------
  * It does not decide when to persist, and it does not touch the network.
  * Persistence policy belongs to the caller; transport belongs to SyncTransport.
  * Keeping those separate is what lets the whole thing be tested without a
@@ -22,8 +22,7 @@
  * ASCII only. See the encoding note in rga.ts.
  */
 
-import type { ElementId, SiteId } from '../clock.js';
-import type { Origin } from './rga.js';
+import type { SiteId } from '../clock.js';
 import { RgaDocument, type Operation } from './rga.js';
 import {
   createSnapshot,
@@ -491,32 +490,6 @@ export class Replica {
     return this.#doc.canRedo;
   }
 
-  /** Visible text offset of a character, for mapping a cursor through a merge. */
-  offsetOf(visibleIndex: number): number {
-    return visibleIndex;
-  }
-
-  /**
-   * Element ID at a visible offset, used to anchor remote cursor rendering.
-   *
-   * @returns null at the end of the document.
-   */
-  elementIdAt(visibleOffset: number): ElementId | null {
-    let seen = 0;
-
-    for (const element of this.#inspect()) {
-      if (element.deleted) {
-        continue;
-      }
-      if (seen === visibleOffset) {
-        return element.id;
-      }
-      seen += 1;
-    }
-
-    return null;
-  }
-
   /**
    * Visible elements in document order.
    *
@@ -527,31 +500,6 @@ export class Replica {
    */
   visibleElements(): readonly { key: string; value: string }[] {
     return this.#doc.visibleElements();
-  }
-
-  /**
-   * Visible offset of an element, given its ID.
-   *
-   * The inverse of elementIdAt, and what lets a collaborator's cursor survive a
-   * merge instead of jumping to the wrong character.
-   *
-   * @returns -1 when the element is unknown or deleted.
-   */
-  visibleOffsetOf(id: ElementId): number {
-    const key = `${id.site}@${id.clock}`;
-    let seen = 0;
-
-    for (const element of this.#inspect()) {
-      if (element.deleted) {
-        continue;
-      }
-      if (`${element.id.site}@${element.id.clock}` === key) {
-        return seen;
-      }
-      seen += 1;
-    }
-
-    return -1;
   }
 
   /** Structural health check, surfaced by tests and diagnostics. */
@@ -578,22 +526,5 @@ export class Replica {
 
     this.#onOperations(ops, origin);
     void this.#log.append(entries);
-  }
-
-  /**
-   * Internal element view.
-   *
-   * Exposed for cursor mapping and diagnostics only. Deliberately returns a copy
-   * of the fields the caller needs rather than the mutable Element objects, so
-   * nothing outside this class can corrupt deletion state.
-   */
-  #inspect(): readonly {
-    key: string;
-    id: ElementId;
-    origin: Origin | null;
-    value: string;
-    deleted: boolean;
-  }[] {
-    return this.#doc.inspect();
   }
 }

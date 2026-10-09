@@ -1,7 +1,7 @@
 /**
  * Minimal change-set derivation between two element snapshots.
  *
- * ── Why diff by element ID rather than by text ─────────────────────────────
+ * -- Why diff by element ID rather than by text -----------------------------
  * A remote operation lands at a position the local editor cannot know in
  * advance: RGA breaks ties between concurrent inserts by site ID and clock, so
  * "where did the collaborator's character end up" is only answerable by asking
@@ -21,7 +21,7 @@
  * This is (2). It is O(n) rather than O(n log n) because element IDs are unique,
  * so the "longest common subsequence" is just a greedy merge.
  *
- * ── Why minimal matters ────────────────────────────────────────────────────
+ * -- Why minimal matters ----------------------------------------------------
  * Replacing the whole document on every remote keystroke would discard the
  * caret, the selection, the scroll position and the undo history, several times
  * a second, for every collaborator. A minimal change set touches only the
@@ -59,7 +59,7 @@ export interface ElementChange {
  *
  * @returns the changes, or `null` when a minimal change set cannot be produced.
  *
- * ── When this returns null ────────────────────────────────────────────────
+ * -- When this returns null ------------------------------------------------
  * The algorithm relies on an invariant that RGA guarantees: applying operations
  * never relocates a character that already existed, it only inserts between them
  * and tombstone them. So the surviving characters of `before` must appear in

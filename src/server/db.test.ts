@@ -70,7 +70,7 @@ describe('getDocument', () => {
   it('round-trips unicode content unchanged', async () => {
     // A CRDT must never mangle text. Emoji, combining marks, RTL, and CJK are
     // the characters most likely to expose an encoding bug.
-    const content = 'ðŸ‘‹ hÃ©llo â€” Ù…Ø±Ø­Ø¨Ø§ ä½ å¥½  zero-width \u{1F600}';
+    const content = 'ðŸ‘‹ hÃ©llo â€” Ù...Ø±Ø­Ø¨Ø§ ä½ å¥½  zero-width \u{1F600}';
     await db.createDocument({ id: 'uni', content });
 
     const doc = await db.getDocument('uni');
@@ -160,7 +160,7 @@ describe('listDocuments', () => {
     // This test failed CI twice. `now()` is the TRANSACTION start time, and PGlite
     // batches aggressively enough on CI that three sequential statements land in
     // one transaction and share a timestamp. The ordering was then decided by the
-    // tiebreaker, not by the timestamps — so the test was measuring Postgres's
+    // tiebreaker, not by the timestamps -- so the test was measuring Postgres's
     // batching, which is not a property of this code.
     const base = Date.UTC(2026, 0, 1);
 
@@ -195,7 +195,7 @@ describe('listDocuments', () => {
   it('is stable and total when documents share a timestamp', async () => {
     // `id DESC` is the tiebreaker, and it is what makes the order a total one.
     // Without it Postgres returns tied rows in heap order, which changes between
-    // calls — and a list endpoint whose order moves cannot be paginated against.
+    // calls -- and a list endpoint whose order moves cannot be paginated against.
     const stamp = new Date(Date.UTC(2026, 0, 3));
 
     await db.createDocument({ id: 'a', title: 'A' });

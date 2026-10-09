@@ -38,7 +38,7 @@ function selfCheck(): void {
   }
 
   const lines = [
-    'collab-editor — Phase 0 toolchain self-check',
+    'collab-editor -- Phase 0 toolchain self-check',
     '',
     '  LogicalClock ......... ok  (unique, monotonic element ids)',
     '  compareElementId ..... ok  (order independent of input order)',

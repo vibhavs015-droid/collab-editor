@@ -2,7 +2,7 @@
  *
  * Deliberately plain. Visual design is not the point of this project, and a
  * stylesheet large enough to need a framework would obscure what actually
- * matters — so it stays readable and dependency-free.
+ * matters -- so it stays readable and dependency-free.
  *
  * Colours use a neutral palette with one accent, and every foreground/background
  * pair is checked for contrast. An editor is a reading surface first; legibility
@@ -80,7 +80,7 @@ body {
   border: 0;
 }
 
-/* ── Toolbar ────────────────────────────────────────────────────────────── */
+/* -- Toolbar -------------------------------------------------------------- */
 
 .toolbar {
   display: flex;
@@ -127,7 +127,7 @@ body {
   background: var(--bg);
 }
 
-/* ── Buttons ────────────────────────────────────────────────────────────── */
+/* -- Buttons -------------------------------------------------------------- */
 
 .button {
   padding: 6px 12px;
@@ -183,7 +183,7 @@ body {
   border-color: var(--accent);
 }
 
-/* ── Sync status ────────────────────────────────────────────────────────────
+/* -- Sync status ------------------------------------------------------------
  * Replaces the Phase 1 save indicator. The classes are named after replication
  * state rather than persistence state, because since Phase 4 the local operation
  * log is written with every keystroke: "saved" is not a claim this app can make,
@@ -271,7 +271,7 @@ body {
   }
 }
 
-/* ── Editor area ────────────────────────────────────────────────────────── */
+/* -- Editor area ---------------------------------------------------------- */
 
 .editor-area {
   position: relative;
@@ -368,7 +368,7 @@ body {
   font-style: italic;
 }
 
-/* ── Full-area states (loading / error) ─────────────────────────────────── */
+/* -- Full-area states (loading / error) ----------------------------------- */
 
 .state {
   position: absolute;
@@ -495,7 +495,7 @@ body {
   }
 }
 
-/* ── Status bar ─────────────────────────────────────────────────────────── */
+/* -- Status bar ----------------------------------------------------------- */
 
 .statusbar {
   display: flex;

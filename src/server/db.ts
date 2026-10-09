@@ -1,7 +1,7 @@
 /**
- * Database layer — PostgreSQL via PGlite.
+ * Database layer -- PostgreSQL via PGlite.
  *
- * ── Why PGlite ───────────────────────────────────────────────────────────
+ * -- Why PGlite -----------------------------------------------------------
  * PGlite is the real PostgreSQL engine compiled to WebAssembly. Not SQLite in
  * Postgres's clothing: same parser, same planner, same SQL semantics. That
  * matters because the alternative here was genuinely worse, not merely
@@ -14,12 +14,12 @@
  *
  * PGlite gives byte-identical SQL in both places with no setup. When Phase 5
  * deploys, `DATABASE_URL` points at Supabase and this file changes shape only
- * slightly — the SQL above does not move. See ADR-0005.
+ * slightly -- the SQL above does not move. See ADR-0005.
  *
- * ── Schema note ──────────────────────────────────────────────────────────
+ * -- Schema note ----------------------------------------------------------
  * The document body is stored as plain text for Phase 1. From Phase 2 the
  * authoritative representation becomes the CRDT operation log, and
- * `documents.content` becomes a derived, disposable cache — rebuildable from
+ * `documents.content` becomes a derived, disposable cache -- rebuildable from
  * the log at any time.
  */
 
@@ -93,7 +93,7 @@ export interface CreateDocumentInput {
 
 export interface SaveResult {
   readonly updatedAt: string;
-  /** False when the stored content already matched — saves a needless write. */
+  /** False when the stored content already matched -- saves a needless write. */
   readonly changed: boolean;
 }
 
@@ -340,7 +340,7 @@ export class Database {
    * Open the database and bring the schema up to date.
    *
    * @param dataDir persistence location. Omit for a throwaway in-memory
-   *   database, which is what the tests use — it is discarded on close, so tests
+   *   database, which is what the tests use -- it is discarded on close, so tests
    *   cannot leak state into one another.
    * @param options.maxDocumentElements element cap per document. Omitted means the shipped
    *   default; pass `null` for no cap, which is only for tests that need to build a document
@@ -529,7 +529,7 @@ export class Database {
     // Parameterised, not interpolated: `limit` is user-controlled from Phase 5.
     //
     // The `id` tiebreaker is not decoration. `now()` is the *transaction* start
-    // time, so every statement in one transaction stamps the same value — and
+    // time, so every statement in one transaction stamps the same value -- and
     // PGlite batches aggressively enough on CI that three sequential calls can
     // share a timestamp. Postgres then returns tied rows in whatever order the heap
     // gives it.
@@ -845,7 +845,7 @@ export class Database {
    *   reasons: restoring a document's real age on import, and letting a test
    *   establish a known ordering instead of hoping the database's clock
    *   advanced. `now()` is the transaction start time, so statements batched into
-   *   one transaction share a timestamp — which means a test that creates three
+   *   one transaction share a timestamp -- which means a test that creates three
    *   documents and asserts on their order is testing Postgres's batching
    *   behaviour, not this code.
    *
@@ -905,7 +905,7 @@ export class Database {
     return (result.affectedRows ?? 0) > 0;
   }
 
-  // ── Operation log ─────────────────────────────────────────────────────────
+  // -- Operation log ---------------------------------------------------------
   //
   // The log is append-only and sequenced per document. `seq` is assigned by the
   // database rather than by the client, because it doubles as the replay cursor:
@@ -1200,7 +1200,7 @@ export class Database {
 
     // Snapshot FIRST, then the log. Since Phase 5 compaction prunes operations
     // below the newest snapshot, so replaying the log alone reconstructs only the
-    // part that has not been compacted — on a fully compacted document, nothing.
+    // part that has not been compacted -- on a fully compacted document, nothing.
     //
     // This failure is silent and destructive in a specific way: the method also
     // WRITES its result back to `documents.content`. Replaying only the log after
@@ -1233,8 +1233,8 @@ export class Database {
    * Two shapes, and choosing between them is the whole point of compaction
    * existing:
    *
-   *   - `ops` — a delta from the client's cursor. The ordinary case.
-   *   - `snapshot` — the client's cursor is below the newest snapshot, so the
+   *   - `ops` -- a delta from the client's cursor. The ordinary case.
+   *   - `snapshot` -- the client's cursor is below the newest snapshot, so the
    *     operations it is missing have been pruned and no delta can be produced.
    *     It is given the snapshot plus whatever came after, and must REPLACE its
    *     document rather than add to it.
@@ -1242,7 +1242,7 @@ export class Database {
    * The failure this avoids is subtle and silent: serving a delta to a client
    * below the floor produces a document that is missing everything compacted
    * away, and nothing reports an error. The client's own operations still apply,
-   * so it looks alive — it is just quietly wrong.
+   * so it looks alive -- it is just quietly wrong.
    */
   async readForClient(documentId: string, sinceSeq: number, limit = 1_000): Promise<ClientCatchUp> {
     // An encrypted document NEVER takes the snapshot branch, and cannot: the server
@@ -1357,11 +1357,11 @@ export class Database {
     return row?.seq === null || row?.seq === undefined ? 0 : toClock(row.seq);
   }
 
-  // ── Compaction ─────────────────────────────────────────────────────────────
+  // -- Compaction -------------------------------------------------------------
   //
   // Snapshot-then-prune, gated on causal stability (ADR-0011). The order matters:
   // the snapshot is written and committed BEFORE any operation is deleted, so a
-  // crash in between leaves both — wasteful, never incorrect.
+  // crash in between leaves both -- wasteful, never incorrect.
 
   /**
    * Store a snapshot, replacing any older one.

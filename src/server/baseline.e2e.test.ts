@@ -1,7 +1,7 @@
 /**
  * Snapshot baseline end-to-end.
  *
- * ── Why this file exists ────────────────────────────────────────────────────
+ * -- Why this file exists ----------------------------------------------------
  * Compaction is only safe if a peer that falls below the floor still converges.
  * Everything else about it is tested elsewhere; this tests the one thing that
  * matters: a client that has been away long enough to be given a baseline instead
@@ -9,7 +9,7 @@
  *
  * The failure this guards against is silent and severe. Serving a delta to a peer
  * below the floor produces a document missing everything that was compacted away,
- * and nothing reports an error — the peer's own operations still apply, so it looks
+ * and nothing reports an error -- the peer's own operations still apply, so it looks
  * alive. It is just quietly wrong.
  *
  * Runs against a real relay, real WebSockets and real PostgreSQL.
@@ -143,7 +143,7 @@ async function openPeer(documentId: string, site: string, log = new MemoryLog())
     },
     deliver: (frame) => {
       // Emitted rather than written through the socket, so a frame can be
-      // delivered while `readyState` says the connection is dead — which is the
+      // delivered while `readyState` says the connection is dead -- which is the
       // exact situation being tested.
       socket.emit('message', Buffer.from(JSON.stringify(frame)));
     },
@@ -430,7 +430,7 @@ describe('baseline - refusal', () => {
     const peer = await openPeer(id, 'busy');
     await settle(20);
 
-    // The client has typed, and the socket cannot take it — the browser has not
+    // The client has typed, and the socket cannot take it -- the browser has not
     // fired `close` on a connection the network has dropped. This is the exact
     // window in which adopting a baseline would destroy work.
     peer.killSocket();

@@ -3,7 +3,7 @@
  *
  * Owns one CRDT replica per open document and persists every accepted operation.
  *
- * ── Why the server keeps a replica at all ──────────────────────────────────
+ * -- Why the server keeps a replica at all ----------------------------------
  * The relay is a dumb forwarder (ADR-0007), and this class deliberately does not
  * change that: it does not decide what any operation means, and it never sends
  * a merged result to anybody. It keeps a replica for one reason only, and that
@@ -205,7 +205,7 @@ export class DocumentStore {
     }
   }
 
-  // ── Compaction ─────────────────────────────────────────────────────────────
+  // -- Compaction -------------------------------------------------------------
 
   #compaction: {
     enabled: boolean;
@@ -334,7 +334,7 @@ export class DocumentStore {
    * The sequence is recovered, not assumed. `readAllOps` returns operations in
    * order without their sequences, and everything above the snapshot is contiguous
    * from `snapshot + 1`, so it is recoverable. Deriving it from row position alone
-   * would be wrong the moment a prune has happened — and wrong silently.
+   * would be wrong the moment a prune has happened -- and wrong silently.
    */
   async #readRetained(
     documentId: string,
@@ -552,7 +552,7 @@ export class DocumentStore {
    * user's keystroke reaching a collaborator.
    *
    * The counter is per process and resets on restart, so a freshly started server
-   * compacts a little later than a warm one. That is acceptable — compaction is
+   * compacts a little later than a warm one. That is acceptable -- compaction is
    * opportunistic, and skipping a pass costs storage for a while, never
    * correctness.
    */

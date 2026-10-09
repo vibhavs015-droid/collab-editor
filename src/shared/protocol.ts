@@ -1,7 +1,7 @@
 /**
- * Sync protocol — transport envelope shared by client and server.
+ * Sync protocol -- transport envelope shared by client and server.
  *
- * Scope note: this file defines the *envelope* only — the shape of the
+ * Scope note: this file defines the *envelope* only -- the shape of the
  * messages that cross the WebSocket boundary. It deliberately does NOT define
  * the CRDT operation types, because those are Phase 2 and guessing their API
  * now would mean rewriting this file the moment the CRDT design changes.
@@ -71,7 +71,7 @@ export const MAX_OPS_PER_FRAME = 1_000;
  */
 export const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 
-// ── Client → Server ──────────────────────────────────────────────────────
+// -- Client → Server ------------------------------------------------------
 
 export interface HelloMessage {
   readonly type: 'hello';
@@ -252,7 +252,7 @@ export type ClientMessage =
   | ResyncRequestMessage
   | PongMessage;
 
-// ── Server → Client ──────────────────────────────────────────────────────
+// -- Server → Client ------------------------------------------------------
 
 export interface WelcomeMessage {
   readonly type: 'welcome';
@@ -284,7 +284,7 @@ export interface OpsMessage {
  * Sent when the client's cursor is below the newest compaction snapshot, so the
  * operations it is missing no longer exist. Applying `ops` alone would produce a
  * document missing everything that was compacted away, and nothing would report an
- * error — the client would look alive and be quietly wrong.
+ * error -- the client would look alive and be quietly wrong.
  *
  * The client's obligation, and it is not optional:
  *
@@ -380,7 +380,7 @@ export type ServerMessage =
   | PingMessage
   | ErrorMessage;
 
-// ── Runtime validation ───────────────────────────────────────────────────
+// -- Runtime validation ---------------------------------------------------
 
 const CLIENT_MESSAGE_TYPES = new Set(['hello', 'ops', 'ops-enc', 'presence', 'resync', 'pong']);
 
@@ -514,7 +514,7 @@ export function parseEncryptedFrame(raw: unknown): EncryptedOperationFrame | nul
  * Validate an inbound client message.
  *
  * This is the server's only real defence. Types are erased at runtime, so an
- * unvalidated `JSON.parse` result is effectively `any` — and a WebSocket accepts
+ * unvalidated `JSON.parse` result is effectively `any` -- and a WebSocket accepts
  * a payload from anything that can reach the port. Assume hostile input, drop
  * anything unrecognised, and never let a malformed message reach the CRDT.
  *

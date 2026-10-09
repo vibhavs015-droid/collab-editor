@@ -179,7 +179,7 @@ export function isApiPath(pathname: string): boolean {
  *   1. No `..` segment survives decoding, catching `/../../etc/passwd` and every encoded
  *      variant of it.
  *   2. The resolved path is compared against the real root as a *prefix with a
- *      separator*, catching what segment analysis misses — notably a symlink whose target
+ *      separator*, catching what segment analysis misses -- notably a symlink whose target
  *      lies outside the root, and the Windows-specific case where a path segment is a
  *      short name (`PROGRA~1`) or uses an alternate separator.
  *

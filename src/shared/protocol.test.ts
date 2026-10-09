@@ -78,7 +78,7 @@ describe('parseClientMessage', () => {
   });
 
   it('accepts a presence message with an explicit null cursor', () => {
-    // null means "client lost focus" — a legitimate state, not a missing field.
+    // null means "client lost focus" -- a legitimate state, not a missing field.
     const parsed = parseClientMessage(
       JSON.stringify({ type: 'presence', documentId: 'd', cursor: null, selectedLength: 0 }),
     );
@@ -114,7 +114,7 @@ describe('parseClientMessage', () => {
     }
   });
 
-  it('does NOT inspect op payloads — that is deliberately out of scope', () => {
+  it('does NOT inspect op payloads -- that is deliberately out of scope', () => {
     // Boundary worth stating explicitly, because it looks like an oversight and
     // is not. The envelope guarantees the *shape* of the frame; it makes no
     // claim about the operations inside. `Operation` is an opaque `JsonValue`

@@ -1,8 +1,8 @@
 /**
- * Logical clocks and element identity — foundational primitives for the
+ * Logical clocks and element identity -- foundational primitives for the
  * sequence CRDT (RGA) built in Phase 2.
  *
- * ── Why this file exists ────────────────────────────────────────────────
+ * -- Why this file exists ------------------------------------------------
  * In a non-CRDT system like Google Docs, the server assigns a total order to
  * every edit, so "which edit came first?" has one obvious answer.
  *
@@ -11,8 +11,8 @@
  * giving every inserted character a globally unique ID of the form
  * (site, clock):
  *
- *   site  — which replica created it (stable per session)
- *   clock — a per-replica counter that never goes backwards
+ *   site  -- which replica created it (stable per session)
+ *   clock -- a per-replica counter that never goes backwards
  *
  * Two guarantees make the whole scheme work:
  *   1. No two characters ever share an ID  → IDs are totally unique
@@ -46,9 +46,9 @@ export type ElementId = {
 /**
  * Total order over element IDs.
  *
- * Ordering rule (this IS the algorithm — everything else is bookkeeping):
+ * Ordering rule (this IS the algorithm -- everything else is bookkeeping):
  *   1. Lower clock sorts first.
- *   2. On equal clocks — i.e. two *concurrent* inserts — break the tie on
+ *   2. On equal clocks -- i.e. two *concurrent* inserts -- break the tie on
  *      site ID, lexicographically.
  *
  * Step 2 is the detail people miss. When two replicas insert at the same
@@ -91,7 +91,7 @@ export function elementIdKey(id: ElementId): string {
 /**
  * A replica's monotonic counter, scoped to one site.
  *
- * ── Why this is a Lamport clock ───────────────────────────────────────────
+ * -- Why this is a Lamport clock -------------------------------------------
  * The counter advances past every clock this replica has *seen*, not only past
  * its own. That is not cosmetic; without it a local edit lands in the wrong
  * place.

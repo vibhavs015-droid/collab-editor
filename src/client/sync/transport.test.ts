@@ -48,7 +48,7 @@ class FakeSocket {
     return this.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>);
   }
 
-  // ── Test controls ──
+  // -- Test controls --
 
   /** Simulate the connection opening. */
   triggerOpen(): void {
@@ -1408,6 +1408,74 @@ describe('SyncTransport', () => {
 
       h.transport.disconnect();
       expect(h.transport.queuedOperationCount).toBe(0);
+    });
+
+    /**
+     * The distinction T9b asked to be pinned rather than described.
+     *
+     * `disconnect()` dropping the queue is only safe because it is TERMINAL - it sets
+     * `#closedByUser` and no network event can reach it. Both halves matter, and either one alone
+     * would be a bug:
+     *
+     *   - if it stopped being terminal, queued work would be dropped on a recoverable path, which
+     *     is the data loss ADR-0008 exists to prevent
+     *   - if the recoverable path started dropping the queue, reconnect would silently stop
+     *     resending, which is what the T4 tests above already guard
+     *
+     * So this asserts both: disconnect never reconnects, and a plain socket close still does.
+     */
+    it('never reconnects after disconnect, unlike a plain socket close', async () => {
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      h.transport.send(sampleOps);
+
+      // Terminal: no reconnect, however long we wait.
+      h.transport.disconnect();
+      const afterDisconnect = FakeSocket.instances.length;
+
+      vi.advanceTimersByTime(60_000);
+      expect(
+        FakeSocket.instances.length,
+        'a transport that was told to disconnect reconnected anyway',
+      ).toBe(afterDisconnect);
+    });
+
+    it('resends queued work across a recoverable socket close', async () => {
+      // The other half, and the assertion that makes the one above safe. A socket dying is not a
+      // request to stop syncing.
+      //
+      // Asserted on the NEW socket rather than on the queue length, because the correct outcome
+      // is that the work is already gone from the outbox by the time this looks - it was requeued
+      // by the close and flushed again on reconnect. Checking `queuedOperationCount` would have
+      // reported that correct behaviour as a failure, which is what the first version of this
+      // test did.
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      h.transport.send(sampleOps);
+      expect(opsSentOn(FakeSocket.last())).toHaveLength(1);
+
+      FakeSocket.last().triggerClose();
+      vi.advanceTimersByTime(500);
+
+      expect(FakeSocket.instances.length, 'the transport did not reconnect').toBeGreaterThan(1);
+
+      const reconnected = FakeSocket.last();
+      reconnected.triggerOpen();
+      await Promise.resolve();
+      await admit(reconnected);
+
+      expect(
+        opsSentOn(reconnected),
+        'the operations written to the dead socket were not resent after reconnecting',
+      ).toHaveLength(1);
     });
   });
 });

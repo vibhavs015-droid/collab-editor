@@ -229,7 +229,7 @@ describe('Replica.compactLog', () => {
 
     // The delete is passed as unsent, because it is not acknowledged by any server. Its
     // target is a tombstone, and a snapshot that dropped it would make the delete
-    // permanently unapplicable — a silently undelivered edit.
+    // permanently unapplicable -- a silently undelivered edit.
     const result = await writer.compactLog({
       keepAtLeast: 2,
       unsent: [{ type: 'delete', target: { site: 'client', clock: 11 } }],
@@ -245,7 +245,7 @@ describe('Replica.compactLog', () => {
 
   it('declines rather than dropping a tombstone the tail still needs', async () => {
     // The coverage check earning its keep. The tail contains a delete of clock 11, and
-    // with nothing declared unsent the snapshot drops that tombstone — so the delete
+    // with nothing declared unsent the snapshot drops that tombstone -- so the delete
     // could never be applied again. Refusing is the only safe answer.
     //
     // It is also self-clearing: once enough later operations push the delete below the

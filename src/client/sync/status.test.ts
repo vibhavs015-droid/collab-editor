@@ -168,8 +168,8 @@ describe('resolveSync - exhaustiveness', () => {
     // tell them apart.
     //
     // serverState is deliberately not swept here. With the socket not open,
-    // 'synced' and 'pending' describe the same user-visible reality — a queued
-    // count of zero — and the last-resort state the transport reports before it
+    // 'synced' and 'pending' describe the same user-visible reality -- a queued
+    // count of zero -- and the last-resort state the transport reports before it
     // knows anything. Adding them here would assert a distinction the UI does not
     // make and should not.
     const seen = new Map<string, string>();

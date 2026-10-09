@@ -14,12 +14,12 @@
 import type { MetricType, Metrics } from './metrics.js';
 
 export const M = {
-  // ── HTTP ────────────────────────────────────────────────────────────────────
+  // -- HTTP --------------------------------------------------------------------
   httpRequests: 'http_requests_total',
   httpDuration: 'http_request_duration_seconds',
   httpInFlight: 'http_requests_in_flight',
 
-  // ── WebSocket ───────────────────────────────────────────────────────────────
+  // -- WebSocket ---------------------------------------------------------------
   wsConnectionsOpened: 'ws_connections_opened_total',
   wsConnectionsClosed: 'ws_connections_closed_total',
   wsConnectionsActive: 'ws_connections_active',
@@ -29,7 +29,7 @@ export const M = {
   wsBackpressureDrops: 'ws_backpressure_drops_total',
   helloDuration: 'ws_hello_duration_seconds',
 
-  // ── Operations ──────────────────────────────────────────────────────────────
+  // -- Operations --------------------------------------------------------------
   opsReceived: 'collab_operations_received_total',
   opsBroadcast: 'collab_operations_broadcast_total',
   opsRejected: 'collab_operations_rejected_total',
@@ -47,18 +47,18 @@ export const M = {
   replayOps: 'collab_replay_operations_total',
   replayDuration: 'collab_replay_duration_seconds',
 
-  // ── Compaction ──────────────────────────────────────────────────────────────
+  // -- Compaction --------------------------------------------------------------
   compactionRuns: 'collab_compaction_runs_total',
   compactionPruned: 'collab_compaction_operations_pruned_total',
   compactionSkipped: 'collab_compaction_skipped_total',
   logLength: 'collab_log_length',
   logTombstones: 'collab_log_tombstones',
 
-  // ── Auth ────────────────────────────────────────────────────────────────────
+  // -- Auth --------------------------------------------------------------------
   authFailures: 'collab_auth_failures_total',
   sessionsIssued: 'collab_sessions_issued_total',
 
-  // ── Process ─────────────────────────────────────────────────────────────────
+  // -- Process -----------------------------------------------------------------
   processMemory: 'process_resident_memory_bytes',
 } as const;
 
@@ -75,7 +75,7 @@ const METRICS: readonly {
   readonly type: MetricType;
   readonly help: string;
 }[] = [
-  // ── HTTP ────────────────────────────────────────────────────────────────────
+  // -- HTTP --------------------------------------------------------------------
   {
     name: M.httpRequests,
     type: 'counter',
@@ -84,7 +84,7 @@ const METRICS: readonly {
   { name: M.httpInFlight, type: 'gauge', help: 'HTTP requests currently being handled.' },
   { name: M.httpDuration, type: 'histogram', help: 'HTTP request duration in seconds.' },
 
-  // ── WebSocket ───────────────────────────────────────────────────────────────
+  // -- WebSocket ---------------------------------------------------------------
   { name: M.wsConnectionsOpened, type: 'counter', help: 'WebSocket connections accepted.' },
   { name: M.wsConnectionsClosed, type: 'counter', help: 'WebSocket connections closed.' },
   { name: M.wsConnectionsActive, type: 'gauge', help: 'Authorised WebSocket clients connected.' },
@@ -106,7 +106,7 @@ const METRICS: readonly {
     help: 'Time from socket open to hello being written.',
   },
 
-  // ── Operations ──────────────────────────────────────────────────────────────
+  // -- Operations --------------------------------------------------------------
   { name: M.opsReceived, type: 'counter', help: 'Operations accepted from clients, by type.' },
   { name: M.opsBroadcast, type: 'counter', help: 'Operations relayed to other clients.' },
   { name: M.opsRejected, type: 'counter', help: 'Operations rejected as malformed.' },
@@ -128,18 +128,18 @@ const METRICS: readonly {
   { name: M.replayOps, type: 'counter', help: 'Operations replayed to catch a client up.' },
   { name: M.replayDuration, type: 'histogram', help: 'Time to catch a client up, in seconds.' },
 
-  // ── Compaction ──────────────────────────────────────────────────────────────
+  // -- Compaction --------------------------------------------------------------
   { name: M.compactionRuns, type: 'counter', help: 'Compaction passes attempted, by outcome.' },
   { name: M.compactionPruned, type: 'counter', help: 'Operations deleted by compaction.' },
   { name: M.compactionSkipped, type: 'counter', help: 'Compaction passes declined, by reason.' },
   { name: M.logLength, type: 'gauge', help: 'Retained operations per document.' },
   { name: M.logTombstones, type: 'gauge', help: 'Tombstoned elements per document.' },
 
-  // ── Auth ────────────────────────────────────────────────────────────────────
+  // -- Auth --------------------------------------------------------------------
   { name: M.authFailures, type: 'counter', help: 'Tokens refused, by reason.' },
   { name: M.sessionsIssued, type: 'counter', help: 'Anonymous sessions minted.' },
 
-  // ── Process ─────────────────────────────────────────────────────────────────
+  // -- Process -----------------------------------------------------------------
   { name: M.processMemory, type: 'gauge', help: 'Resident set size in bytes.' },
 ];
 

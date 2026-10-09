@@ -1,7 +1,7 @@
 /**
  * Browser entry point.
  *
- * ── What changed in Phase 4 ────────────────────────────────────────────────
+ * -- What changed in Phase 4 ------------------------------------------------
  * Phase 1 saved text to the server on a debounce. Phase 3 bolted a relay on the
  * side. Neither was offline-first: kill the network and Phase 1 lost the debounce
  * window, Phase 3's relay lost everything it had not forwarded.
@@ -449,12 +449,12 @@ function socketUrlFor(documentId: string): string {
 /**
  * Replace this device's document with a server baseline.
  *
- * ── Why this replaces rather than merges ────────────────────────────────────
+ * -- Why this replaces rather than merges ------------------------------------
  * The transport only calls this once the outbox is empty, so everything the user
  * typed is already on the server and present in the baseline. Applying the baseline
  * on top of the existing document would double it.
  *
- * ── Why the editor is rebuilt rather than patched ───────────────────────────
+ * -- Why the editor is rebuilt rather than patched ---------------------------
  * The whole document changes. CodeMirror's change set is built by diffing the old
  * and new element snapshots, which is exactly the machinery in `binding.ts`, so the
  * reset goes through the same path as any other remote change rather than growing

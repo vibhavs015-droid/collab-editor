@@ -273,7 +273,7 @@ describe('decideCompaction - the safety check', () => {
 
   it('never drops a tombstone the tail names', () => {
     // The realistic version: delete a character, then have a peer insert after it.
-    // A peer has to be behind for this to matter at all — with no peers connected
+    // A peer has to be behind for this to matter at all -- with no peers connected
     // the floor is the tip, the tail is empty, and the check is trivially true.
     const doc = new RgaDocument('author');
     const ops: Operation[] = [...doc.insertAt(0, 'abcdef')];
