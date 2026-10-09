@@ -31,8 +31,17 @@ export default tseslint.config(
         // exist here sit directly in `scripts/`, so one level of `*` is enough, and if
         // one moves into a subdirectory it should be named explicitly rather than
         // answered by widening the glob.
+        //
+        // `scripts/bench-replay.ts` is named explicitly for the same reason. It produces the
+        // numbers in docs/benchmarks.md, so it is code whose output is trusted; leaving it
+        // unlinted would make it the one script that can quietly rot.
         projectService: {
-          allowDefaultProject: ['*.config.ts', '*.config.js', 'scripts/*.test.ts'],
+          allowDefaultProject: [
+            '*.config.ts',
+            '*.config.js',
+            'scripts/*.test.ts',
+            'scripts/bench-replay.ts',
+          ],
         },
         tsconfigRootDir: import.meta.dirname,
       },
