@@ -182,10 +182,16 @@ with the real `Replica`, and runs in CI.
 | Lint            | `npm run lint`                 | 0 problems  |
 | Format          | `npm run format:check`         | clean       |
 | Line endings    | `npm run check:line-endings`   | clean       |
-| Tests           | `npm test`                     | 931 passing |
+| Tests           | `npm test`                     | all passing |
 | Vulnerabilities | `npm audit --audit-level=high` | 0           |
 
-CI runs each as a separate gate, plus a dependency-audit job.
+CI runs each as a separate gate, plus a dependency-audit job and a browser job that runs the
+Playwright suite against a real built server.
+
+**No test count is given on purpose.** This table carried one and it was wrong three times —
+919, then 931, while the suite was actually past 1100 — because a number in a README is not
+maintained by anything. The command is; its output is not a claim. If you want the count,
+`npm test` prints it, and `npm run test:e2e` prints the browser suite.
 
 The line-endings gate exists because `.gitattributes` alone was not enough: git normalises
 the index on commit, so a file written with CRLF still commits cleanly and only reveals
@@ -434,6 +440,29 @@ Code shows what was built; only documentation shows what was rejected.
 
 Stated explicitly rather than left for a reviewer to discover.
 
+- **"Synced" means acknowledged, not merely sent.** The indicator clears when the server has
+  acknowledged every operation this client wrote, not when the frames were handed to the socket
+  (ADR-0015). It says nothing about whether a _collaborator_ has applied your text, and it cannot:
+  the relay never merges, so a peer behind on a slow link is simply behind. A green indicator and
+  a collaborator who has not seen your keystroke are consistent states.
+- **A half-open connection is detected on a deadline, not instantly.** The server pings every 25
+  seconds and closes a peer that has not answered within 10; the client gives up after 75 seconds
+  of total silence (ADR-0016). So the worst case between a network going away and the UI admitting
+  it is over a minute. A link with more than 75 seconds of latency, or a tab the OS freezes for
+  longer, will be declared dead and will reconnect. That trade is deliberate — anything shorter
+  would punish one congested packet — but it is a real cost, and it has not been measured against a
+  real slow link, only against withheld frames in tests.
+- **Expect roughly a quarter gigabyte of memory, and treat that as a floor.** PGlite is Postgres
+  compiled to WebAssembly and keeps its working set resident. Measured on the development machine
+  with an empty database after one health request: **257 MB** idle RSS. There is no streaming mode
+  and no eviction, so this is a starting point rather than an average — a large document replays
+  into memory, and nothing caps how many documents a client may hold open.
+- **Replay is still quadratic in the length of the log.** `Replay on 20,000 operations is ~1.4 s,
+  and the cost grows faster than linearly with the number of operations, because resolving an
+  insert's anchor is still a linear scan. Element lookup no longer allocates a string per element
+  compared (T5), which was 12x at 20,000 operations, but the scan itself remains. Numbers and
+  method in [docs/benchmarks.md](./docs/benchmarks.md). This is why a large document takes
+  seconds to open rather than milliseconds.
 - **`document_ops` is one row per character, but compaction now prunes it.**
   Snapshots preserve element IDs and compaction is gated on causal stability, so the
   log stays bounded while clients are connected. It is not bounded for a document
@@ -456,7 +485,12 @@ Stated explicitly rather than left for a reviewer to discover.
 - **Run exactly one server instance.** Fan-out is in-process, so a second instance would
   not see the first one's connected clients and a document's collaborators would be split
   across two half-relays. A pub/sub broker is the fix and has not been built.
-- Rate limiting is per-process and in-memory, so it resets on restart.
+- Rate limiting is per-process and in-memory, so it resets on restart. The limits themselves are
+  configurable (`MAX_TITLE_LENGTH`, `OPS_BURST`, `OPS_PER_SECOND`, `MAX_DOCUMENT_ELEMENTS`); the
+  defaults are in [src/server/limits.ts](./src/server/limits.ts) and have not been tuned against
+  production traffic, because there has been none. Neither quota is a permanent refusal — both
+  report a retryable error and keep the connection, since refusing outright would leave a user
+  unable to delete the document that hit the cap.
 - Security has **not** been independently reviewed. Input validation covers
   protocol framing, request bodies and CRDT operations; authorisation is now
   covered by tests, but no one outside this repository has read it.
@@ -466,6 +500,15 @@ Stated explicitly rather than left for a reviewer to discover.
 - The test suite takes ~5 minutes, dominated by Postgres start-up per suite. Files
   that need many cases share one boot and truncate between tests; see
   `Database.truncateAll`.
+- **The Docker image has never been built.** Docker is not installed on the machine this was
+  developed on, so [docs/deploy.md](./docs/deploy.md) documents a path that has never been
+  exercised. Treat it as a reviewed proposal, not as instructions known to work.
+- **One browser test is flaky and the cause is unknown.** The 6,000-character paste scenario
+  (`e2e/editor.spec.ts` scenario d) intermittently fails with the peer holding a _prefix_ of the
+  document — 4,000 of 6,000 characters observed. There is no backpressure event and no
+  disconnection in any observed failure, the scenario converges in ~12 s against a 90 s budget,
+  and it passes 5 of 5 in isolation, so a loaded machine is the leading theory and it is only a
+  theory. It is not silent truncation: the bytes that arrive are correct and in order.
 - **The encrypted path has load numbers but no k6 figures.** k6 runs on Go with no
   WebCrypto, so it cannot encrypt, and writing AES-GCM in JavaScript for the load
   generator would be a second crypto implementation. Convergence under contention is proven
