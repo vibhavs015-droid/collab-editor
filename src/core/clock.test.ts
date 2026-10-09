@@ -21,7 +21,7 @@ describe('compareElementId', () => {
 
   it('breaks same-clock ties on site, deterministically', () => {
     // Two replicas inserted concurrently. Neither is "first" causally, so we
-    // resolve on site ID — and both replicas must reach the same answer.
+    // resolve on site ID -- and both replicas must reach the same answer.
     expect(compareElementId(id('alice', 5), id('bob', 5))).toBeLessThan(0);
     expect(compareElementId(id('bob', 5), id('alice', 5))).toBeGreaterThan(0);
   });

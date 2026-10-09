@@ -338,7 +338,7 @@ describe('CORS preflight', () => {
 describe('unicode and large payloads', () => {
   it('round-trips unicode content through save and load', async () => {
     await createDocument('uni');
-    const content = '👋 héllo — مرحبا 你好';
+    const content = '👋 héllo -- مرحبا 你好';
 
     await authedFetch(`/api/documents/uni`, {
       method: 'PATCH',

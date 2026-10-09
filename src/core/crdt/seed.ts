@@ -1,7 +1,7 @@
 /**
  * Turning a plain string into CRDT operations.
  *
- * ── Why this exists ────────────────────────────────────────────────────────
+ * -- Why this exists --------------------------------------------------------
  * A CRDT replica can only apply operations; it cannot "load text". Every path
  * that starts from plain text needs the same deterministic conversion:
  *
@@ -9,7 +9,7 @@
  *   - a document created by the HTTP API, which takes text rather than ops
  *   - a test that wants a known starting document
  *
- * ── Why determinism matters ────────────────────────────────────────────────
+ * -- Why determinism matters ------------------------------------------------
  * The conversion must produce the SAME element IDs for the same text every time
  * it runs, on any machine, in any order. Two clients that independently convert
  * the same initial text must converge, not produce the text twice. That means:

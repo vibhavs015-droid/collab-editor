@@ -1,7 +1,7 @@
 /**
  * IndexedDB-backed operation log.
  *
- * ── Why IndexedDB and not localStorage ────────────────────────────────────
+ * -- Why IndexedDB and not localStorage ------------------------------------
  * localStorage is synchronous and capped around 5 MB. Every keystroke produces at
  * least one operation, and the log must hold the entire document history for
  * offline-first to work. A synchronous API on the main thread would also block
@@ -9,7 +9,7 @@
  *
  * IndexedDB is asynchronous, transactional, and holds far more.
  *
- * ── Why the log is authoritative ──────────────────────────────────────────
+ * -- Why the log is authoritative ------------------------------------------
  * The document text is a projection. This log is the source of truth. That is
  * what lets a client offline for a week reconcile by replaying rather than
  * guessing, and it is why remote operations are written here too (ADR-0007).

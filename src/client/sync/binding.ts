@@ -1,7 +1,7 @@
 /**
  * The bridge between CodeMirror and the CRDT.
  *
- * ── The one invariant that matters ─────────────────────────────────────────
+ * -- The one invariant that matters -----------------------------------------
  * After every turn of the event loop, `view.state.doc.toString()` equals
  * `replica.text`. Everything else here is in service of that.
  *
@@ -9,7 +9,7 @@
  * and the user has no way to tell. So every dispatch in this file is followed by
  * a check, and a mismatch is repaired from the CRDT rather than tolerated.
  *
- * ── Why operations do not round-trip ───────────────────────────────────────
+ * -- Why operations do not round-trip ---------------------------------------
  * A naive binding dispatches a change, sees the update listener fire, and
  * converts that change back into operations to broadcast. That is how a
  * collaborator's keystroke gets echoed back to them, applied again, and turned

@@ -1,14 +1,14 @@
 /**
  * Turning editor edits into CRDT operations.
  *
- * ── Why this is not a method on the binding ────────────────────────────────
+ * -- Why this is not a method on the binding --------------------------------
  * The translation is the part most likely to be wrong and the part hardest to
  * eyeball. A single offset mistake does not crash; it quietly inserts a
  * character in the wrong place, and the document still looks plausible. Pulling
  * it out of the CodeMirror-bound class means it can be tested exhaustively with
  * no DOM at all.
  *
- * ── The rule ───────────────────────────────────────────────────────────────
+ * -- The rule ---------------------------------------------------------------
  * Every edit is expressed in the coordinates of the document as it was BEFORE
  * the batch. Multiple edits in one batch (multi-cursor typing, find-and-replace)
  * are therefore all in the same coordinate space and must be applied in ascending

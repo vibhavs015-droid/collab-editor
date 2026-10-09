@@ -1,7 +1,7 @@
 /**
  * Deciding when a log may be compacted.
  *
- * ── Why this is a pure module ───────────────────────────────────────────────
+ * -- Why this is a pure module -----------------------------------------------
  * The rule is "prune only below what no live peer can still need". Getting that
  * wrong deletes operations a peer has not seen, and the symptom is a peer that
  * silently stops receiving updates. There is no error, no log line, and no way to
@@ -11,7 +11,7 @@
  * makes every combination of peer cursors and log shape assertable rather than a
  * matter of judgement, which is the only reason to trust it at all.
  *
- * ── Why a minimum, not a maximum ───────────────────────────────────────────
+ * -- Why a minimum, not a maximum -------------------------------------------
  * Causal stability is about the SLOWEST peer. One client that has acknowledged
  * only sequence 10 pins the floor at 10 no matter how far ahead everyone else is.
  * That is correct and it is also why a single abandoned tab would otherwise stop
@@ -69,7 +69,7 @@ export interface CompactionInput {
    * The sequence is carried explicitly rather than inferred from array position.
    * Position equals the sequence only while the log is contiguous from 1, and it
    * stops being contiguous the moment compaction prunes anything. Inferring it
-   * would make every sequence wrong after the first successful compaction —
+   * would make every sequence wrong after the first successful compaction --
    * silently, which is the worst way for it to be wrong.
    */
   readonly ops: readonly { readonly seq: number; readonly op: Operation }[];
@@ -107,7 +107,7 @@ export function decideCompaction(
   const belowFloor = input.ops.filter((entry) => entry.seq <= floor);
 
   // Checked before the size threshold, because after a successful compaction the
-  // log below the floor is empty — so "too small" would be reported for every
+  // log below the floor is empty -- so "too small" would be reported for every
   // subsequent call and the real reason ("there is nothing left to reclaim")
   // would never surface.
   if (input.snapshotSeq !== null && input.snapshotSeq >= floor) {

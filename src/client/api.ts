@@ -3,7 +3,7 @@
  *
  * Every function returns data or throws {@link ApiError}. No function returns
  * `null` for a failure, because a caller that forgets to check `null` fails
- * silently — whereas a thrown error surfaces at the point of the mistake and can
+ * silently -- whereas a thrown error surfaces at the point of the mistake and can
  * be caught by the UI, which is exactly what the error states need.
  *
  * The UI never talks to `fetch` directly, so error handling lives in one place.
@@ -296,7 +296,7 @@ async function request<T>(path: string, init?: RequestInit, retried = false): Pr
     response = await fetch(path, { ...init, headers });
   } catch (error) {
     // fetch only rejects on a network-level failure, which for this app means
-    // "the server is unreachable" — worth saying plainly.
+    // "the server is unreachable" -- worth saying plainly.
     throw new ApiError(
       0,
       'NETWORK_ERROR',

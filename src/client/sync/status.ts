@@ -1,7 +1,7 @@
 /**
  * Sync status: the one place that decides what the indicator says.
  *
- * ── Why this is not just a string in main.ts ───────────────────────────────
+ * -- Why this is not just a string in main.ts -------------------------------
  * The indicator is the only feedback a user gets about whether their work is safe
  * and shared. Getting it wrong is worse than not having it: a dot that says
  * "synced" while operations are queued locally teaches the user to trust a lie.
@@ -10,7 +10,7 @@
  * and it forces the states to be explicit rather than emerging from whichever
  * callback happened to run last.
  *
- * ── The states, and why they are not collapsed ─────────────────────────────
+ * -- The states, and why they are not collapsed -----------------------------
  *   synced     every operation is on the server
  *   pending    typed locally, waiting for a connection
  *   offline    no connection; the queue is growing

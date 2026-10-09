@@ -1,9 +1,21 @@
 /**
  * RGA (Replicated Growable Array): the CRDT itself.
  *
- * NOTE ON ENCODING: this file is ASCII-only by design. An earlier revision was
- * corrupted by shell round-tripping that mangled UTF-8 em dashes in comments.
- * Plain ASCII here costs nothing and removes that entire failure mode.
+ * NOTE ON ENCODING: the COMMENTS in this file are ASCII-only by design. An
+ * earlier revision was corrupted by shell round-tripping that mangled UTF-8
+ * em dashes and box-drawing characters in comments. Plain ASCII in prose costs
+ * nothing and removes that entire failure mode.
+ *
+ * Precisely COMMENTS. A handful of files contain non-ASCII in string literals -
+ * the sync indicator's labels, the editor's placeholder - because those are
+ * product copy shown to a user, and an em dash there is a deliberate typographic
+ * choice rather than an accident. T9 measured this: 17 files claimed "ASCII
+ * only" and did not honour it, and the violations split cleanly into comment
+ * banners (fixed) and product strings (kept).
+ *
+ * So the rule is: no non-ASCII in comments, freely allowed in user-facing
+ * strings. Editing a comment through a shell that re-encodes text is what this
+ * rule exists to make safe; nothing in the product depends on it.
  *
  * ---------------------------------------------------------------------------
  * THE PROBLEM

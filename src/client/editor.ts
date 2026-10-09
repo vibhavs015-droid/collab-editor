@@ -1,17 +1,17 @@
 /**
  * CodeMirror 6 setup.
  *
- * ── Why CodeMirror and not a hand-rolled textarea ─────────────────────────
+ * -- Why CodeMirror and not a hand-rolled textarea -------------------------
  * A textarea is not an editor. It has no document model, no transactions, and
  * no undo stack you can inspect. Collaboration requires a document model that
  * supports fine-grained changes, and CodeMirror 6 already has one built around
  * exactly that.
  *
  * The alternative would spend a week on caret handling and selection bugs and
- * produce nothing that advances the CRDT — which is the part of this project
+ * produce nothing that advances the CRDT -- which is the part of this project
  * that matters. Recorded in ADR-0005.
  *
- * ── Why CodeMirror's undo stack is not used ───────────────────────────────
+ * -- Why CodeMirror's undo stack is not used -------------------------------
  * Phase 1 enabled CodeMirror's `history()` extension. Phase 4 removes it.
  *
  * Two undo stacks cannot both be right. CodeMirror's records the transactions it

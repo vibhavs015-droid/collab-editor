@@ -1,7 +1,7 @@
 /**
  * Document snapshots.
  *
- * ── Why a snapshot is not just text ────────────────────────────────────────
+ * -- Why a snapshot is not just text ----------------------------------------
  * RGA integrates an insert by finding the element its `origin` names. If a
  * snapshot were a string, every operation that arrives after it would be
  * unplaceable, and the peer that sent it would be permanently, silently behind.
@@ -11,12 +11,12 @@
  * same `applyInAnyOrder` path as any other operation, which means there is no
  * second code path and nothing extra to keep correct.
  *
- * ── What a snapshot deliberately excludes ──────────────────────────────────
+ * -- What a snapshot deliberately excludes ----------------------------------
  * Tombstones. A tombstoned character is not in the document, and no future
  * insert should ever land after it in a way that matters. They stay in the
  * operation log until causal stability says otherwise (ADR-0011).
  *
- * ── Determinism ────────────────────────────────────────────────────────────
+ * -- Determinism ------------------------------------------------------------
  * `snapshotToOperations` mints IDs under a caller-supplied site. Two servers
  * snapshotting the same document must produce identical IDs or their snapshots
  * will not merge, so the site is derived from the document, never generated here.
@@ -60,14 +60,14 @@ export interface SnapshotElement {
 /**
  * Build a snapshot from a replica.
  *
- * ── Why live elements are re-anchored, not stored with their original origins ─
+ * -- Why live elements are re-anchored, not stored with their original origins -
  * The obvious version of this function copies each element's original `origin`.
  * That does not work, because a live element frequently anchors to a DELETED one:
  * delete "quick" from "the quick brown fox" and the space before "brown" is still
  * visible but was created as a child of the deleted "k".
  *
  * Carrying that origin means carrying every tombstone, so compaction reclaims
- * nothing on exactly the documents that need it most — the ones people have edited
+ * nothing on exactly the documents that need it most -- the ones people have edited
  * heavily.
  *
  * Instead each live element is re-anchored to its nearest live ancestor, and
@@ -197,7 +197,7 @@ export function snapshotToOperations(snapshot: DocumentSnapshot): Operation[] {
 /**
  * Rebuild the text a snapshot represents.
  *
- * Not a shortcut around the CRDT — a cross-check. A caller that uses this instead
+ * Not a shortcut around the CRDT -- a cross-check. A caller that uses this instead
  * of replaying has quietly stopped testing the CRDT, and this exists so the
  * cheaper path can be verified against it.
  *
@@ -206,7 +206,7 @@ export function snapshotToOperations(snapshot: DocumentSnapshot): Operation[] {
  * ---------------------------------------------------------------------------
  * This concatenates *every* element, including ones marked `deleted`. A snapshot built
  * with `retainTombstones` carries tombstones so later operations can resolve, and
- * their `value` is included here — so for a snapshot of "acd" that carries the
+ * their `value` is included here -- so for a snapshot of "acd" that carries the
  * tombstone for "b" this returns "abcd".
  *
  * That is correct for its purpose, which is what the elements concatenate to. It is a

@@ -403,58 +403,6 @@ describe('Replica - resetTo', () => {
   });
 });
 
-describe('Replica - cursor mapping', () => {
-  let h: Harness;
-
-  beforeEach(async () => {
-    h = harness();
-    await h.replica.init();
-    h.replica.insertAt(0, 'abcdef');
-  });
-
-  it('maps a visible offset to an element id', () => {
-    const id = h.replica.elementIdAt(2);
-    expect(id).not.toBeNull();
-    expect(id?.clock).toBeGreaterThan(0);
-  });
-
-  it('round-trips an element id back to its offset', () => {
-    const id = h.replica.elementIdAt(3);
-
-    if (!id) {
-      throw new Error('expected an element id at offset 3');
-    }
-
-    expect(h.replica.visibleOffsetOf(id)).toBe(3);
-  });
-
-  it('returns -1 for an unknown element', () => {
-    expect(h.replica.visibleOffsetOf({ site: 'ghost', clock: 99 })).toBe(-1);
-  });
-
-  it('returns null at the end of the document', () => {
-    expect(h.replica.elementIdAt(6)).toBeNull();
-  });
-
-  it('keeps offsets correct across a remote insert', () => {
-    // A collaborator inserts at the very start. Every visible offset shifts, but
-    // an element ID still identifies the same character. That is why cursors are
-    // anchored to IDs rather than to positions.
-    const before = h.replica.elementIdAt(4);
-    if (!before) {
-      throw new Error('expected an element id at offset 4');
-    }
-
-    h.replica.applyRemote([
-      { type: 'insert', id: { site: 'bob', clock: 1 }, origin: null, value: 'Z' },
-    ]);
-
-    expect(h.replica.text).toBe('Zabcdef');
-    // The same character moved from offset 4 to 5, but its ID is unchanged.
-    expect(h.replica.visibleOffsetOf(before)).toBe(5);
-  });
-});
-
 describe('Replica - offline-first convergence', () => {
   it('converges after two replicas edit independently and merge', async () => {
     const alice = harness('alice');

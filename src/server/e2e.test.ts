@@ -1,13 +1,13 @@
 /**
  * End-to-end smoke test against a real HTTP server and a real database.
  *
- * ── Why raw bytes rather than fetch ──────────────────────────────────────
+ * -- Why raw bytes rather than fetch --------------------------------------
  * This file exists because a genuine encoding bug slipped past both the unit
  * tests and manual `Invoke-RestMethod` checks.
  *
  * Node's `fetch` decodes responses as UTF-8 per spec. PowerShell's
  * `Invoke-RestMethod` guesses the encoding, and when the `Content-Type` header
- * lacked `charset=utf-8` it decoded UTF-8 bytes as Latin-1 — so multi-byte text
+ * lacked `charset=utf-8` it decoded UTF-8 bytes as Latin-1 -- so multi-byte text
  * arrived as mojibake and looked like a database problem. It was a test-harness
  * problem.
  *
@@ -16,7 +16,7 @@
  * correct the whole time.
  *
  * So this test asserts the two things that actually matter:
- *  1. The response declares `charset=utf-8` — a client should never have to
+ *  1. The response declares `charset=utf-8` -- a client should never have to
  *     guess.
  *  2. The bytes on the wire are valid UTF-8 that decode to the exact input.
  *
@@ -56,7 +56,7 @@ function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
 }
 
 /** Text that breaks under almost every encoding mistake. */
-const UNICODE_PROBE = 'Line one\nLine two — 👋 مرحبا 你好';
+const UNICODE_PROBE = 'Line one\nLine two -- 👋 مرحبا 你好';
 
 beforeAll(async () => {
   db = await Database.open();
@@ -123,7 +123,7 @@ describe('unicode survives the full round trip', () => {
   it('preserves each distinct script independently', () => {
     // Isolates a failure to one script rather than reporting a single opaque
     // string mismatch, which is far easier to diagnose.
-    expect(UNICODE_PROBE).toContain('—'); // em dash, U+2014, three UTF-8 bytes
+    expect(UNICODE_PROBE).toContain('--'); // em dash, U+2014, three UTF-8 bytes
     expect(UNICODE_PROBE).toContain('👋'); // emoji, U+1F44B, four UTF-8 bytes
     expect(UNICODE_PROBE).toContain('مرحبا'); // RTL Arabic
     expect(UNICODE_PROBE).toContain('你好'); // CJK

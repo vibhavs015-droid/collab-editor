@@ -3,7 +3,7 @@
  *
  * Binding integration tests, against a real CodeMirror view.
  *
- * ── Why a real DOM ─────────────────────────────────────────────────────────
+ * -- Why a real DOM ---------------------------------------------------------
  * The dangerous failure mode of a CRDT/editor binding is not a crash. It is an
  * echo: the binding dispatches a change, the update listener fires, the binding
  * converts that change back into operations and broadcasts them, and the peer

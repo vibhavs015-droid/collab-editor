@@ -6,8 +6,8 @@
  * ---------------------------------------------------------------------------
  * `.env.example` advertised six variables that nothing read: `DATABASE_URL`,
  * `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` and `REDIS_URL`.
- * They were aspirational — ADR-0006 defers Supabase and ADR-0007 keeps the relay a
- * single process — and no code referenced any of them.
+ * They were aspirational -- ADR-0006 defers Supabase and ADR-0007 keeps the relay a
+ * single process -- and no code referenced any of them.
  *
  * That is worse than leaving them out. Someone who sets `DATABASE_URL` and sees the
  * server start believes persistence is networked, when it is PGlite on local disk. A
@@ -142,7 +142,7 @@ function readVariablesFromExample(): { active: Set<string>; optional: Set<string
  * `scripts/load/README.md`.
  *
  * Excluded here, and separately asserted below, because the mistake that actually
- * happened was using k6's `K6_*` namespace instead — which is not an exclusion question
+ * happened was using k6's `K6_*` namespace instead -- which is not an exclusion question
  * but a correctness one.
  */
 const isLoadHarnessVariable = (name: string): boolean => name.startsWith('LOAD_');

@@ -1,7 +1,7 @@
 /**
  * Runtime validation for CRDT operations.
  *
- * ── Why this file exists ──────────────────────────────────────────────────
+ * -- Why this file exists --------------------------------------------------
  * ADR-0004 established the split: the transport validates the message envelope,
  * the CRDT validates operations. But that left a gap. Operations arrive as
  * `JsonValue` because the wire format knows nothing about their structure, and
@@ -10,14 +10,14 @@
  * This is the missing second half of that split: real type guards that narrow
  * unknown data to `Operation`, so nothing downstream has to pretend.
  *
- * ── Why the guards take `unknown` ──────────────────────────────────────────
+ * -- Why the guards take `unknown` ------------------------------------------
  * Not `JsonValue`. `Operation` is an interface, so it has no index signature and
  * is not assignable to `JsonValue`; a predicate returning `Operation` could not
  * narrow a `JsonValue` parameter. Accepting `unknown` is also the honest model
  * for genuinely untrusted input: `JSON.parse` returns `any`, and a frame from
  * the network is not JSON-typed data in any meaningful sense.
  *
- * ── What it rejects ───────────────────────────────────────────────────────
+ * -- What it rejects -------------------------------------------------------
  * Everything a hostile or buggy peer could send:
  * - wrong `type` discriminator
  * - missing or malformed `site` / `clock` on an element id

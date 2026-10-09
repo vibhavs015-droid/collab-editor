@@ -224,7 +224,7 @@ export interface RelayOptions {
    *
    * This is what makes compaction safe. The floor is the minimum cursor across
    * connected clients, and it cannot be derived from anything the relay already
-   * knows — only the client knows what it has applied.
+   * knows -- only the client knows what it has applied.
    */
   readonly onCursor?: (documentId: string, site: string, seq: number) => void;
   /** Called when a client leaves, so a departed peer stops holding the floor. */
