@@ -133,30 +133,35 @@ function alive(pid: number): boolean {
 /**
  * How long a server gets to honour SIGTERM before it is killed outright.
  *
- * 120 seconds, chosen from a measurement rather than a guess. On the first CI run the server logged
- * `shutting down` at 16:50:14 and had still not exited at 16:50:59, when a second signal finally
- * made it fail. So a drain slower than 45 seconds is real here, and the likely cause is PGlite
- * closing a database that scenario (d) had just filled with 6,000 operations.
+ * 30 seconds, and it must stay well under Playwright's 90 second per-test timeout. Getting that
+ * wrong is not hypothetical: an earlier version of this file used 120 seconds, and because
+ * `stopServer()` correctly blocks until the process is gone, a slow shutdown ate the whole test
+ * budget and the scenario failed at 90 seconds on an unrelated `locator.click`. One test's teardown
+ * must never be able to starve the test it is tearing down.
+ *
+ * 30s is generous for what shutdown now does: the WebSocket drain is bounded at 5s by
+ * `drainRelaySocketServer`, so the remaining work is `db.close()` on PGlite.
  *
  * ---------------------------------------------------------------------------
- * A FINDING THIS EXPOSED, WHICH MATTERS MORE THAN THE TEST BUG
+ * WHAT THIS NUMBER WAS, AND WHY IT CHANGED
+ * ---------------------------------------------------------------------------
+ * It was 120s, set from the only measurement available: the server logged `shutting down` at
+ * 16:50:14 and was still alive at 16:50:59. That drain was slow because `wss.close()` was waiting
+ * for a WebSocket close handshake a browser never completed - since found, bounded and tested in
+ * src/server/socketServer.test.ts. The original slowness is fixed, so keeping a grace sized for the
+ * bug would be wrong twice over.
+ *
+ * ---------------------------------------------------------------------------
+ * THE FINDING THAT MATTERED MORE THAN ANY OF THIS
  * ---------------------------------------------------------------------------
  * On Windows `process.kill(pid, 'SIGTERM')` calls `TerminateProcess`: the process dies at once and
  * cannot run its shutdown handler at all. So the graceful shutdown path in `src/server/index.ts`
- * has NEVER executed on a developer machine, including the one that wrote these tests. Verified
- * directly, by making `shutdown()` hang and confirming the sabotage never appeared in the log
- * because no handler ever ran.
- *
- * Linux is the only place that code has actually run, and the one time it did, it took longer than
- * 45 seconds. A container runtime gives a process 10 seconds by default before SIGKILL, and
- * systemd's default is 90. So on the evidence available: `docker stop` would kill this server
- * mid-drain, and `db.close()` would never complete.
- *
- * That is a real deployment risk and it is NOT fixed here - it has been observed once in a log,
- * not reproduced, and fixing shutdown ordering is a larger change than this test fix should be.
- * It is recorded so it is not lost, and it belongs with the deploy work.
+ * has NEVER executed on a developer machine, including the one that wrote these tests. Verified by
+ * making `shutdown()` hang and confirming the sabotage never appeared in a log, because no handler
+ * ran. Linux is the only place that code has ever run, which is why a defect in it survived every
+ * local run of a suite that was otherwise thorough.
  */
-const SHUTDOWN_GRACE_MS = 120_000;
+const SHUTDOWN_GRACE_MS = 30_000;
 
 /**
  * Stop the server for real, and leave it stopped.

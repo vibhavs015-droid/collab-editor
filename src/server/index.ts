@@ -7,7 +7,7 @@
 
 import type { WebSocketServer } from 'ws';
 
-import { createRelaySocketServer } from './socketServer.js';
+import { createRelaySocketServer, drainRelaySocketServer } from './socketServer.js';
 import { ApiServer } from './api.js';
 import { AuthError, resolveAuthenticator } from './auth.js';
 import { Database } from './db.js';
@@ -106,14 +106,12 @@ async function shutdown(
     await server.close();
     relay.close();
 
-    for (const client of wss.clients) {
-      client.close(1001, 'Server shutting down');
-    }
-
-    await new Promise<void>((resolve) => {
-      wss.close(() => {
-        resolve();
-      });
+    // Bounded, because `wss.close()` waits for every peer to complete the WebSocket close
+    // handshake and a peer that never answers - a frozen tab, a lid-closed laptop - holds this
+    // open forever. Everything after it, including db.close(), is queued behind that wait.
+    // Measured in src/server/socketServer.test.ts.
+    await drainRelaySocketServer(wss, SHUTDOWN_DRAIN_MS, (count) => {
+      logger.warn('destroyed unresponsive sockets', { count });
     });
 
     await db.close();
@@ -124,6 +122,15 @@ async function shutdown(
     process.exit(1);
   }
 }
+
+/**
+ * How long a peer gets to complete the close handshake before its socket is destroyed.
+ *
+ * Short on purpose. A container runtime allows 10 seconds before SIGKILL, so a drain that can
+ * outlast that guarantees the database is never closed cleanly. Five seconds is enough for a real
+ * browser on a real network and far shorter than the budget it has to fit in.
+ */
+const SHUTDOWN_DRAIN_MS = 5_000;
 
 async function main(): Promise<void> {
   // Resolved before anything else opens, because it can throw. A misconfigured
