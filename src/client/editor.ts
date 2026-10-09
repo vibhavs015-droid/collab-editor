@@ -107,6 +107,23 @@ export function createEditor(options: EditorOptions): EditorHandle {
     rectangularSelection(),
     EditorView.lineWrapping,
     placeholder('Start typing…'),
+
+    /*
+     * An accessible name for the editable region.
+     *
+     * CodeMirror marks its contenteditable `role="textbox"` and nothing else, so a screen reader
+     * announces an unnamed text field - the one field on the page. Found by axe
+     * (`aria-input-field-name`, serious) rather than guessed at: the accessible name is missing
+     * because nothing ever set one, not because it was set badly.
+     *
+     * `contentAttributes` rather than `editableAttributes`, because the name belongs to the
+     * element that IS the textbox. Overridable by `extraExtensions`, which is appended last, so a
+     * caller that knows better can replace this rather than having to fight it.
+     */
+    EditorView.contentAttributes.of({
+      'aria-label': 'Document text',
+    }),
+
     EditorState.tabSize.of(2),
     // Ctrl+Z / Ctrl+Shift+Z, routed to the CRDT. See the note at the top of this
     // file for why CodeMirror's own history is not enabled.

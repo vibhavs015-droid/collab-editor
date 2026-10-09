@@ -309,17 +309,22 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   });
 }
 
-/** Called from a spec's afterAll, so the server does not outlive the run. */
+/**
+ * Called from a spec's afterAll, so the server does not outlive the run.
+ *
+ * It stops the server and leaves the DATA DIRECTORY RECORD ALONE. That record was written by
+ * {@link globalSetup}, which also has an `exit` handler that removes both it and the directory.
+ * Deleting it here broke every spec that sorts after the one calling this: `startServer()` has
+ * nowhere to point the new process, so it failed with "the e2e data directory was not recorded;
+ * globalSetup did not run" - which is both untrue and unactionable at the point it is read.
+ *
+ * Ownership is the whole fix here. Whoever creates shared state deletes it; a spec that borrows it
+ * stops borrowing it on the way out.
+ */
 export async function teardownServer(): Promise<void> {
+  await stopServer();
+
   if (existsSync(PID_FILE)) {
-    await stopServer();
     rmSync(PID_FILE, { force: true });
-  }
-
-  const file = join(tmpdir(), 'collab-e2e-datadir.txt');
-
-  if (existsSync(file)) {
-    rmSync(readFileSync(file, 'utf8').trim(), { recursive: true, force: true });
-    rmSync(file, { force: true });
   }
 }
