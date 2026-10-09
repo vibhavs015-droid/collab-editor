@@ -237,10 +237,32 @@ export class ApiServer {
     return bound;
   }
 
+  /**
+   * How long an HTTP connection is given to end before its socket is destroyed.
+   *
+   * Not a keep-alive problem: Node has closed idle keep-alive sockets on `server.close()` since
+   * v19, and that was measured rather than assumed. What does block is a connection that never sent
+   * a request at all - Chromium's speculative preconnect does exactly that - which is not idle by
+   * Node's definition, so it is waited on forever. See src/server/apiClose.test.ts.
+   *
+   * Five seconds sits well inside the 10 seconds Docker allows before SIGKILL, so the rest of the
+   * shutdown, including db.close(), still gets to run.
+   */
+  static readonly CLOSE_GRACE_MS = 5_000;
+
   async close(): Promise<void> {
     // Drain in-flight requests before closing, otherwise a test can finish with
     // a half-written response and a hanging socket.
-    await new Promise<void>((resolve, reject) => {
+    //
+    // The bound is the point. `server.close(callback)` does not fire until every connection has
+    // ended, and a peer that never ends one holds this open indefinitely - which blocks every
+    // step after it, including `db.close()`. Measured on CI: the server logged `shutting down`
+    // and was still alive 45 seconds later.
+    //
+    // Being patient first and forceful second, so a well-behaved client still gets a clean
+    // shutdown and only a socket that will not finish is destroyed. Any request genuinely in
+    // flight has already had 5 seconds; anything slower than that is not going to arrive.
+    const closed = new Promise<void>((resolve, reject) => {
       this.#server.close((error) => {
         if (error) {
           reject(error);
@@ -249,6 +271,25 @@ export class ApiServer {
         }
       });
     });
+
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const grace = new Promise<void>((resolve) => {
+      graceTimer = setTimeout(() => {
+        // Destroys idle keep-alive sockets and sockets that never sent a request. Already-closed
+        // connections are not in the set, so this cannot throw.
+        this.#server.closeAllConnections();
+        resolve();
+      }, ApiServer.CLOSE_GRACE_MS);
+
+      graceTimer.unref?.();
+    });
+
+    await Promise.race([closed, grace]);
+
+    if (graceTimer !== undefined) {
+      clearTimeout(graceTimer);
+    }
   }
 
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
