@@ -330,6 +330,37 @@ earlier version of that file listed all six; no code read them. A variable that 
 nothing is worse than an absent one, because setting it and seeing the server start
 convinces you it took effect.
 
+### The four limits, and why you should think before raising them
+
+These are the write quotas, added after the review that found writes were unbounded. They exist so
+that one client cannot exhaust the server's memory, so each has a default chosen to be generous for
+a human and finite for a program:
+
+| Variable                | Default | Bounds            | What it stops                                            |
+| ----------------------- | ------- | ----------------- | -------------------------------------------------------- |
+| `MAX_TITLE_LENGTH`      | 200     | characters        | A title long enough to be a document body                |
+| `OPS_BURST`             | 100000  | operations        | A single client sending an unbounded batch before refill |
+| `OPS_PER_SECOND`        | 5000    | operations/second | Sustained flooding                                       |
+| `MAX_DOCUMENT_ELEMENTS` | 1000000 | elements          | One document growing without limit                       |
+
+Three things to know before tuning them:
+
+- **`OPS_BURST` and `OPS_PER_SECOND` are per CONNECTION, not per subject.** A subject that
+  reconnects gets a fresh bucket. That is deliberate — it is the same property that lets a
+  reconnecting client recover — but it means the rate limit is not an identity-level limit and
+  cannot be used as one.
+- **Neither quota refuses permanently.** Both report a retryable error and keep the connection.
+  A permanent refusal would leave a user unable to delete the document that hit the cap, which is
+  strictly worse than letting them finish.
+- **The defaults have never been tuned against real traffic**, because there has been none. They
+  are reasoned, not measured. Watch `collab_ops_rate_limited_total` and
+  `collab_documents_too_large_total` in `/api/metrics` before changing them; a counter with no
+  increments renders as nothing at all, so its absence is the signal that nobody hit the limit.
+
+Raise `MAX_DOCUMENT_ELEMENTS` only with a reason. It is the one that bounds memory, and the
+server's measured idle footprint on the development machine — an empty database, one health
+request — was already **257 MB** resident before serving any document.
+
 ---
 
 ## TLS and HSTS belong to the proxy, not the app
