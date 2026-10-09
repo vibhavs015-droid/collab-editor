@@ -116,26 +116,152 @@ async function waitForHealth(up: boolean, timeoutMs: number): Promise<void> {
 }
 
 /**
+ * True while a process with this pid still exists.
+ *
+ * Signal 0 performs the permission and existence check without delivering anything, which is the
+ * only portable way to ask "is it alive" from Node.
+ */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How long a server gets to honour SIGTERM before it is killed outright.
+ *
+ * 120 seconds, chosen from a measurement rather than a guess. On the first CI run the server logged
+ * `shutting down` at 16:50:14 and had still not exited at 16:50:59, when a second signal finally
+ * made it fail. So a drain slower than 45 seconds is real here, and the likely cause is PGlite
+ * closing a database that scenario (d) had just filled with 6,000 operations.
+ *
+ * ---------------------------------------------------------------------------
+ * A FINDING THIS EXPOSED, WHICH MATTERS MORE THAN THE TEST BUG
+ * ---------------------------------------------------------------------------
+ * On Windows `process.kill(pid, 'SIGTERM')` calls `TerminateProcess`: the process dies at once and
+ * cannot run its shutdown handler at all. So the graceful shutdown path in `src/server/index.ts`
+ * has NEVER executed on a developer machine, including the one that wrote these tests. Verified
+ * directly, by making `shutdown()` hang and confirming the sabotage never appeared in the log
+ * because no handler ever ran.
+ *
+ * Linux is the only place that code has actually run, and the one time it did, it took longer than
+ * 45 seconds. A container runtime gives a process 10 seconds by default before SIGKILL, and
+ * systemd's default is 90. So on the evidence available: `docker stop` would kill this server
+ * mid-drain, and `db.close()` would never complete.
+ *
+ * That is a real deployment risk and it is NOT fixed here - it has been observed once in a log,
+ * not reproduced, and fixing shutdown ordering is a larger change than this test fix should be.
+ * It is recorded so it is not lost, and it belongs with the deploy work.
+ */
+const SHUTDOWN_GRACE_MS = 120_000;
+
+/**
  * Stop the server for real, and leave it stopped.
  *
  * The PID is published so a spec can restart it with {@link startServer}. Splitting stop from
  * start is deliberate: the assertions between them - that the peer did NOT receive the work -
  * are the whole point of the test, and a helper that restarted immediately would erase them.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS WAITS FOR THE PROCESS AND NOT FOR THE PORT
+ * ---------------------------------------------------------------------------
+ * This used to wait only for `/api/health` to stop answering, and that was wrong in a way that
+ * made a failure unreadable. A server that has closed its listening socket but is still running
+ * satisfies that check - `server.close()` stops accepting long before the process ends - and the
+ * relay, its WebSockets and its peer list are all still fully alive.
+ *
+ * So "the port stopped answering" was being reported as "the server is gone" while the server was
+ * still there, holding every connection. The outage scenarios then asserted against a server that
+ * had not gone anywhere: the browser stayed connected, the indicator kept reading `Synced` and
+ * the peer count kept reading 2 collaborators, and the failure said nothing about why.
+ *
+ * That is what happened on the first CI run, and it is the whole explanation for the failure.
+ * `stopServer()` returned as soon as the health endpoint stopped answering, which `server.close()`
+ * makes true the moment it stops accepting - long before the process ends. The scenarios then
+ * typed into a server that was still very much alive, which accepted and acknowledged the
+ * operations, so the indicator correctly read `Synced` and the peer count correctly read 2
+ * collaborators. The test's premise - that the server was gone - was false, and the failure said
+ * nothing about why.
+ *
+ * That also explains why it never reproduced locally: on a fast machine the process is genuinely
+ * gone before the test types, so the old check and the real condition happen to agree.
+ *
+ * If the server does not honour SIGTERM, that is a real defect in the server, so this escalates to
+ * SIGKILL to free the port for the remaining tests and then throws with the pid and the elapsed
+ * time. One loud, accurate failure beats one silent wrong success that poisons every test after it.
  */
 export async function stopServer(): Promise<void> {
   if (!existsSync(PID_FILE)) return;
 
   const pid = Number(readFileSync(PID_FILE, 'utf8').trim());
 
-  if (Number.isFinite(pid) && pid > 0) {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return;
+  }
+
+  const started = Date.now();
+
+  if (alive(pid)) {
     try {
       process.kill(pid, 'SIGTERM');
     } catch {
-      /* already gone */
+      /* raced with exit */
     }
   }
 
-  await waitForHealth(false, 20_000);
+  const deadline = Date.now() + SHUTDOWN_GRACE_MS;
+
+  while (alive(pid) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  if (alive(pid)) {
+    const elapsed = Date.now() - started;
+
+    // Free the port before reporting, so one bad shutdown cannot cascade into every later test
+    // as ERR_CONNECTION_REFUSED and bury the actual cause under three unrelated failures.
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+
+    const killBy = Date.now() + 5_000;
+
+    while (alive(pid) && Date.now() < killBy) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    throw new Error(
+      `the e2e server (pid ${String(pid)}) was still alive ${String(elapsed)} ms after SIGTERM ` +
+        `(grace ${String(SHUTDOWN_GRACE_MS)} ms). It was killed so the rest of the run could continue. ` +
+        `A server that ignores SIGTERM is a defect in shutdown(), not in this harness - check the ` +
+        `server log above for how far it got.`,
+    );
+  }
+
+  // Belt and braces: the process is gone, so the port must be free too. If it is not, something
+  // else owns it and every later test would fail with a connection error that names neither.
+  await waitForHealth(false, 10_000);
+}
+
+/**
+ * Make sure a server is running before a test that assumes one.
+ *
+ * The outage scenarios stop the server mid-test. If one of them fails before its
+ * `startServer()`, the server stays down and every later scenario fails at `page.goto` with
+ * ERR_CONNECTION_REFUSED - three failures, one cause, and the real one buried at the bottom.
+ * That is exactly what the first CI run produced.
+ */
+export async function ensureServerUp(): Promise<void> {
+  if (await portOpen()) {
+    return;
+  }
+
+  await startServer();
 }
 
 /** Start the server again, on the same data directory, and wait until it is healthy. */

@@ -893,6 +893,45 @@ likely thing to be wrong. Verify the harness before changing the code.
   environment can run it. T1 shipped a browser job that had never executed,
   and the reason it looked green is that the job did not exist yet.
 
+- **The outage scenarios were asserting against a server that was still
+  running.** `stopServer()` waited for `/api/health` to stop answering, which
+  `server.close()` makes true the moment it stops accepting - long before the
+  process ends. The scenarios then typed into a server that was still alive,
+  which accepted and acknowledged the operations, so the indicator correctly
+  read `Synced` and the peer count correctly read `2 collaborators`.
+
+  The test's premise was false, and the failure named neither the cause nor
+  the real one. `stopServer()` now waits for the **process** to exit, escalating
+  to SIGKILL and then throwing with the pid if it will not.
+
+  **This is why it never failed locally, and the reason is worth more than the
+  bug:** on Windows `process.kill(pid, 'SIGTERM')` calls `TerminateProcess`.
+  The process dies at once and _cannot run its shutdown handler at all_. So the
+  graceful shutdown path in `src/server/index.ts` has never executed on any
+  developer machine, and the old health check was accidentally accurate on
+  Windows precisely because shutdown never happens there.
+
+  Verified by making `shutdown()` hang and confirming the sabotage never
+  appeared in the log - no handler ran, because none could.
+
+  Linux is the only place that code has run. The one time it did, it took
+  **more than 45 seconds**: `shutting down` at 16:50:14, still alive at
+  16:50:59. Docker's default stop timeout is 10s and systemd's is 90s, so on
+  the evidence available `docker stop` would SIGKILL this server mid-drain and
+  `db.close()` would never complete.
+
+  **NOT FIXED, and deliberately so.** It has been observed once in a log, not
+  reproduced, and reworking shutdown ordering is much larger than a test fix. It
+  is written down here and in `e2e/global-setup.ts` so it survives, and it
+  belongs with the deploy work.
+
+  Five wrong theories came before the right one. Four candidate causes were
+  measured and falsified on Windows first - an open keep-alive connection, an
+  open WebSocket, an admitted client with 40 real operations written, a TCP
+  connection that never sends a request, and 6,000 operations in flight. Every
+  one exited in 20-25ms. The fourth of those was the one I was about to commit
+  as a server fix, which is the argument for reproducing before changing code.
+
 ### Test suite
 
 106 tests, ~2 minutes. The runtime is dominated by Postgres initialisation

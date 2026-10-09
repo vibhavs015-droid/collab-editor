@@ -24,7 +24,7 @@ import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures.js';
 
 import { appUrl, editor, editorText, newDocumentId, syncState, waitForSynced } from './helpers.js';
-import { startServer, stopServer, teardownServer } from './global-setup.js';
+import { ensureServerUp, startServer, stopServer, teardownServer } from './global-setup.js';
 
 /** Grant the co-owner identity access, so a second context is not a stranger. */
 async function grantAccess(page: Page, documentId: string, subject: string): Promise<void> {
@@ -148,6 +148,28 @@ test.describe('T1: a real outage', () => {
     expect(depth ?? '').toMatch(/\d+ local operations?/u);
 
     await context.close();
+  });
+
+  /**
+   * Each scenario starts with the server up, whatever the previous one did.
+   *
+   * These scenarios stop the server in the middle of a test. If one fails before it reaches its
+   * own `startServer()`, the server stays down and every later scenario fails at `page.goto`
+   * with ERR_CONNECTION_REFUSED - which says nothing about what went wrong and buries the one
+   * failure that mattered. The first CI run produced exactly that: one real failure reported as
+   * four.
+   *
+   * Cheap when the server is already up, which is the normal case, because it is a single health
+   * request rather than a spawn.
+   */
+  test.beforeEach(async () => {
+    await ensureServerUp();
+  });
+
+  test.afterEach(async () => {
+    // Symmetric belt and braces: if a scenario died with the server down, put it back before the
+    // next one, so a failure stays one failure instead of a cascade.
+    await ensureServerUp();
   });
 
   test.afterAll(async () => {
