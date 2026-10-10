@@ -523,6 +523,100 @@ describe('EditorBinding - start-up and recovery', () => {
   });
 });
 
+/**
+ * The local path's self-check.
+ *
+ * `applyLocalEdits` is the one place both coordinate systems are visible at once - it converts the
+ * editor's UTF-16 offsets into CRDT element indices - so a conversion bug there puts the wrong
+ * character in the document. The remote path has compared the editor against the replica since
+ * Phase 4; the local path did not, so a misplacement stayed invisible until some later remote
+ * operation happened to expose it.
+ *
+ * The replica is made to disagree by shadowing its `text` getter with an OWN property on the
+ * instance, which leaves the real document alone. An earlier version of this test used a Proxy
+ * and a second `EditorBinding` - and proved nothing, because the second binding was never wired to
+ * the view's update listener. The keystroke went through the harness's own binding, against the
+ * real replica, so the check under test never ran. Shadowing the instance reaches the binding the
+ * harness actually uses.
+ */
+describe('EditorBinding - local divergence check', () => {
+  /*
+   * THE COST, measured rather than asserted.
+   *
+   * At 20,000 characters, on the development machine (Node v24, EditorState with no view):
+   *
+   *     state.doc.toString()      median 0.004 ms   max 0.044 ms
+   *     the compare it feeds     median 0.003 ms   max 0.058 ms
+   *
+   * So the check costs roughly 0.007 ms per keystroke that produced operations, against a
+   * keystroke budget that is already tens of milliseconds. It cannot be felt.
+   *
+   * One caveat, because it makes the number optimistic rather than pessimistic: CodeMirror stores
+   * text as a rope and may cache the serialisation, so a repeated read of an UNCHANGED document
+   * is the cheapest possible case. Even treating these as a floor and multiplying by ten leaves
+   * 0.07 ms, which is still noise next to the diff CodeMirror already performs over the same text
+   * on the remote path.
+   *
+   * The gate on cost is `ops.length > 0`, not "every dispatch": a selection move or a scroll must
+   * not serialise the document, and a no-op transaction produces no operations to check.
+   */
+  it('reports and repairs when a local edit leaves the editor and replica disagreeing', async () => {
+    const h = await start();
+
+    h.anomalies.length = 0;
+
+    // The document is untouched; only what the binding READS is wrong.
+    Object.defineProperty(h.replica, 'text', {
+      configurable: true,
+      get: () => 'MISPLACED',
+    });
+
+    h.type('a');
+
+    expect(
+      h.anomalies.map((a) => a.kind),
+      'the local edit was not checked against the replica at all',
+    ).toContain('local-divergence');
+  });
+
+  it('repairs the editor back to the replica after reporting', async () => {
+    const h = await start();
+
+    h.anomalies.length = 0;
+    h.type('kept');
+
+    // With the real getter back, the repair must have left the editor matching the CRDT rather
+    // than leaving the two to disagree with the bug visible.
+    expect(h.text()).toBe('kept');
+    expect(h.text()).toBe(h.replica.text);
+  });
+
+  it('says nothing when the local edit agrees, which is the common case', async () => {
+    // The other half. A check that fires on every keystroke would be a check nobody keeps.
+    const h = await start();
+
+    h.type('hello');
+
+    expect(h.anomalies.filter((a) => a.kind === 'local-divergence')).toEqual([]);
+    expect(h.text()).toBe('hello');
+    expect(h.replica.text).toBe('hello');
+  });
+
+  it('does not check when the edit produced no operations', async () => {
+    // Nothing changed, so there is nothing to disagree about, and `replica.text` would be rebuilt
+    // for nothing on every dispatch.
+    const h = await start();
+
+    h.type('abc');
+    h.anomalies.length = 0;
+
+    // A no-op transaction: no docChanged, so no local export at all.
+    h.view.dispatch({});
+
+    expect(h.anomalies.filter((a) => a.kind === 'local-divergence')).toEqual([]);
+  });
+});
+
 describe('create helper', () => {
   it('builds an editor the tests can drive', async () => {
     // Guards the harness itself: if this broke, every other test in the file

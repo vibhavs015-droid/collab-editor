@@ -18,7 +18,10 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { WebSocket, WebSocketServer } from 'ws';
+import type { WebSocketServer } from 'ws';
+import { WebSocket } from 'ws';
+
+import { createRelaySocketServer } from './socketServer.js';
 
 import { RgaDocument, type Operation } from '../core/crdt/rga.js';
 import { Replica, type LoggedOperation, type OperationLog } from '../core/crdt/replica.js';
@@ -273,7 +276,7 @@ beforeAll(async () => {
     log: { readSince: (id, since, limit) => store.readSince(id, since, limit) },
   });
 
-  wss = new WebSocketServer({ noServer: true });
+  wss = createRelaySocketServer();
 
   api = new ApiServer({
     db,

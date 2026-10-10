@@ -44,7 +44,7 @@ import type { Replica } from '../../core/crdt/replica.js';
  * binding whose bug nobody will ever find.
  */
 export interface BindingAnomaly {
-  readonly kind: 'editor-drifted' | 'diff-failed' | 'unplaced-operations';
+  readonly kind: 'editor-drifted' | 'diff-failed' | 'unplaced-operations' | 'local-divergence';
   readonly detail: string;
 }
 
@@ -241,6 +241,35 @@ export class EditorBinding {
 
     if (ops.length > 0) {
       this.#onLocalOperations(ops);
+    }
+
+    // The self-check the remote path already has, and this one did not.
+    //
+    // `applyLocalEdits` is the one place both coordinate systems are visible at once - it
+    // converts the editor's UTF-16 offsets to element indices - so it is exactly where a
+    // conversion bug can put the wrong character in the document. The remote path has compared
+    // the editor against the replica since Phase 4; the local path did not, which meant a
+    // misplacement would be invisible until some LATER remote operation happened to expose it,
+    // long after the keystroke that caused it.
+    //
+    // Reported as its own kind rather than as `editor-drifted`, because the repair is the same
+    // but the CAUSE is not: drifted means the replica changed underneath the editor, and this
+    // means the editor and replica disagreed immediately after a local edit, which points at the
+    // offset conversion rather than at anything the network did.
+    //
+    // Cost is one string comparison per keystroke that produced operations. `doc.toString()` is
+    // the document; at 20,000 characters that is a single ~20 kB build and compare, which is
+    // noise next to the diff CodeMirror already does for the same text. Measured rather than
+    // assumed - see the note in binding.test.ts.
+    if (ops.length > 0 && this.#view.state.doc.toString() !== this.#replica.text) {
+      this.#report({
+        kind: 'local-divergence',
+        detail:
+          `the editor disagreed with the replica immediately after a local edit ` +
+          `(${String(edits.length)} edit(s), ${String(ops.length)} operation(s)); replaced the document`,
+      });
+
+      this.#reconcile();
     }
 
     return ops;
