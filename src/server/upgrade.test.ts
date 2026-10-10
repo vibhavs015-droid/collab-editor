@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { WebSocket, WebSocketServer } from 'ws';
+import type { WebSocketServer } from 'ws';
+import { WebSocket } from 'ws';
+
+import { createRelaySocketServer } from './socketServer.js';
 
 import { ApiServer } from './api.js';
 import { Database } from './db.js';
@@ -71,7 +74,7 @@ async function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> 
 beforeEach(async () => {
   db = await Database.open();
   relay = new Relay({ heartbeatMs: 0 });
-  wss = new WebSocketServer({ noServer: true });
+  wss = createRelaySocketServer();
 
   api = new ApiServer({
     db,

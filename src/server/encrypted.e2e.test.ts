@@ -25,7 +25,10 @@
 
 import { rm } from 'node:fs/promises';
 import { PGlite } from '@electric-sql/pglite';
-import { WebSocket, WebSocketServer } from 'ws';
+import type { WebSocketServer } from 'ws';
+import { WebSocket } from 'ws';
+
+import { createRelaySocketServer } from './socketServer.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { testDocumentKey, type DocumentKey } from '../core/crypto/documentKey.js';
@@ -115,7 +118,7 @@ beforeAll(async () => {
     log: { readSince: (id, since, limit) => store.readSince(id, since, limit) },
   });
 
-  wss = new WebSocketServer({ noServer: true });
+  wss = createRelaySocketServer();
 
   api = new ApiServer({
     db,

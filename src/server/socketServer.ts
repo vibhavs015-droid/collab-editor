@@ -21,6 +21,28 @@ import { MAX_FRAME_BYTES } from '../shared/protocol.js';
  * unauthenticated socket could make the process buffer and parse a frame two orders of
  * magnitude larger than any client sends. A message over the limit closes the connection
  * with code 1009 before it is buffered in full.
+ *
+ * ---------------------------------------------------------------------------
+ * WHICH TESTS USE THIS, AND WHICH CANNOT
+ * ---------------------------------------------------------------------------
+ * A test that drives `handleUpgrade` itself should build its server here, so it exercises the
+ * production options rather than a hand-copied subset of them. Five used to hand-write
+ * `{ noServer: true }` and so ran with no frame cap at all - which is the exact configuration this
+ * function exists to prevent, in the tests that would otherwise have noticed its removal.
+ *
+ * A test that wants its WebSocket server to LISTEN on its own port cannot use this, and should not
+ * try: `noServer: true` binds nothing, so `wss.address()` is null and every client connection is
+ * refused. Production does not do that either - the HTTP layer owns the socket and the upgrade is
+ * handed over - so such a test already exercises a shape production does not have. Those keep
+ * `new WebSocketServer({ port: 0 })` deliberately, and switching them would change what they test
+ * rather than how they test it:
+ *
+ *   - `relay.test.ts`, `relayAck.test.ts`, `relayAuth.test.ts`, `writeDurability.test.ts` -
+ *     the relay under test, with no HTTP layer involved
+ *   - `encryptedConvergence.test.ts`, `loadConvergence.test.ts`, `limits.e2e.test.ts` - the same,
+ *     with a large or encrypted payload
+ *   - `ping.test.ts`, `drainSocketServer.test.ts` - the peer must connect to a real port, and
+ *     `drainSocketServer.test.ts`'s peer is a raw socket rather than a `ws` client
  */
 export function createRelaySocketServer(): WebSocketServer {
   return new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
