@@ -1407,11 +1407,6 @@ to 6, which confirms the new tests bite. The first sabotage attempt replaced a w
 _content_ rather than deleting the write, so the existence guard correctly passed and
 proved nothing - the same mistake as with the load harness, and the second time.
 
-Verified by sabotage too: inverting `truncateBefore`'s key range took the failures from 4
-to 6, which confirms the new tests bite. The first sabotage attempt replaced a write's
-_content_ rather than deleting the write, so the existence guard correctly passed and
-proved nothing - the same mistake as with the load harness, and the second time.
-
 ## Phase 6 - End-to-end encryption
 
 The relay never needed to understand an operation to route one (ADR-0007). That is the
@@ -1913,3 +1908,55 @@ that drops packets rather than being refused would not be noticed promptly by ei
 outage tests cover a stopped server, which is a TCP RST, and not that case.
 
 ## Log
+
+### The external review's Appendix A, re-checked one item at a time
+
+The review closed with a list of ten things it did **not** verify. Findings F-01 to F-16 were
+all addressed, so the open risk was never in the findings - it was in that list. Two items
+moved, and one of them falsified the prediction attached to it.
+
+**Frame cap in production auth mode - now measured, not argued.** The reviewer recorded the
+4 MiB cap as verified in open mode and explicitly unverified by measurement in production
+mode, on the grounds that production parses a frame before authentication too. That is a
+code-reading argument, and the honest way to close it is to run it.
+
+Production build, `NODE_ENV=production`, `JWT_SECRET` set so auth is required. A WebSocket
+socket opened, **no `hello` and no token sent**, then one frame of 4,194,305 bytes:
+
+- close code **1009**
+- server RSS 333 MB before, 336 MB after: **+3 MB**, which is noise
+
+So the cap holds before authentication, in the mode where authentication is actually
+required. This closes the only Appendix A item that was cheap to close by measurement.
+
+### A hypothesis I had about presence and emoji, which was simply wrong
+
+The Appendix A list includes "presence/cursor behaviour with emoji", and I predicted this was
+where F-03's bug class still lived - an emoji is one CRDT element and two UTF-16 units, and
+cursors carry positions, so the same conversion error would be waiting there. I put it first
+in the plan on the strength of that reasoning.
+
+It is false, and the reason is more basic than the bug I was looking for: **remote cursors are
+never drawn.** The position travels client to relay to client and the only thing done with it
+is `Object.keys(cursors).length`, a collaborator _count_. There is no decoration, no marker,
+no conversion of a received offset into an editor position. There is nothing there to be wrong
+about an emoji, and the astral spec has no cursor coverage because no cursor is ever rendered.
+
+So the correct outcome is not a fix. It is that building cursor rendering would be a feature
+nobody asked for, and the reviewer's line is answered by saying the feature does not exist
+rather than by writing one. Recorded here so the next person does not re-raise it as a
+latent UTF-16 bug.
+
+Worth noting what the prediction got wrong: it reasoned about a _conversion_ without first
+checking that the value reaches a conversion. The plan treated a plausible story as a
+mechanism, and the mechanism was the thing that had not been checked.
+
+Still unverified from Appendix A, unchanged: the cryptography (not reviewable here, and the
+author's own instruction is not to claim otherwise), the Docker image build (T12, blocked on
+Docker being installed), and multi-author interleaving of chunked frames under load.
+
+### A duplicated paragraph in this file
+
+This section had the same four-line paragraph twice in a row, from a scripted edit. Removed.
+It is worth recording only because a running log that repeats itself is the one artefact a
+reader is least likely to check and most likely to trust.
