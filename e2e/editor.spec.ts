@@ -156,6 +156,49 @@ test.describe('T1: the editor in a real browser', () => {
     await peerContext.close();
   });
 
+  /*
+   * The measure, guarded.
+   *
+   * The editor's text column is capped at 72ch and centred. Nothing else in the application
+   * observes either property: no unit test can see CSS, and the accessibility scan does not
+   * care how wide a line is. So both facts could be lost to an innocuous edit - someone
+   * tidying the scroller's padding - and nothing would report it until someone read a long
+   * document on a wide screen and found it tiring without knowing why.
+   *
+   * Asserted against a real window, at a viewport this test sets itself, because the whole
+   * claim is a relationship between the text width and the window width.
+   */
+  test('the text column stays at a readable measure on a wide window', async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await page.goto(appUrl(newDocumentId()));
+    await waitForSynced(page);
+
+    const measure = await page.evaluate(() => {
+      const content = document.querySelector('.cm-content');
+      const scroller = document.querySelector('.cm-scroller');
+
+      if (!content || !scroller) {
+        return null;
+      }
+
+      return {
+        contentWidth: content.getBoundingClientRect().width,
+        windowWidth: document.documentElement.clientWidth,
+        paddingLeft: Number.parseFloat(getComputedStyle(scroller).paddingLeft),
+      };
+    });
+
+    expect(measure, 'the editor did not mount').not.toBeNull();
+
+    // Capped. Uncapped on a 1600px window the column is about 1600px wide - roughly 170
+    // characters at this font size, more than twice a comfortable reading measure.
+    expect(measure?.contentWidth ?? 0).toBeLessThan(900);
+
+    // And centred, which means the reserved padding is a real share of the window rather
+    // than the fixed 24px floor that a narrow window falls back to.
+    expect(measure?.paddingLeft ?? 0).toBeGreaterThan(100);
+  });
+
   test('d. a 6,000 character paste arrives intact (regression)', async ({ browser }) => {
     // The P0 the reviewer found: an outbox cap dropped everything past 5,000 characters, so a
     // peer received an empty document while the sender showed "Synced".

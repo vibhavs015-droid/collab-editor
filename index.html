@@ -3,10 +3,30 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Matches the light background. Without it, mobile browser chrome (the URL bar, the
+      overscroll background) renders in its own default rather than the document's, so a
+      dark-theme user gets a bright bar above their dark editor.
+
+      `media` on both values: this file has no class on `<html>` to key off, because the dark
+      scheme is driven entirely by `prefers-color-scheme`. The two meta values are how the
+      browser is told about a scheme it cannot infer from the DOM alone.
+    -->
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)" />
     <title>collab-editor</title>
     <link rel="stylesheet" href="/src/client/styles.css" />
   </head>
   <body>
+    <!--
+      The skip link.
+
+      The toolbar sits before the editor in the DOM and holds a focusable input plus four
+      buttons. A keyboard user therefore tabs through six controls before reaching the only
+      thing they came to write in, on every single visit. The link is visually hidden until
+      focused, which is the one state in which being visible matters.
+    -->
+    <a class="skip-link" href="#editor-host">Skip to editor</a>
     <div class="app">
       <header class="toolbar">
         <div class="toolbar__left">
@@ -36,7 +56,25 @@
             <span id="sync-status-text" class="sync__text">Starting</span>
           </div>
 
-          <span id="peer-count" class="peers" title="Collaborators connected"></span>
+          <!--
+  Collaborator count.
+
+  `role="status"` with an explicit `aria-live` rather than relying on the `title` attribute it
+  used to carry. A `title` is a tooltip, not a label: it is not exposed as the element's
+  accessible name, and it is not announced at all when the text content changes underneath
+  it. Since this element's entire job is to change while someone is looking elsewhere, that is
+  the one moment it has to speak.
+
+  `aria-label` supplies the name, because the visible content is a bare number and "2" on its
+  own is not a meaningful announcement.
+-->
+          <span
+            id="peer-count"
+            class="peers"
+            role="status"
+            aria-live="polite"
+            aria-label="Collaborators connected"
+          ></span>
 
           <!--
             Encryption controls.
