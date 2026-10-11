@@ -452,11 +452,27 @@ Stated explicitly rather than left for a reviewer to discover.
   longer, will be declared dead and will reconnect. That trade is deliberate — anything shorter
   would punish one congested packet — but it is a real cost, and it has not been measured against a
   real slow link, only against withheld frames in tests.
-- **Expect roughly a quarter gigabyte of memory, and treat that as a floor.** PGlite is Postgres
-  compiled to WebAssembly and keeps its working set resident. Measured on the development machine
-  with an empty database after one health request: **257 MB** idle RSS. There is no streaming mode
-  and no eviction, so this is a starting point rather than an average — a large document replays
-  into memory, and nothing caps how many documents a client may hold open.
+- **Size the container at 1 GB, not 512 MB. Measured, and higher than this file previously said.**
+  PGlite is Postgres compiled to WebAssembly and keeps its working set resident; there is no
+  streaming mode and no eviction. Working set of the server process, production build, empty
+  database, measured three times on the development machine:
+
+  | State                                                                                                         | RSS            |
+  | ------------------------------------------------------------------------------------------------------------- | -------------- |
+  | Booted, empty database, no client                                                                             | **334-335 MB** |
+  | After one 20,000-character document: 20,000 operations written through the relay, then the document read back | **441-454 MB** |
+
+  So an idle server is already two thirds of a 512 MB container before anyone opens anything, and
+  one ordinary document puts it at the edge. **1 GB is the floor to deploy with, and this is a
+  floor rather than an average**: a document replays into memory in full, and nothing caps how
+  many documents one process may hold open.
+
+  This corrects an earlier mistake in this file, which said "roughly a quarter gigabyte, 257 MB
+  idle". That understated a fresh boot by about 30%: it was measured before the database had
+  finished initialising. The review that prompted the task list measured 475-551 MB and recommended
+  at least 1 GB. That recommendation was right, and dropping it in favour of a lower number of our
+  own was not.
+
 - **Replay is still quadratic in the length of the log.** `Replay on 20,000 operations is ~1.4 s,
   and the cost grows faster than linearly with the number of operations, because resolving an
   insert's anchor is still a linear scan. Element lookup no longer allocates a string per element
