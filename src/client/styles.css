@@ -80,6 +80,42 @@ body {
   border: 0;
 }
 
+/*
+ * The skip link.
+ *
+ * Off-screen until focused, then fully visible and placed top-left. It deliberately does NOT
+ * use the same clip technique as `.visually-hidden`: that hides the element permanently,
+ * including when it has focus, which is the one moment this link needs to be seen.
+ *
+ * `:focus` rather than `:focus-visible` on purpose. A skip link is only ever reached by
+ * keyboard - there is no pointer affordance to click - and `:focus-visible` would still show
+ * it, but `:focus` is the honest expression of "this exists for focus".
+ */
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 10;
+  padding: 10px 16px;
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-radius: var(--radius);
+  font-weight: 600;
+  text-decoration: none;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skip-link {
+    /* No slide. The reduced-motion contract is honoured by moving instantly. */
+    transition: none;
+  }
+}
+
 /* -- Toolbar -------------------------------------------------------------- */
 
 .toolbar {
@@ -91,6 +127,44 @@ body {
   border-bottom: 1px solid var(--border);
   background: var(--bg-subtle);
   flex: 0 0 auto;
+  /*
+   * Sticky, and separated from the document by a shadow rather than a heavier border.
+   *
+   * The toolbar holds the title, the sync indicator and four buttons. Without this it scrolls
+   * away and a long document leaves the user with no indication whether their work is saved -
+   * which is the single most important thing this UI reports.
+   *
+   * A hairline plus a very light shadow, rather than a thicker rule: on a full-bleed text
+   * surface anything heavier competes with the text, which is the content.
+   */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+}
+
+@media (prefers-color-scheme: dark) {
+  .toolbar {
+    /* A shadow this light is invisible on a near-black surface; a highlight does the work. */
+    box-shadow: inset 0 -1px 0 rgb(255 255 255 / 4%);
+  }
+}
+
+/*
+ * Touch behaviour, on everything the user can press.
+ *
+ * `touch-action: manipulation` removes the ~300ms delay before a tap is treated as a click.
+ * It does NOT disable pinch-zoom - that would need `user-scalable=no` on the viewport meta,
+ * which is an accessibility anti-pattern, and is deliberately absent here.
+ *
+ * `-webkit-tap-highlight-color` replaces the translucent blue square iOS and older Android
+ * paint over a tapped element. Left at its default it flashes over the toolbar buttons and
+ * fights the accent colour; set to transparent because every one of these already has a
+ * visible `:active` state, which is the feedback the flash was standing in for.
+ */
+.toolbar :is(button, input) {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .toolbar__left {
@@ -115,6 +189,14 @@ body {
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius);
+  /*
+   * A title is user input, so it can be any length, including a 400-character one. Without
+   * these the text runs under the buttons on the right and is unreadable rather than merely
+   * ugly - and `text-overflow` only works on an element that is actually allowed to overflow,
+   * which means the flex parent has to release it first.
+   */
+  min-width: 0;
+  text-overflow: ellipsis;
 }
 
 .title-input:hover {
@@ -295,8 +377,51 @@ body {
 .editor-host .cm-scroller {
   font-family: var(--font-mono);
   line-height: 1.7;
-  padding: 20px 24px;
+  /*
+   * THE MEASURE, WHICH IS THE WHOLE POINT OF A TEXT EDITOR
+   *
+   * Without this the text runs the full width of the window. On a 1920px display at 15px
+   * monospace that is roughly 200 characters per line, against a comfortable maximum of
+   * 60-80. Past about 90 the eye loses the next line on the return sweep, so every line of
+   * reading costs an extra saccade - and nobody notices it is costing them anything, they
+   * just find the app tiring.
+   *
+   * Done with PADDING rather than a `max-width` plus auto margins on `.cm-content`. The
+   * obvious version leaves the column 21px off-centre, because CodeMirror's line-number
+   * gutter is 20.8px wide and sits inside the box the auto margins were centring against -
+   * measured, not assumed. Centring by symmetric padding has no such term to get wrong, and
+   * it moves the gutter in with the text, where a gutter belongs, rather than leaving it
+   * stranded at the far edge of a wide screen.
+   *
+   * `max()` rather than a larger fixed padding, so a narrow window keeps its 24px gutter and
+   * can never produce a negative inset. `ch` rather than pixels, so the measure follows
+   * `--font-mono` if the font stack resolves differently on someone's machine.
+   *
+   * WHAT IS AND IS NOT CENTRED, measured rather than assumed: the gutter+text block is
+   * centred, so the TEXT sits one gutter width (21px at this font size) right of true centre.
+   * On a 1000px window that is 2%, and on a wide one under 1%. Centring the text alone would
+   * mean measuring the gutter at runtime and re-measuring on resize, because its width depends
+   * on the font - real layout coupling in JavaScript for a cosmetic gain that small, so it is
+   * not done and the trade is recorded here instead.
+   */
+  padding-block: 20px;
+  padding-inline: max(24px, calc((100% - 72ch) / 2));
+  /*
+   * Never rubber-band the editor.
+   *
+   * `overscroll-behavior: contain` stops a scroll that reaches the end of the document from
+   * chaining up to the page and triggering pull-to-refresh. In an editor that reads as the
+   * document being yanked away mid-sentence, and on a touch device it is easy to trigger by
+   * accident at the top of a long document. The page itself still rubber-bands, so this does
+   * not remove the gesture, only stop the editor from hijacking it.
+   */
+  overscroll-behavior: contain;
 }
+
+/*
+ * The constraint lives on `.cm-scroller` above, as padding, not here. A `max-width` on
+ * `.cm-content` was the first attempt and it did not centre correctly - see that comment.
+ */
 
 /*
  * CodeMirror removes its own focus ring, because it knows the caret is the focus indicator.
