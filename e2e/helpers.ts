@@ -162,36 +162,100 @@ export async function placeCaretAtOffset(page: Page, steps: number): Promise<voi
 }
 
 /**
+ * The server counters that explain WHY two pages failed to agree.
+ *
+ * A convergence failure says only that the peer has fewer characters than the sender. Every
+ * plausible cause lives on the server and is already counted: a frame refused for size, a
+ * connection dropped, a rate limit tripped, a document at its element cap, operations that
+ * arrived but could not be placed.
+ *
+ * These were chosen by reading the metric list rather than by guessing. The point is that the
+ * NEXT failure reports its own cause, because this scenario has failed intermittently for a
+ * long time with nothing but two lengths to go on - and a failure that cannot explain itself
+ * gets characterised again instead of diagnosed.
+ *
+ * Best effort by design: if the scrape fails, the caller still gets the original failure
+ * rather than a new one caused by the diagnostic.
+ */
+export async function serverCounters(page: Page): Promise<string> {
+  const wanted = [
+    'collab_operations_received_total',
+    'collab_operations_rejected_total',
+    'collab_operations_unplaced_total',
+    'collab_ops_rate_limited_total',
+    'collab_documents_too_large_total',
+    'ws_connections_opened_total',
+    'ws_connections_closed_total',
+    'ws_connections_rejected_total',
+    'ws_backpressure_drops_total',
+    'collab_log_length',
+  ];
+
+  try {
+    const body = await page.request.get('/api/metrics').then((r) => r.text());
+
+    const lines = body
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => wanted.some((name) => line.startsWith(name)));
+
+    return lines.length === 0 ? 'no matching counters in the scrape' : lines.join('\n');
+  } catch (error) {
+    return `scrape failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/**
  * Wait until both pages show exactly the same text, and return it.
  *
  * Convergence is the claim being tested, so this never returns a value the pages merely
  * happened to share for one poll - it keeps polling until they agree, and fails with the last
  * observed lengths if they never do.
+ *
+ * On failure it also reports the server's own counters. That does not change what passes or
+ * fails - the assertion is untouched - it only makes the failure say what went wrong instead
+ * of only what was observed.
  */
 export async function waitForBothToAgree(a: Page, b: Page): Promise<string> {
   let last = 'never polled';
-  await expect
-    .poll(
-      async () => {
-        const [left, right] = await Promise.all([editorText(a), editorText(b)]);
-        last = `${left.length} vs ${right.length}`;
-        return left === right ? left : `differing (${last})`;
-      },
-      // `message` must be a plain string, so it cannot report the latest lengths. The failure
-      // text below therefore carries them, which is where a reader looks anyway.
-      //
-      // 90 seconds, raised from 45. Measured on this machine: a 6,000-character paste takes
-      // about 24 seconds to arrive on a second client, at roughly 1,000 operations every three
-      // to four seconds. That is a real and pre-existing limit - replaying N operations is O(n^2)
-      // in this CRDT, which is what T5 is about - and 45 seconds left no margin at all on a
-      // loaded machine. Raising the timeout records the honest cost rather than hiding it.
-      //
-      // Before T4 this test could finish sooner, because the SENDER reported "Synced" as soon
-      // as it had written the frames. It was not actually faster; it was less honest, and the
-      // time it appeared to save was the time the peer was still spending.
-      { timeout: 90_000, message: `the two pages never converged; last lengths ${last}` },
-    )
-    .not.toMatch(/^differing/u);
+
+  try {
+    await expect
+      .poll(
+        async () => {
+          const [left, right] = await Promise.all([editorText(a), editorText(b)]);
+          last = `${left.length} vs ${right.length}`;
+          return left === right ? left : `differing (${last})`;
+        },
+        // `message` must be a plain string, so it cannot report the latest lengths. The failure
+        // text below therefore carries them, which is where a reader looks anyway.
+        //
+        // 90 seconds, raised from 45. Measured on this machine: a 6,000-character paste takes
+        // about 24 seconds to arrive on a second client, at roughly 1,000 operations every three
+        // to four seconds. That is a real and pre-existing limit - replaying N operations is O(n^2)
+        // in this CRDT, which is what T5 is about - and 45 seconds left no margin at all on a
+        // loaded machine. Raising the timeout records the honest cost rather than hiding it.
+        //
+        // Before T4 this test could finish sooner, because the SENDER reported "Synced" as soon
+        // as it had written the frames. It was not actually faster; it was less honest, and the
+        // time it appeared to save was the time the peer was still spending.
+        { timeout: 90_000, message: `the two pages never converged; last lengths ${last}` },
+      )
+      .not.toMatch(/^differing/u);
+  } catch (error) {
+    // The counters are fetched HERE rather than in the poll's `message`, which cannot be
+    // dynamic. Re-thrown rather than returned, so this stays a failure and not a value.
+    //
+    // The original error is attached as `cause` rather than only flattened into the message:
+    // it carries the stack, and a diagnostic that discards the thing it is diagnosing is the
+    // same class of mistake as a test that proves nothing.
+    throw new Error(
+      `the two pages never converged; last lengths ${last}\n` +
+        `server counters:\n${await serverCounters(a)}\n` +
+        `original: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`,
+      { cause: error },
+    );
+  }
 
   // Re-read rather than returning the poll's value: the poll's success value is the agreed
   // text, but reading it again keeps this honest if the assertion above is ever loosened.
