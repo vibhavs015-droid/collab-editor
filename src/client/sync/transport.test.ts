@@ -115,6 +115,8 @@ interface Harness {
   readonly sites: string[];
   readonly pending: { state: string; count: number }[];
   readonly baselines: Baseline[];
+  /** `queuedOperationCount` as the application sees it: sampled inside the callback. */
+  readonly queuedAtStateChange: number[];
 }
 
 function harness(
@@ -131,6 +133,16 @@ function harness(
   const sites: string[] = [];
   const pending: { state: string; count: number }[] = [];
   const baselines: Baseline[] = [];
+  /*
+   * `queuedOperationCount` sampled at the instant the connection state changed.
+   *
+   * The application reads exactly this, in its `onStateChange` handler, to decide what the
+   * sync indicator shows. Sampling it afterwards proves nothing about that: by the time
+   * `triggerClose()` returns, the close handler has already requeued whatever was in flight,
+   * so the count has repaired itself. The ordering bug this guards against is only visible
+   * DURING the callback.
+   */
+  const queuedAtStateChange: number[] = [];
 
   const handlers: TransportHandlers = {
     onOps: (received) => {
@@ -153,6 +165,7 @@ function harness(
     },
     onStateChange: (state) => {
       states.push(state);
+      queuedAtStateChange.push(transport.queuedOperationCount);
     },
   };
 
@@ -166,7 +179,17 @@ function harness(
     ...(options.resolveToken === undefined ? {} : { resolveToken: options.resolveToken }),
   });
 
-  return { transport, states, ops, cursors, errors, sites, pending, baselines };
+  return {
+    transport,
+    states,
+    ops,
+    cursors,
+    errors,
+    sites,
+    pending,
+    baselines,
+    queuedAtStateChange,
+  };
 }
 
 describe('SyncTransport - snapshot baseline', () => {
@@ -1233,6 +1256,54 @@ describe('SyncTransport', () => {
       FakeSocket.last().deliver({ type: 'ack', batchId: String(batchId) });
 
       expect(h.pending.at(-1)).toEqual({ state: 'synced', count: 0 });
+    });
+
+    it('has the operations queued again by the time the close is reported', async () => {
+      /*
+       * The other half of the test above, and the part that is easy to break silently.
+       *
+       * There are two writers of the count the indicator shows. `#reportPending` sends the
+       * unacknowledged total, which is correct. Separately, the application reads
+       * `queuedOperationCount` - the OUTBOX ALONE - inside its `onStateChange` handler, and
+       * that is correct only because `#requeueInflight()` moves unacknowledged frames back
+       * into the outbox BEFORE `#setState('closed')` fires the callback.
+       *
+       * Swap those two lines and every assertion about the count AFTER the close still
+       * passes, because the handler goes on to requeue and repair it. The damage is over
+       * before anybody looks. So this samples the count inside the callback - the one moment
+       * the application actually reads it - and a wrong ordering shows up as a zero here.
+       *
+       * A first version of this test read the count after `triggerClose()` returned, passed
+       * against deliberately swapped code, and proved nothing. It was a test shaped like a
+       * guard with nothing inside it.
+       */
+      const h = harness({ baseRetryMs: 100 });
+      h.transport.connect();
+      FakeSocket.last().triggerOpen();
+      await Promise.resolve();
+      await admit(FakeSocket.last());
+
+      h.transport.send(sampleOps);
+
+      // Written, so the outbox is empty, and unacknowledged, so the indicator knows.
+      expect(h.transport.queuedOperationCount).toBe(0);
+      expect(h.pending.at(-1)).toEqual({ state: 'pending', count: 1 });
+
+      const before = h.queuedAtStateChange.length;
+
+      FakeSocket.last().triggerClose();
+
+      // Whatever the application observed on this close.
+      const onClose = h.queuedAtStateChange.slice(before);
+
+      expect(onClose.length).toBeGreaterThan(0);
+      // Not zero. An operation written but never acknowledged must never read as nothing
+      // outstanding, which is what would put "synced" on screen for edits the server has
+      // never seen.
+      expect(
+        onClose.every((count) => count > 0),
+        `observed ${String(onClose.join())} on close`,
+      ).toBe(true);
     });
 
     it('resends BOTH an unacknowledged batch and one that was never written', async () => {
