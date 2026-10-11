@@ -40,6 +40,7 @@ import {
   type DocumentKey,
 } from '../core/crypto/documentKey.js';
 import { currentShareLink, documentUrl } from './shareLink.js';
+import { startDownload } from './documentExport.js';
 import {
   snapshotToOperations,
   type DocumentSnapshot,
@@ -66,6 +67,7 @@ const els = {
   newDoc: requireElement<HTMLButtonElement>('new-doc'),
   newEncryptedDoc: requireElement<HTMLButtonElement>('new-encrypted-doc'),
   copyShareLink: requireElement<HTMLButtonElement>('copy-share-link'),
+  downloadMarkdown: requireElement<HTMLButtonElement>('download-markdown'),
   cryptoBadge: requireElement<HTMLSpanElement>('crypto-badge'),
   sync: requireElement<HTMLDivElement>('sync-status'),
   syncText: requireElement<HTMLSpanElement>('sync-status-text'),
@@ -872,6 +874,13 @@ function wireEvents(): void {
 
   els.copyShareLink.addEventListener('click', () => {
     void copyShareLink();
+  });
+
+  els.downloadMarkdown.addEventListener('click', () => {
+    // The replica, not the editor. The replica is the document; the editor is a view
+    // of it that may be mid-transaction. Reading the replica is also what makes this
+    // correct while offline, which is when a user is most likely to want a copy.
+    startDownload(document, session?.replica.text ?? '', els.title.value);
   });
 
   els.title.addEventListener('change', () => {
