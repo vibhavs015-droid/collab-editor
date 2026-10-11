@@ -358,8 +358,11 @@ Three things to know before tuning them:
   increments renders as nothing at all, so its absence is the signal that nobody hit the limit.
 
 Raise `MAX_DOCUMENT_ELEMENTS` only with a reason. It is the one that bounds memory, and the
-server's measured idle footprint on the development machine — an empty database, one health
-request — was already **257 MB** resident before serving any document.
+server's measured footprint on the development machine — production build, empty database, no
+client — is **334-335 MB** resident before serving any document, rising to **441-454 MB** once one
+20,000-character document has been written and read back. Three runs each; the numbers are stable
+to within a few MB. Budget **1 GB** per server process, which is why a 512 MB container is
+marginal rather than adequate.
 
 ---
 
