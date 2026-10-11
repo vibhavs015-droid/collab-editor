@@ -1,0 +1,37 @@
+/**
+ * Tooling TypeScript configuration.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A SEPARATE FILE
+ * ---------------------------------------------------------------------------
+ * Same reasoning, and nearly the same wording, as `tsconfig.e2e.json`: `tsconfig.json` sets
+ * `rootDir: "src"`, which constrains EMIT. Adding `scripts` there is harmless for a
+ * `--noEmit` typecheck and breaks the build the moment anyone compiles, because the output
+ * moves from `dist/server/...` to `dist/src/server/...` and the Dockerfile asserts
+ * `test -f /app/dist/server/index.js`.
+ *
+ * The reason this was worth adding at all: `scripts/bench-replay.ts` produces every number in
+ * `docs/benchmarks.md`. Nothing typechecked it, so a type error there - a renamed export, a
+ * changed signature - would have been discovered by a benchmark run producing quietly wrong
+ * output, or by not at all. A file that generates published measurements is held to the same
+ * standard as the code they describe.
+ *
+ * Only `.ts` is included. The rest of `scripts/` is `.mjs`, `.js` and `.py`, which this
+ * project runs through Node directly and does not typecheck today. Widening to them would
+ * mean `allowJs` plus `checkJs`, which is a much larger change than closing the gap that
+ * matters, so it is deliberately not attempted here.
+ *
+ * ASCII only. See the encoding note in src/core/crdt/rga.ts.
+ */
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The scripts live outside src, so rootDir has to be the directory that contains them.
+    // `noEmit` means nothing is ever written, so this cannot affect the build.
+    "rootDir": ".",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["scripts/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
