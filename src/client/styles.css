@@ -25,6 +25,41 @@
   --radius: 6px;
   --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, monospace;
+
+  /*
+   * SPACING AND TYPE SCALES
+   *
+   * The largest single cause of an interface that looks amateurish is not a bad colour or a
+   * bad typeface - it is picking values one at a time. 10px here, 6px there, 13px somewhere
+   * else: each is defensible in isolation and the result has no rhythm, because there is
+   * nothing to be inconsistent WITH.
+   *
+   * So both scales are declared once and referenced by role. Two adjacent steps differ by
+   * roughly 50%, which is what makes the choice obvious - a linear "multiples of 4" scale
+   * does not, because it cannot tell you whether 20px or 24px is right.
+   *
+   * Deliberately NOT a modular scale (4:5, golden ratio). Those produce fractional pixels
+   * that round differently across browsers and are too sparse for interface density. These
+   * are hand-picked, chosen for how they feel, which is the whole argument for them.
+   *
+   * `px`, never `em`. `em` is relative to the parent's font size, so a value inside a
+   * larger-font parent computes to something that is not on this scale at all, and the scale
+   * silently stops existing. (Measure is the one exception and it lives on `.cm-scroller`,
+   * in `ch`, where the point is to track the glyphs.)
+   */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 20px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -56,7 +91,7 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-ui);
-  font-size: 15px;
+  font-size: var(--text-base);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
@@ -96,7 +131,7 @@ body {
   top: 8px;
   left: 8px;
   z-index: 10;
-  padding: 10px 16px;
+  padding: var(--space-2) var(--space-4);
   color: var(--accent-fg);
   background: var(--accent);
   border-radius: var(--radius);
@@ -123,7 +158,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 10px 16px;
+  padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--border);
   background: var(--bg-subtle);
   flex: 0 0 auto;
@@ -182,7 +217,7 @@ body {
 .title-input {
   width: 100%;
   max-width: 420px;
-  padding: 6px 8px;
+  padding: var(--space-1) var(--space-2);
   font: inherit;
   font-weight: 600;
   color: var(--fg);
@@ -212,9 +247,9 @@ body {
 /* -- Buttons -------------------------------------------------------------- */
 
 .button {
-  padding: 6px 12px;
+  padding: var(--space-1) var(--space-3);
   font: inherit;
-  font-size: 14px;
+  font-size: var(--text-sm);
   color: var(--fg);
   background: var(--bg);
   border: 1px solid var(--border);
@@ -255,7 +290,7 @@ body {
 @media (pointer: coarse) {
   .button {
     min-height: 44px;
-    padding: 10px 14px;
+    padding: var(--space-2) var(--space-3);
   }
 }
 
@@ -275,8 +310,8 @@ body {
 .sync {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  font-size: 13px;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
   color: var(--fg-muted);
   white-space: nowrap;
 }
@@ -323,7 +358,7 @@ body {
 }
 
 .peers {
-  font-size: 13px;
+  font-size: var(--text-xs);
   color: var(--fg-muted);
   min-width: 1ch;
   text-align: right;
@@ -371,7 +406,7 @@ body {
 /* CodeMirror 6 owns the vertical space and handles its own scrolling. */
 .editor-host .cm-editor {
   height: 100%;
-  font-size: 15px;
+  font-size: var(--text-base);
 }
 
 .editor-host .cm-scroller {
@@ -404,7 +439,7 @@ body {
    * on the font - real layout coupling in JavaScript for a cosmetic gain that small, so it is
    * not done and the trade is recorded here instead.
    */
-  padding-block: 20px;
+  padding-block: var(--space-5);
   padding-inline: max(24px, calc((100% - 72ch) / 2));
   /*
    * Never rubber-band the editor.
@@ -502,7 +537,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: var(--space-2);
   padding: 32px;
   text-align: center;
   background: var(--bg);
@@ -515,7 +550,7 @@ body {
 
 .state__title {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-base);
   font-weight: 600;
 }
 
@@ -545,7 +580,7 @@ body {
   padding: 0.1rem 0.4rem;
   border: 1px solid var(--ok);
   border-radius: var(--radius);
-  font-size: 0.7rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.02em;
   color: var(--ok);
   white-space: nowrap;
@@ -553,7 +588,7 @@ body {
 
 .button--quiet {
   padding: 0.25rem 0.55rem;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   color: var(--fg-muted);
 }
 
@@ -583,7 +618,7 @@ body {
   margin: 0.5rem 0 0;
   max-width: 62ch;
   font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   line-height: 1.45;
   /* Muted rather than a new token: this is the same class of text as the message above
      it, one level less prominent. A dedicated token for one selector is a token nobody
@@ -595,8 +630,8 @@ body {
 
 .state__actions {
   display: flex;
-  gap: 10px;
-  margin-top: 6px;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
   flex-wrap: wrap;
   justify-content: center;
 }
@@ -626,10 +661,10 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 16px;
+  padding: var(--space-1) var(--space-4);
   border-top: 1px solid var(--border);
   background: var(--bg-subtle);
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--fg-muted);
   flex: 0 0 auto;
 }
