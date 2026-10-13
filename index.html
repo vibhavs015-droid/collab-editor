@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Collab-Editor — Luxury Minimalist Collaborative Workspace</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Toast Notification System -->
+  <div id="toast-container"></div>
+
+  <!-- Main App Shell -->
+  <div id="app-container">
+
+    <!-- Minimalist Global Top Bar -->
+    <header class="glass-header">
+      <div class="header-left">
+        <div class="brand-logo" onclick="switchView('landing')">
+          <div class="logo-gem"></div>
+          <span class="brand-title">Collab<span>Editor</span></span>
+          <span class="badge" id="e2e-status-badge">E2E VERIFIED</span>
+        </div>
+      </div>
+      
+      <nav class="nav-links">
+        <button class="nav-btn active" id="nav-landing" onclick="switchView('landing')">Overview</button>
+        <button class="nav-btn" id="nav-dashboard" onclick="switchView('dashboard')">Documents</button>
+        <button class="nav-btn" id="nav-editor" onclick="switchView('editor')">Workspace</button>
+        <button class="nav-btn" id="nav-docs" onclick="switchView('docs')">Protocol</button>
+      </nav>
+
+      <div class="header-right">
+        <!-- Interactive Network State Pill (Click to toggle offline/online) -->
+        <div class="status-indicator-pill" id="global-status" onclick="toggleNetworkSimulation()" title="Click to simulate Offline / Online Mesh">
+          <span class="dot dot-emerald" id="status-dot"></span>
+          <span class="status-text" id="status-text">Mesh Active (3 Peers)</span>
+        </div>
+
+        <!-- Interactive Feature Tester & Guide Button -->
+        <button class="btn btn-guide" onclick="openGuideDrawer()" title="Step-by-step interactive verification guide">
+          <span>🧪 Feature Tester</span>
+        </button>
+
+        <!-- Settings Modal Trigger -->
+        <button class="btn-icon" title="Cryptographic Vault &amp; Settings" onclick="openModal('settings-modal')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </button>
+
+        <button class="btn btn-primary" onclick="openModal('onboarding-modal')">
+          <span>Tour Guide</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- VIEW 1: LUXURY MINIMALIST LANDING -->
+    <main id="view-landing" class="app-view active">
+      <section class="hero-section">
+        <div class="hero-badge">
+          <span class="badge-ring"></span>
+          <span>RGA CRDT · CHACHA20-POLY1305 · WEBRTC</span>
+        </div>
+        <h1 class="hero-title">
+          Collaborative writing, <br>
+          built for absolute privacy.
+        </h1>
+        <p class="hero-subtitle">
+          An offline-first markdown workspace engineered on replicated growable arrays. Direct peer-to-peer synchronization at sub-12ms latency with authenticated client-side encryption. Zero tracking. Zero telemetry.
+        </p>
+        <div class="hero-actions">
+          <button class="btn btn-primary btn-lg" onclick="switchView('editor')">
+            <span>Open Workspace</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </button>
+          <button class="btn btn-glass btn-lg" onclick="switchView('docs')">
+            <span>Protocol Reference</span>
+          </button>
+        </div>
+
+        <!-- Telemetry Stats -->
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-value">&lt; 12ms</div>
+            <div class="metric-label">P2P Latency</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">100%</div>
+            <div class="metric-label">Client E2E</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">0 B</div>
+            <div class="metric-label">Plaintext Logs</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">IndexedDB</div>
+            <div class="metric-label">Local Storage</div>
+          </div>
+        </div>
+
+        <!-- Clean Code Preview Card -->
+        <div class="preview-container">
+          <div class="preview-header">
+            <div class="preview-file">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M13 2v7h7"/></svg>
+              <span>rfc-crdt-sequence-rga.md</span>
+              <span class="badge">SYNCED</span>
+            </div>
+            <div class="preview-peers">
+              <span class="peer-avatar">You</span>
+              <span class="peer-avatar">AL</span>
+              <span class="peer-avatar">BO</span>
+            </div>
+          </div>
+          <div class="preview-body">
+            <pre class="code-view"><code><span class="cm-keyword"># Sequence CRDT Protocol Specification</span>
+<span class="cm-comment">// Replicated Growable Array with Lamport Timestamps</span>
+<span class="cm-tag">struct</span> Atom {
+  id: <span class="cm-number">{ peer: "0x3A4F", seq: 142 }</span>,
+  parent: <span class="cm-number">{ peer: "0x1B89", seq: 141 }</span>,
+  char: <span class="cm-string">"E2E Encrypted Document Buffer"</span>,
+  deleted: <span class="cm-number">false</span>
+};
+
+<span class="cm-comment">// Deterministic convergence across nodes</span>
+<span class="cm-operator">=&gt;</span> <span class="cm-cyan">Alice inserted delta at index [48] (Verified via ChaCha20-Poly1305)</span></code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Minimalist Features Section -->
+      <section class="features-section">
+        <h2 class="section-title">Core Architecture</h2>
+        <div class="bento-grid">
+          <div class="bento-card bento-wide">
+            <div class="bento-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <h3>Zero-Trust End-to-End Encryption</h3>
+            <p>Every keystroke mutation is signed with Ed25519 and sealed via ChaCha20-Poly1305 directly in the browser. The relay server handles only opaque ciphertext blobs.</p>
+          </div>
+          <div class="bento-card">
+            <div class="bento-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 11-12.73 0M12 2v10"/></svg>
+            </div>
+            <h3>Offline-First Durability</h3>
+            <p>Work uninterrupted without internet connection. Operations persist to local IndexedDB and merge automatically upon reconnect.</p>
+          </div>
+          <div class="bento-card">
+            <div class="bento-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+            </div>
+            <h3>Direct WebRTC Mesh</h3>
+            <p>Peer data channels establish direct connections between clients, achieving sub-12ms collaborative typing latency.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- VIEW 2: DOCUMENT DASHBOARD -->
+    <main id="view-dashboard" class="app-view">
+      <div class="dashboard-layout">
+        <!-- Sidebar Navigation -->
+        <aside class="dashboard-sidebar">
+          <div class="sidebar-section">
+            <button class="btn btn-primary btn-block mb-2" onclick="createNewDoc()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+              <span>New Document</span>
+            </button>
+            <button class="btn btn-glass btn-block mb-3" onclick="createNewEncryptedDoc()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <span>Encrypted Room</span>
+            </button>
+          </div>
+
+          <div class="sidebar-nav">
+            <div class="nav-category">LIBRARY</div>
+            <div class="sidebar-item active" id="filter-all" onclick="filterDocs('all')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
+              <span>All Documents</span>
+              <span class="badge-count" id="count-all">3</span>
+            </div>
+            <div class="sidebar-item" id="filter-recent" onclick="filterDocs('recent')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span>Recent</span>
+            </div>
+            <div class="sidebar-item" id="filter-shared" onclick="filterDocs('shared')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+              <span>Shared Rooms</span>
+              <span class="badge-count" id="count-shared">2</span>
+            </div>
+          </div>
+
+          <div class="sidebar-storage-card">
+            <div class="storage-title">
+              <span>LOCAL VAULT</span>
+              <span class="badge">AIR-GAPPED</span>
+            </div>
+            <div class="storage-bar"><div class="storage-progress" id="storage-progress-bar" style="width: 18%;"></div></div>
+            <div class="storage-meta" id="storage-meta-text">18.4 MB of 10 GB safe quota used</div>
+          </div>
+        </aside>
+
+        <!-- Main Document Area -->
+        <section class="dashboard-content">
+          <div class="content-toolbar">
+            <div class="search-box">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="doc-search" placeholder="Search title, hash, or tag (Ctrl+K)..." oninput="handleSearch(this.value)">
+            </div>
+            <div class="filter-actions">
+              <button class="btn btn-glass btn-sm active" id="btn-filter-all" onclick="filterType('all')">All</button>
+              <button class="btn btn-glass btn-sm" id="btn-filter-enc" onclick="filterType('encrypted')">Encrypted</button>
+            </div>
+          </div>
+
+          <!-- Document Grid (Rendered dynamically) -->
+          <div class="docs-grid" id="docs-list"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- VIEW 3: EDITOR WORKSPACE & MARKDOWN TOOLBAR -->
+    <main id="view-editor" class="app-view">
+      <div class="editor-workspace-layout">
+        <!-- Editor Top Bar -->
+        <div class="editor-glass-bar">
+          <div class="editor-bar-left">
+            <button class="btn btn-glass btn-sm" onclick="switchView('dashboard')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+              <span>Back</span>
+            </button>
+            <input type="text" class="editor-doc-title-input" value="rfc-crdt-sequence-rga.md" id="active-doc-title" onchange="updateActiveDocTitle(this.value)">
+            <span class="badge badge-active" id="doc-crypto-badge">CHACHA20-POLY1305</span>
+          </div>
+
+          <div class="editor-bar-right">
+            <!-- Simulated Peer Collaboration Toggle Button -->
+            <button class="btn btn-glass btn-sm" id="btn-peer-simulate" onclick="togglePeerTypingSimulation()" title="Simulate remote collaborators typing live">
+              <span>👥 Simulate Peers</span>
+            </button>
+
+            <div class="peer-stack" id="peer-stack">
+              <div class="peer-circle peer-active" title="You (Host Node 0x3A4F)">You</div>
+              <div class="peer-circle" id="peer-al" title="Alice (0x1B89)">AL</div>
+              <div class="peer-circle" id="peer-bo" title="Bob (0x7F22)">BO</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openModal('share-modal')">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+              <span>Share Room</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Functional Markdown Formatting Toolbar -->
+        <div class="markdown-toolbar">
+          <div class="toolbar-group">
+            <button class="tb-btn" onclick="formatMarkdown('bold')" title="Bold (**text**)"><strong>B</strong></button>
+            <button class="tb-btn" onclick="formatMarkdown('italic')" title="Italic (*text*)"><em>I</em></button>
+            <button class="tb-btn" onclick="formatMarkdown('h1')" title="Heading 1 (# Heading)">H1</button>
+            <button class="tb-btn" onclick="formatMarkdown('h2')" title="Heading 2 (## Heading)">H2</button>
+          </div>
+          <div class="toolbar-divider"></div>
+          <div class="toolbar-group">
+            <button class="tb-btn" onclick="formatMarkdown('code')" title="Inline Code (`code`)">&lt;/&gt;</button>
+            <button class="tb-btn" onclick="formatMarkdown('codeblock')" title="Code Block (```)">CodeBlock</button>
+            <button class="tb-btn" onclick="formatMarkdown('quote')" title="Blockquote (&gt; quote)">&ldquo;</button>
+            <button class="tb-btn" onclick="formatMarkdown('list')" title="Bulleted List (- item)">• List</button>
+          </div>
+          <div class="toolbar-divider"></div>
+          <div class="toolbar-group">
+            <button class="tb-btn" onclick="execUndo()" title="Undo edit">↩ Undo</button>
+            <button class="tb-btn" onclick="execRedo()" title="Redo edit">↪ Redo</button>
+            <button class="tb-btn" onclick="downloadMarkdown()" title="Export Markdown file">⤓ Export</button>
+          </div>
+        </div>
+
+        <!-- Editor Surface with Line Numbers and Peers -->
+        <div class="editor-canvas-container">
+          <div class="editor-gutters">
+            <div class="line-numbers" id="line-numbers"></div>
+          </div>
+          <div class="editor-text-surface" id="editor-surface" contenteditable="true" spellcheck="false" oninput="handleEditorInput()" onkeyup="handleEditorCursor()" onclick="handleEditorCursor()">
+# RFC-9022: Replicated Growable Array (RGA) CRDT Specification
+
+## 1. Abstract
+This document formalizes the deterministic sequence CRDT engineered for Collab-Editor.
+All mutation atoms are causally linked using Lamport vector clocks: VC(Node_A) = [0:14, 0:9].
+
+## 2. Zero-Knowledge Cryptography
+Keystrokes are encrypted with ephemeral ChaCha20-Poly1305 symmetric keys.
+The decryption secret is never disclosed to WebSocket relay nodes.
+
+## 3. Offline & P2P Synchronization
+- Local state persists directly to IndexedDB.
+- Peer-to-peer data channels bypass central cloud queues.
+          </div>
+
+          <!-- Remote Peer Cursors -->
+          <div class="remote-cursor cursor-alice" id="cursor-alice" style="top: 130px; left: 340px; display: block;">
+            <div class="cursor-flag">Alice</div>
+          </div>
+          <div class="remote-cursor cursor-bob" id="cursor-bob" style="top: 240px; left: 420px; display: block;">
+            <div class="cursor-flag">Bob (Typing)</div>
+          </div>
+        </div>
+
+        <!-- Bottom Telemetry Bar -->
+        <div class="editor-status-bar">
+          <div class="status-left">
+            <span class="status-item"><span class="dot dot-emerald" id="editor-sync-dot"></span> <span id="editor-sync-text">100% Converged</span></span>
+            <span class="status-item" id="editor-peers-stat">3 Peers · 8ms</span>
+            <span class="status-item" id="editor-storage-stat">IndexedDB Local</span>
+          </div>
+          <div class="status-right">
+            <span class="status-item" id="stats-words">114 Words · 892 Chars</span>
+            <span class="status-item" id="stats-cursor">Ln 14, Col 28</span>
+            <span class="status-item">UTF-8</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- VIEW 4: PROTOCOL DOCS -->
+    <main id="view-docs" class="app-view">
+      <div class="docs-layout">
+        <aside class="docs-nav">
+          <div class="nav-category">GETTING STARTED</div>
+          <a href="#quickstart" class="docs-link active">Zero-Trust Quickstart</a>
+          <a href="#threat-model" class="docs-link">Cryptographic Threat Model</a>
+          <div class="nav-category">CRDT MATHEMATICS</div>
+          <a href="#rga-trees" class="docs-link">RGA Tree Sequencing</a>
+          <a href="#vector-clocks" class="docs-link">Vector Clocks &amp; Causality</a>
+          <div class="nav-category">SELF-HOSTING</div>
+          <a href="#docker" class="docs-link">Deploying Relay</a>
+        </aside>
+
+        <article class="docs-article">
+          <h1>Protocol Specification</h1>
+          <p class="lead">Deterministic state convergence without server-side decryption authority.</p>
+
+          <div class="callout callout-emerald">
+            <strong>Zero-Knowledge Principle:</strong> The relay server handles only encrypted op-log payloads. Document contents cannot be decrypted by host infrastructure.
+          </div>
+
+          <h2>1. Replicated Growable Array (RGA) Schema</h2>
+          <pre class="code-view"><code>// RGA Insertion Operation Schema
+{
+  "op": "INSERT",
+  "atomId": { "node": "0x3A4F", "lamport": 142 },
+  "parentId": { "node": "0x1B89", "lamport": 141 },
+  "ciphertext": "0x8fae...321c",
+  "signature": "0x4b9a...110e"
+}</code></pre>
+        </article>
+      </div>
+    </main>
+
+  </div>
+
+  <!-- INTERACTIVE FEATURE VERIFICATION GUIDE DRAWER -->
+  <div class="guide-drawer-overlay" id="guide-drawer-overlay" onclick="if(event.target === this) closeGuideDrawer()">
+    <div class="guide-drawer">
+      <div class="guide-header">
+        <h3>
+          <span>🧪 Feature Verification Tester</span>
+        </h3>
+        <button class="guide-close" onclick="closeGuideDrawer()">×</button>
+      </div>
+
+      <div class="guide-body">
+        <p class="guide-intro">
+          This interactive test suite allows you to verify that every capability of Collab-Editor is operating properly. Click <strong>Try This</strong> on each item to test the feature directly.
+        </p>
+
+        <div class="checklist-container">
+          <!-- Step 1: Real-time Editing -->
+          <div class="check-item" id="check-edit">
+            <div class="check-header">
+              <span class="check-title">1. Document Editing &amp; Metrics</span>
+              <span class="check-badge" id="badge-edit">PENDING</span>
+            </div>
+            <p class="check-desc">Type in the workspace. The word count, character count, and Lamport vector clock will dynamically update.</p>
+            <div class="check-action-row">
+              <button class="btn btn-glass btn-sm" onclick="triggerTestEdit()">Try This →</button>
+            </div>
+          </div>
+
+          <!-- Step 2: Markdown Toolbar -->
+          <div class="check-item" id="check-format">
+            <div class="check-header">
+              <span class="check-title">2. Markdown Formatting</span>
+              <span class="check-badge" id="badge-format">PENDING</span>
+            </div>
+            <p class="check-desc">Use the dedicated editor toolbar to format headings, bold, inline code, or bulleted lists.</p>
+            <div class="check-action-row">
+              <button class="btn btn-glass btn-sm" onclick="triggerTestFormat()">Try This →</button>
+            </div>
+          </div>
+
+          <!-- Step 3: Peer Collaboration -->
+          <div class="check-item" id="check-peers">
+            <div class="check-header">
+              <span class="check-title">3. Peer Cursor &amp; Delta Stream</span>
+              <span class="check-badge" id="badge-peers">PENDING</span>
+            </div>
+            <p class="check-desc">Simulate live concurrent edits from Alice and Bob. Watch their colored cursors move and text stream in.</p>
+            <div class="check-action-row">
+              <button class="btn btn-glass btn-sm" onclick="triggerTestPeers()">Try This →</button>
+            </div>
+          </div>
+
+          <!-- Step 4: Room Sharing & Key Exchange -->
+          <div class="check-item" id="check-share">
+            <div class="check-header">
+              <span class="check-title">4. E2E Key Exchange &amp; Share</span>
+              <span class="check-badge" id="badge-share">PENDING</span>
+            </div>
+            <p class="check-desc">Open the Share dialog, inspect the URL fragment decryption key, and test copy-to-clipboard.</p>
+            <div class="check-action-row">
+              <button class="btn btn-glass btn-sm" onclick="triggerTestShare()">Try This →</button>
+            </div>
+          </div>
+
+          <!-- Step 5: Offline/Online Mesh Toggle -->
+          <div class="check-item" id="check-offline">
+            <div class="check-header">
+              <span class="check-title">5. Offline-First Durability</span>
+              <span class="check-badge" id="badge-offline">PENDING</span>
+            </div>
+            <p class="check-desc">Simulate cutting your network. Edits queue locally into IndexedDB. Reconnecting syncs changes automatically.</p>
+            <div class="check-action-row">
+              <button class="btn btn-glass btn-sm" onclick="triggerTestOffline()">Try This →</button>
+            </div>
+          </div>
+
+          <!-- Step 6: Vault Preferences & Panic Burn -->
+          <div class="check-item" id="check-settings">
+            <div class="check-header">
+              <span class="check-title">6. Vault Settings &amp; Scaling</span>
+              <span class="check-badge" id="badge-settings">PENDING</span>
+            </div>
+            <p class="check-desc">Adjust the font scale slider in Settings and verify the editor canvas scales smoothly.</p>
+            <div class="check-action-row">
+              <button class="btn btn-glass btn-sm" onclick="triggerTestSettings()">Try This →</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="guide-footer">
+        <span class="progress-text" id="guide-progress-text">0 of 6 Verified</span>
+        <button class="btn btn-primary btn-sm" onclick="verifyAllFeatures()">Verify All</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 1: SHARE & E2E KEY EXCHANGE -->
+  <div class="modal-overlay" id="share-modal">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <h3>Share &amp; Key Agreement</h3>
+          <span class="badge">CHACHA20-POLY1305</span>
+        </div>
+        <button class="modal-close" onclick="closeModal('share-modal')">×</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="key-security-box mb-3">
+          <div class="sec-row">
+            <span class="sec-label">Protocol:</span>
+            <span class="sec-val">MLS-Tree v2 Ephemeral</span>
+          </div>
+          <div class="sec-row">
+            <span class="sec-label">Server Footprint:</span>
+            <span class="sec-val">0 Bytes Plaintext</span>
+          </div>
+          <div class="sec-row">
+            <span class="sec-label">Fingerprint:</span>
+            <span class="sec-val" id="key-fingerprint-text">0x9F4C...87BA</span>
+          </div>
+        </div>
+
+        <label class="input-label">Encrypted Mesh Link (Fragment Key):</label>
+        <div class="share-link-input-group mb-3">
+          <input type="text" readonly id="share-url-input" value="https://collab.mesh/#room=rga-9022&amp;k=a831f0-7ba4b2c1f40e18a89fc">
+          <button class="btn btn-primary" onclick="copyShareLink()">
+            <span id="copy-btn-text">Copy Link</span>
+          </button>
+        </div>
+        <p class="input-hint">The decryption key (<code>#k=...</code>) is parsed locally in the browser and never sent over the wire.</p>
+
+        <div class="modal-split-grid mb-3">
+          <div class="qr-box">
+            <div class="qr-graphic">
+              <svg width="100" height="100" viewBox="0 0 100 100" fill="none">
+                <rect width="100" height="100" fill="#181A13"/>
+                <rect x="10" y="10" width="24" height="24" fill="#D8CFBC"/>
+                <rect x="15" y="15" width="14" height="14" fill="#181A13"/>
+                <rect x="66" y="10" width="24" height="24" fill="#D8CFBC"/>
+                <rect x="71" y="15" width="14" height="14" fill="#181A13"/>
+                <rect x="10" y="66" width="24" height="24" fill="#D8CFBC"/>
+                <rect x="15" y="71" width="14" height="14" fill="#181A13"/>
+                <rect x="45" y="45" width="10" height="10" fill="#FFFBF4"/>
+                <rect x="60" y="55" width="8" height="8" fill="#D8CFBC"/>
+                <rect x="70" y="70" width="15" height="15" fill="#FFFBF4"/>
+              </svg>
+            </div>
+            <span class="qr-caption">Scan with mobile to join</span>
+          </div>
+
+          <div class="peers-list-box">
+            <div class="box-title">ACTIVE PEERS (3)</div>
+            <div class="peer-row">
+              <span class="peer-dot"></span>
+              <span class="peer-name">You (Host Node)</span>
+              <span class="peer-ping">4ms</span>
+            </div>
+            <div class="peer-row">
+              <span class="peer-dot"></span>
+              <span class="peer-name">Alice (0x1B89)</span>
+              <span class="peer-ping">9ms</span>
+            </div>
+            <div class="peer-row">
+              <span class="peer-dot"></span>
+              <span class="peer-name">Bob (0x7F22)</span>
+              <span class="peer-ping">14ms</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-danger-ghost" onclick="panicRevokeKey()">Panic Burn Key</button>
+        <button class="btn btn-primary" onclick="closeModal('share-modal')">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 2: SETTINGS & VAULT -->
+  <div class="modal-overlay" id="settings-modal">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <h3>Settings &amp; Vault</h3>
+          <span class="badge">LOCAL</span>
+        </div>
+        <button class="modal-close" onclick="closeModal('settings-modal')">×</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="settings-tabs">
+          <button class="tab-btn active" id="btn-tab-vault" onclick="switchSettingsTab('tab-vault')">Security &amp; Vault</button>
+          <button class="tab-btn" id="btn-tab-editor" onclick="switchSettingsTab('tab-editor')">Editor</button>
+          <button class="tab-btn" id="btn-tab-p2p" onclick="switchSettingsTab('tab-p2p')">Network</button>
+        </div>
+
+        <div id="tab-vault" class="tab-content active">
+          <div class="setting-item mb-3">
+            <div class="setting-title">Blake3 Merkle Root Digest</div>
+            <div class="setting-desc">Validates cryptographic integrity of sequence atoms.</div>
+            <div class="font-mono mt-1" id="merkle-root-display" style="color: var(--text-floral); font-size: 0.78rem;">0x7a05ac01fb923d8c1109be02a3bfc9090e7c14b29f8821aa00c3af0a</div>
+          </div>
+          <div class="setting-item mb-3">
+            <div class="setting-title">Hardware Ed25519 Signing Key</div>
+            <div class="setting-desc">Private key generated inside non-exportable browser storage.</div>
+            <div class="font-mono mt-1" style="color: var(--text-floral); font-size: 0.78rem;">SHA256: 9F4C:87BA:3301:089C:EE45:FA71:8892:AC38</div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-title">IndexedDB Storage</div>
+            <div class="storage-bar mt-2"><div class="storage-progress" style="width: 18%;"></div></div>
+            <div class="setting-desc mt-1">18.4 MB of 10.0 GB quota utilized.</div>
+          </div>
+        </div>
+
+        <div id="tab-editor" class="tab-content">
+          <div class="setting-row mb-3">
+            <div>
+              <div class="setting-title">Font Size (<span id="font-size-val">15px</span>)</div>
+              <div class="setting-desc">Adjust editor workspace typography scaling.</div>
+            </div>
+            <input type="range" min="12" max="22" value="15" class="slider" id="font-slider" oninput="updateFontSize(this.value)">
+          </div>
+          <div class="setting-row mb-3">
+            <div>
+              <div class="setting-title">Line Numbers</div>
+              <div class="setting-desc">Toggle gutter line numbers in workspace.</div>
+            </div>
+            <input type="checkbox" id="line-numbers-toggle" checked onchange="toggleLineNumbers(this.checked)">
+          </div>
+          <div class="setting-row">
+            <div>
+              <div class="setting-title">Vim Keybindings</div>
+              <div class="setting-desc">Enable modal navigation inside editor.</div>
+            </div>
+            <input type="checkbox" id="vim-toggle" onchange="toggleVimMode(this.checked)">
+          </div>
+        </div>
+
+        <div id="tab-p2p" class="tab-content">
+          <div class="setting-item">
+            <div class="setting-title">WebRTC ICE Topology</div>
+            <div class="setting-desc">Direct peer-to-peer data channels with STUN fallback.</div>
+            <div class="badge mt-2">stun.cloudflare.com:3478</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-glass" onclick="closeModal('settings-modal')">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 3: 3-STEP ONBOARDING -->
+  <div class="modal-overlay" id="onboarding-modal">
+    <div class="modal-card modal-md">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <h3 id="onboard-step-title">1. Zero-Knowledge Isolation</h3>
+        </div>
+        <button class="modal-close" onclick="closeModal('onboarding-modal')">×</button>
+      </div>
+
+      <div class="modal-body text-center">
+        <div class="onboard-step active" id="step-1">
+          <div class="onboard-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </div>
+          <h4>Keys Never Leave Your Device</h4>
+          <p>Every document delta is sealed with ChaCha20-Poly1305 before sending over the wire. The relay server is mathematically incapable of reading plaintext.</p>
+        </div>
+
+        <div class="onboard-step" id="step-2">
+          <div class="onboard-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18.36 6.64a9 9 0 11-12.73 0M12 2v10"/></svg>
+          </div>
+          <h4>Offline-First Synchronization</h4>
+          <p>Edits persist directly to IndexedDB. When reconnected, our sequence CRDT resolves concurrent mutations deterministically without merge conflicts.</p>
+        </div>
+
+        <div class="onboard-step" id="step-3">
+          <div class="onboard-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+          </div>
+          <h4>Direct Peer-to-Peer Mesh</h4>
+          <p>Share with a URL fragment containing the ephemeral key. Connections form directly through WebRTC for sub-12ms collaborative typing.</p>
+        </div>
+
+        <div class="step-dots mt-3">
+          <span class="step-dot active" id="dot-1"></span>
+          <span class="step-dot" id="dot-2"></span>
+          <span class="step-dot" id="dot-3"></span>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-glass" onclick="closeModal('onboarding-modal')">Skip</button>
+        <button class="btn btn-primary" id="onboard-next-btn" onclick="nextOnboardStep()">Continue →</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
